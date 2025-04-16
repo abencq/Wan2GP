@@ -48,7 +48,7 @@ def cache_video(tensor,
 
             # write video
             writer = imageio.get_writer(
-                cache_file, fps=fps, codec='libx264', quality=8)
+                cache_file, fps=fps, codec='libx264rgb', quality=10, mode='I', pixelformat='rgb24', output_params=['-crf', '0'])
             for frame in tensor.numpy():
                 writer.append_data(frame)
             writer.close()
