@@ -2677,7 +2677,7 @@ def generate_video(
             #     torch.save(sample, "output.pt")
             # else:
             #     sample =torch.load("output.pt")
-            exp = 0
+            multi = 1
             fps = 16
 
             if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0:                
@@ -2686,20 +2686,22 @@ def generate_video(
                 gen["progress_args"] = progress_args
 
             if temporal_upsampling == "rife2":
-                exp = 1
+                multi = 2
+            elif temporal_upsampling == "rife3":
+                multi = 3
             elif temporal_upsampling == "rife4":
-                exp = 2
+                multi = 4
             
-            if exp > 0: 
+            if multi > 1:
                 from rife.inference import temporal_interpolation
                 if sliding_window and repeat_no > 1:
                     sample = torch.cat([frames_already_processed[:, -2:-1], sample], dim=1)
-                    sample = temporal_interpolation( os.path.join("ckpts", "flownet.pkl"), sample, exp, device=processing_device)
+                    sample = temporal_interpolation( os.path.join("ckpts", "flownet.pkl"), sample, multi, device=processing_device)
                     sample = sample[:, 1:]
                 else:
-                    sample = temporal_interpolation( os.path.join("ckpts", "flownet.pkl"), sample, exp, device=processing_device)
+                    sample = temporal_interpolation( os.path.join("ckpts", "flownet.pkl"), sample, multi, device=processing_device)
 
-                fps = fps * 2**exp
+                fps = fps * multi
 
             if len(spatial_upsampling) > 0:
                 from wan.utils.utils import resize_lanczos # need multithreading or to do lanczos with cuda
@@ -3726,6 +3728,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             choices=[
                                 ("Disabled", ""),
                                 ("Rife x2 (32 frames/s)", "rife2"), 
+                                ("Rife x3 (48 frames/s)", "rife3"),
                                 ("Rife x4 (64 frames/s)", "rife4"), 
                             ],
                             value=ui_defaults.get("temporal_upsampling", ""),
