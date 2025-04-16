@@ -130,13 +130,25 @@ def i2v_generation(img2vid_prompt, img2vid_image, res, sd_steps,
                 n_prompt=n_prompt,
                 seed=seed,
                 offload_model=False)
-        else:
+        elif resolution == '480P':
             global wan_i2v_480P
             video = wan_i2v_480P.generate(
                 img2vid_prompt,
                 img2vid_image,
                 max_area=MAX_AREA_CONFIGS['480*832'],
                 shift=3.0, #shift_scale
+                sampling_steps=sd_steps,
+                guide_scale=guide_scale,
+                n_prompt=n_prompt,
+                seed=seed,
+                offload_model=False)
+        else:
+            global wan_i2v_720P
+            video = wan_i2v_720P.generate(
+                img2vid_prompt,
+                img2vid_image,
+                max_area=MAX_AREA_CONFIGS['544*1280'],
+                shift=shift_scale,
                 sampling_steps=sd_steps,
                 guide_scale=guide_scale,
                 n_prompt=n_prompt,

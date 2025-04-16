@@ -1043,7 +1043,7 @@ def generate_video(
             return
 
         resolution = str(width) + "*" + str(height)  
-        if  resolution not in ['720*1280', '1280*720', '480*832', '832*480']:
+        if  resolution not in ['720*1280', '1280*720', '1280*544', '480*832', '832*480']:
             gr.Info(f"Resolution {resolution} not supported by image 2 video")
             return
 
@@ -1392,7 +1392,9 @@ def generate_video(
                 if os.name == 'nt':
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:50]).strip()}.mp4"
                 else:
-                    file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:100]).strip()}.mp4"
+                    file_name = f"{time_flag}_seed{seed}_{width}x{height}_"
+                    file_name += "480p" if "480p" in transformer_filename_i2v else "720p"
+                    file_name += ".mp4"
                 video_path = os.path.join(save_path, file_name)        
                 cache_video(
                     tensor=sample[None],
@@ -1944,6 +1946,7 @@ def generate_video_tab(image2video=False):
                         choices=[
                             # 720p
                             ("720p", "1280x720"),
+                            ("720pc", "1280x544"),
                             ("480p", "832x480"),
                         ],
                         value=ui_defaults["resolution"],
