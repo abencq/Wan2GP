@@ -1823,7 +1823,8 @@ def load_models(model_filename):
         # if profile == 4:
         #     kwargs["partialPinning"] = True
     elif profile == 3:
-        kwargs["budgets"] = { "*" : "70%" }
+        #kwargs["budgets"] = { "*" : "70%" }
+        kwargs["budgets"] = { "*" : "90%" }
     offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = quantizeTransformer, loras = "transformer", coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , convertWeightsFloatTo = default_dtype, **kwargs)  
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
@@ -2665,14 +2666,6 @@ def generate_video(
                     sample = sample[: , reuse_frames:]
                     start_frame -= reuse_frames 
 
-            time_flag = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%Hh%Mm%Ss")
-            if os.name == 'nt':
-                file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:50]).strip()}.mp4"
-            else:
-                file_name = f"{time_flag}_seed{seed}_{width}x{height}_"
-                file_name += "480p" if "480p" in model_filename else "720p"
-                file_name += ".mp4"
-            video_path = os.path.join(save_path, file_name)
             # if False: # for testing
             #     torch.save(sample, "output.pt")
             # else:
@@ -2703,6 +2696,7 @@ def generate_video(
 
                 fps = fps * multi
 
+            scale = 1
             if len(spatial_upsampling) > 0:
                 from wan.utils.utils import resize_lanczos # need multithreading or to do lanczos with cuda
                 if spatial_upsampling == "lanczos1.5":
@@ -2731,6 +2725,14 @@ def generate_video(
                 else:
                     sample = torch.cat([frames_already_processed, sample], dim=1)
                 frames_already_processed = sample
+
+            #time_flag = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%Hh%Mm%Ss")
+            time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d%H%M%S")
+            if os.name == 'nt':
+                file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:50]).strip()}.mp4"
+            else:
+                file_name = f"{time_flag}_{get_model_type(model_filename)}_{seed}_{width*scale:.0f}x{height*scale:.0f}x{fps:.0f}.mp4"
+            video_path = os.path.join(save_path, file_name)
 
             cache_video(
                 tensor=sample[None],
