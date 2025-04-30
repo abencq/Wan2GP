@@ -1910,7 +1910,6 @@ def load_models(model_filename):
         # if profile == 4:
         #     kwargs["partialPinning"] = True
     elif profile == 3:
-        #kwargs["budgets"] = { "*" : "70%" }
         kwargs["budgets"] = { "*" : "90%" }
     offloadobj = offload.profile(pipe, profile_no= profile, compile = compile, quantizeTransformer = quantizeTransformer, loras = "transformer", coTenantsMap= {}, perc_reserved_mem_max = perc_reserved_mem_max , convertWeightsFloatTo = default_dtype, **kwargs)  
     if len(args.gpu) > 0:
@@ -2819,17 +2818,11 @@ def generate_video(
                     sample = sample[: , reuse_frames:]
                     guide_start_frame -= reuse_frames 
 
-                # if False: # for testing
-                #     torch.save(sample, "output.pt")
-                # else:
-                #     sample =torch.load("output.pt")
                 multi = 1
-                fps = 16
 
                 if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0:                
                     progress_args = [(num_inference_steps , num_inference_steps) , status + " - Upsampling"  ,  num_inference_steps]
-                    progress(*progress_args )   
-                    gen["progress_args"] = progress_args
+                    send_cmd("progress", progress_args)
 
                 if temporal_upsampling == "rife2":
                     multi = 2
@@ -2840,7 +2833,7 @@ def generate_video(
             
                 if multi > 1:
                     from rife.inference import temporal_interpolation
-                    if sliding_window and repeat_no > 1:
+                    if sliding_window and window_no > 1:
                         sample = torch.cat([frames_already_processed[:, -2:-1], sample], dim=1)
                         sample = temporal_interpolation( os.path.join("ckpts", "flownet.pkl"), sample, multi, device=processing_device)
                         sample = sample[:, 1:]
@@ -2879,7 +2872,6 @@ def generate_video(
                         sample = torch.cat([frames_already_processed, sample], dim=1)
                     frames_already_processed = sample
 
-                #time_flag = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%Hh%Mm%Ss")
                 time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d%H%M%S")
                 if os.name == 'nt':
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:50]).strip()}.mp4"
