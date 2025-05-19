@@ -3217,6 +3217,7 @@ def generate_video(
                     file_name = f"{time_flag}_{get_model_type(model_filename)}_{seed}_{width*scale:.0f}x{height*scale:.0f}x{fps:.0f}.mp4"
                 video_path = os.path.join(save_path, file_name)
 
+                output_fps = fps
                 if audio_guide == None:
                     cache_video( tensor=sample[None], save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1))
                 else:
