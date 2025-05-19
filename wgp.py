@@ -3991,6 +3991,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     resolution = gr.Dropdown(
                         choices=[
                             # 720p
+                            ("1280x544 (2.35:1, 720p)", "1280x544"),
                             ("1280x720 (16:9, 720p)", "1280x720"),
                             ("720x1280 (9:16, 720p)", "720x1280"), 
                             ("1024x1024 (4:3, 720p)", "1024x024"),
