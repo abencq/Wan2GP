@@ -20,11 +20,32 @@ WanGP supports the Wan (and derived models), Hunyuan Video and LTV Video models 
 **Follow DeepBeepMeep on Twitter/X to get the Latest News**: https://x.com/deepbeepmeep
 
 ## 🔥 Latest Updates
-### May 28 2025: WanGP v5.41
+### June 12 2025: WanGP v6.0
+👋 *Finetune models*: You find the 20 models supported by WanGP not sufficient ? Too impatient to wait for the next release to get the support for a newly released model ? Your prayers have been answered: if a new model is compatible with a model architecture supported by WanGP, you can add by yourself the support for this model in WanGP by just creating a finetune model definition. You can then store this model in the cloud (for instance in Huggingface) and the very light finetune definition file can be easily shared with other users. WanGP will download automatically the finetuned model for them.
+
+To celebrate the new finetunes support, here are a few finetune gifts (directly accessible from the model selection menu):
+- *Fast Hunyuan Video* : generate model t2v in only 6 steps
+- *Hunyuan Vido AccVideo* : generate model t2v in only 5 steps
+- *Wan FusioniX*: it is a combo of AccVideo / CausVid ans other models and can generate high quality Wan videos in only 8 steps
+
+One more thing...
+
+The new finetune system can be used to combine complementaty models : what happens when you combine  Fusionix Text2Video and Vace Control Net ?
+
+You get **Vace FusioniX**: the Ultimate Vace Model, Fast (10 steps, no need for guidance) and with a much better quality Video than the original slower model (despite being the best Control Net out there). Here goes one more finetune...
+
+Check the *Finetune Guide* to create finetune models definitions and share them on the WanGP discord server.
+
+### June 11 2025: WanGP v5.5
+👋 *Hunyuan Video Custom Audio*: it is similar to Hunyuan Video Avatar except there isn't any lower limit on the number of frames and you can use your reference images in a different context than the image itself\
+*Hunyuan Video Custom Edit*: Hunyuan Video Controlnet, use it to do inpainting and replace a person in a video while still keeping his poses. Similar to Vace but less restricted than the Wan models in terms of content...
+
+
+### June 6 2025: WanGP v5.41
 👋 Bonus release: Support for **AccVideo** Lora to speed up x2 Video generations in Wan models. Check the Loras documentation to get the usage instructions of AccVideo.\
 You will need to do a *pip install -r requirements.txt*
 
-### May 28 2025: WanGP v5.4
+### June 6 2025: WanGP v5.4
 👋 World Exclusive : **Hunyuan Video Avatar** Support ! You won't need 80 GB of VRAM nor 32 GB oF VRAM, just 10 GB of VRAM will be sufficient to generate up to 15s of high quality speech / song driven Video at a high speed with no quality degradation. Support for TeaCache included.\
 Here is a link to the original repo where you will find some very interesting documentation and examples. https://github.com/Tencent-Hunyuan/HunyuanVideo-Avatar. Kudos to the Hunyuan Video Avatar team for the best model of its kind.\
 Also many thanks to Reevoy24 for his repackaging / completing the documentation
@@ -91,6 +112,7 @@ For detailed installation instructions for different GPU generations:
 
 ### Advanced Features
 - **[Loras Guide](docs/LORAS.md)** - Using and managing Loras for customization
+- **[Finetunes](docs/FINETUNES.md)** - Add manually new models to WanGP
 - **[VACE ControlNet](docs/VACE.md)** - Advanced video control and manipulation
 - **[Command Line Reference](docs/CLI.md)** - All available command line options
 

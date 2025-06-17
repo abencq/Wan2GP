@@ -50,8 +50,10 @@ class WanT2V:
         checkpoint_dir,
         rank=0,
         model_filename = None,
+        base_model_type = None,
         text_encoder_filename = None,
         quantizeTransformer = False,
+        save_quantized = False,
         dtype = torch.bfloat16,
         VAE_dtype = torch.float32,
         mixed_precision_transformer = False
@@ -81,21 +83,25 @@ class WanT2V:
         logging.info(f"Creating WanModel from {model_filename[-1]}")
         from mmgp import offload
         # model_filename = "c:/temp/vace1.3/diffusion_pytorch_model.safetensors"
-        # model_filename = "vace14B_quanto_bf16_int8.safetensors"
-        # model_filename = "c:/temp/phantom/Phantom_Wan_14B-00001-of-00006.safetensors"
-        # config_filename= "c:/temp/phantom/config.json"
-        self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer, writable_tensors= False)#, forcedConfigPath= config_filename)
-        # offload.load_model_data(self.model, "e:/vace.safetensors")
+        # model_filename = "Vacefusionix_quanto_fp16_int8.safetensors"
+        # model_filename = "c:/temp/t2v/diffusion_pytorch_model-00001-of-00006.safetensors"
+        # config_filename= "c:/temp/t2v/t2v.json"
+        base_config_file = f"configs/{base_model_type}.json"
+        forcedConfigPath = base_config_file if len(model_filename) > 1 else None
+        self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
         # offload.load_model_data(self.model, "c:/temp/Phantom-Wan-1.3B.pth")
         # self.model.to(torch.bfloat16)
         # self.model.cpu()
         self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
         # dtype = torch.bfloat16
+        # offload.load_model_data(self.model, "ckpts/Wan14BT2VFusioniX_fp16.safetensors")
         offload.change_dtype(self.model, dtype, True)
-        # offload.save_model(self.model, "wan2.1_phantom_14B_mbf16.safetensors", config_file_path=config_filename)
-        # offload.save_model(self.model, "wan2.1_phantom_14B_quanto_fp16_int8.safetensors", do_quantize= True, config_file_path=config_filename)
+        # offload.save_model(self.model, "wan2.1_text2video_14B_mbf16.safetensors", config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.1_text2video_14B_quanto_mfp16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)
         self.model.eval().requires_grad_(False)
-
+        if save_quantized:            
+            from wan.utils.utils import save_quantized_model
+            save_quantized_model(self.model, model_filename[1 if base_model_type=="fantasy" else 0], dtype, base_config_file)
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
@@ -452,13 +458,24 @@ class WanT2V:
                 z_reactive = [  zz[0:16, 0:overlapped_latents_size + ref_images_count].clone() for zz in z]
 
 
-        if self.model.enable_teacache:
+        if self.model.enable_cache:
             x_count = 3 if phantom else 2
             self.model.previous_residual = [None] * x_count 
-            self.model.compute_teacache_threshold(self.model.teacache_start_step, timesteps, self.model.teacache_multiplier)
+            self.model.compute_teacache_threshold(self.model.cache_start_step, timesteps, self.model.teacache_multiplier)
         if callback != None:
             callback(-1, None, True)
-        prev = 50/1000
+
+        # seq_shape = (21, 45, 80)
+        # local_heads_num = 40 #12 for 1.3B
+
+        # self.model.blocks[0].self_attn.attn.initialize_static_mask(
+        #     seq_shape=seq_shape,
+        #     txt_len=0,
+        #     local_heads_num=local_heads_num,
+        #     device='cuda'
+        # )
+        # self.model.blocks[0].self_attn.attn.layer_counter.reset()
+
         for i, t in enumerate(tqdm(timesteps)):
 
             timestep = [t]
