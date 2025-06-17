@@ -1142,7 +1142,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
         target_dtype = PRECISION_TO_TYPE[precision]
         autocast_enabled = target_dtype != torch.float32 and not disable_autocast
-        vae_dtype = PRECISION_TO_TYPE[vae_precision]
+        vae_dtype = self.vae._model_dtype # PRECISION_TO_TYPE[vae_precision]
         vae_autocast_enabled = vae_dtype != torch.float32 and not disable_autocast
 
         # 7. Denoising loop
@@ -1262,6 +1262,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 guidance=guidance_expand,
                                 pipeline=self,
                                 x_id=j,
+                                step_no=i,
                                 callback = callback,
                             )
                             if self._interrupt:
@@ -1290,6 +1291,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                             freqs_sin=freqs_cis[1],  # [seqlen, head_dim]
                             guidance=guidance_expand,
                             pipeline=self,
+                            step_no=i,
                             callback = callback,
                         )
                         if self._interrupt:
@@ -1404,7 +1406,6 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         else:
             image = latents
 
-        image = (image / 2 + 0.5).clamp(0, 1)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
         image = image.cpu().float()
 
