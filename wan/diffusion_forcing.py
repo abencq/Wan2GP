@@ -29,6 +29,7 @@ class DTT2V:
         checkpoint_dir,
         rank=0,
         model_filename = None,
+        model_type = None,
         base_model_type = None,
         save_quantized = False,
         text_encoder_filename = None,
@@ -77,8 +78,8 @@ class DTT2V:
 
         self.model.eval().requires_grad_(False)
         if save_quantized:            
-            from wan.utils.utils import save_quantized_model
-            save_quantized_model(self.model, model_filename[0], dtype, base_config_file)
+            from wgp import save_quantized_model
+            save_quantized_model(self.model, model_type, model_filename[0], dtype, base_config_file)
 
         self.scheduler = FlowUniPCMultistepScheduler()
 
@@ -235,7 +236,7 @@ class DTT2V:
         if input_video != None:
             _ , _ , height, width  = input_video.shape
         elif image_start != None:
-            image_start = image_start[0]
+            image_start = image_start
             frame_width, frame_height  = image_start.size
             height, width = calculate_new_dimensions(height, width, frame_height, frame_width, fit_into_canvas)
             image_start = np.array(image_start.resize((width, height))).transpose(2, 0, 1)
