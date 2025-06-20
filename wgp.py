@@ -3701,7 +3701,8 @@ def generate_video(
                 if os.name == 'nt':
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:50]).strip()}.mp4"
                 else:
-                    file_name = f"{time_flag}_{get_model_type(model_filename)}_{seed}_{width*scale:.0f}x{height*scale:.0f}x{fps:.0f}.mp4"
+                    #file_name = f"{time_flag}_{get_model_type(model_filename)}_{seed}_{width*scale:.0f}x{height*scale:.0f}x{fps:.0f}.mp4"
+                    file_name = f"{time_flag}_{get_model_type(model_filename)}_{seed}_{num_inference_steps}_{width}x{height}x{video_length}@{fps:.0f}_{scale:.2f}.mp4"
                 video_path = os.path.join(save_path, file_name)
 
                 output_fps = fps
