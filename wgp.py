@@ -5420,7 +5420,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 elif hunyuan_t2v or hunyuan_i2v or hunyuan_video_custom:
                     video_length = gr.Slider(5, 337, value=ui_defaults.get("video_length", 97), step=4, label="Number of frames (24 = 1s)", interactive= True)
                 else:
-                    video_length = gr.Slider(5, 193, value=ui_defaults.get("video_length", 81), step=4, label="Number of frames (16 = 1s)", interactive= True)
+                    video_length = gr.Slider(5, 737, value=ui_defaults.get("video_length", 81), step=4, label="Number of frames (16 = 1s)", interactive= True)
             with gr.Row(visible = not ltxv_distilled) as inference_steps_row:                                       
                 num_inference_steps = gr.Slider(1, 100, value=ui_defaults.get("num_inference_steps",30), step=1, label="Number of Inference Steps")
 
