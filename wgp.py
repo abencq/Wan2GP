@@ -3401,7 +3401,7 @@ def perform_temporal_upsampling(sample, previous_last_frame, temporal_upsampling
     exp = 0
     if temporal_upsampling == "rife2":
         exp = 1
-    elif temporal_upsampling == "rife3"
+    elif temporal_upsampling == "rife3":
         exp = 2
     elif temporal_upsampling == "rife4":
         exp = 3
@@ -4324,7 +4324,7 @@ def generate_video(
                 if os.name == 'nt':
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(truncate_for_filesystem(save_prompt,50)).strip()}.mp4"
                 else:
-                    tc_str = f"tc{tea_cache_setting:.2f}" if tea_cache_setting else f""
+                    tc_str = f"{skip_steps_cache_type}{skip_steps_multiplier:.2f}" if skip_steps_cache_type else f""
                     file_name = f"{time_flag}_{get_model_type(model_filename)}_{seed}_{num_inference_steps}{tc_str}_{width}x{height}x{video_length}@{fps:.0f}_{scale:.2f}.mp4"
 
                 video_path = os.path.join(save_path, file_name)
