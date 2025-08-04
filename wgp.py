@@ -4831,7 +4831,7 @@ def generate_video(
                     new_video_path = []
                     for no, img in enumerate(sample):  
                         img = Image.fromarray((127.5 * (img + 1.0)).cpu().byte().numpy())
-                        img_path = os.path.splitext(video_path)[0] + ("" if no==0 else f"_{no}") + ".jpg" 
+                        img_path = os.path.splitext(video_path)[0] + ("" if no==0 else f"_{no}") + f".{extension}"
                         new_video_path.append(img_path)
                         img.save(img_path)
                     video_path= new_video_path
@@ -7038,10 +7038,10 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         with gr.Row(visible = not video_guide_outpainting_value.startswith("#")) as video_guide_outpainting_row:
                             video_guide_outpainting_value = video_guide_outpainting_value[1:] if video_guide_outpainting_value.startswith("#") else video_guide_outpainting_value
                             video_guide_outpainting_list = [0] * 4 if len(video_guide_outpainting_value) == 0 else [int(v) for v in video_guide_outpainting_value.split(" ")]
-                            video_guide_outpainting_top= gr.Slider(0, 100, value= video_guide_outpainting_list[0], step=5, label="Top %", show_reset_button= False)
-                            video_guide_outpainting_bottom = gr.Slider(0, 100, value= video_guide_outpainting_list[1], step=5, label="Bottom %", show_reset_button= False)
-                            video_guide_outpainting_left = gr.Slider(0, 100, value= video_guide_outpainting_list[2], step=5, label="Left %", show_reset_button= False)
-                            video_guide_outpainting_right = gr.Slider(0, 100, value= video_guide_outpainting_list[3], step=5, label="Right %", show_reset_button= False)
+                            video_guide_outpainting_top= gr.Slider(0, 200, value= video_guide_outpainting_list[0], step=1, label="Top %", show_reset_button= False)
+                            video_guide_outpainting_bottom = gr.Slider(0, 200, value= video_guide_outpainting_list[1], step=1, label="Bottom %", show_reset_button= False)
+                            video_guide_outpainting_left = gr.Slider(0, 200, value= video_guide_outpainting_list[2], step=1, label="Left %", show_reset_button= False)
+                            video_guide_outpainting_right = gr.Slider(0, 200, value= video_guide_outpainting_list[3], step=1, label="Right %", show_reset_button= False)
                 any_image_mask = image_outputs and vace
                 image_mask = gr.Image(label= "Image Mask Area (for Inpainting, white = Control Area, black = Unchanged)", type ="pil", visible= image_outputs and "V" in video_prompt_type_value and "A" in video_prompt_type_value and not "U" in video_prompt_type_value , value= ui_defaults.get("image_mask", None)) 
                 video_mask = gr.Video(label= "Video Mask Area (for Inpainting, white = Control Area, black = Unchanged)", visible= (not image_outputs) and "V" in video_prompt_type_value and "A" in video_prompt_type_value and not "U" in video_prompt_type_value , value= ui_defaults.get("video_mask", None)) 
