@@ -19,7 +19,51 @@ WanGP supports the Wan (and derived models), Hunyuan Video and LTV Video models 
 
 **Follow DeepBeepMeep on Twitter/X to get the Latest News**: https://x.com/deepbeepmeep
 
-## 🔥 Latest Updates
+## 🔥 Latest Updates : 
+### August 4 2025: WanGP v7.6 - Remuxed
+
+With this new version you won't have any excuse if there is no sound in your video.
+
+*Continue Video* now works with any video that has already some sound (hint: Multitalk ).
+
+Also, on top of MMaudio and the various sound driven models I have added the ability to use your own soundtrack.
+
+As a result you can apply a different sound source on each new video segment when doing a *Continue Video*. 
+
+For instance:
+- first video part: use Multitalk with two people speaking
+- second video part: you apply your own soundtrack which will gently follow the multitalk conversation
+- third video part: you use Vace effect and its corresponding control audio will be concatenated to the rest of the audio
+
+To multiply the combinations I have also implemented *Continue Video* with the various image2video models.
+
+Also:
+- End Frame support added for LTX Video models
+- Loras can now be targetted specifically at the High noise or Low noise models with Wan 2.2, check the Loras and Finetune guides
+- Flux Krea Dev support
+
+### July 30 2025: WanGP v7.5:  Just another release ... Wan 2.2 part 2
+Here is now Wan 2.2 image2video a very good model if you want to set Start and End frames. Two Wan 2.2 models delivered, only one to go ...
+
+Please note that although it is an image2video model it is structurally very close to Wan 2.2 text2video (same layers with only a different initial projection). Given that Wan 2.1 image2video loras don't work too well (half of their tensors are not supported), I have decided that this model will look for its loras in the text2video loras folder instead of the image2video folder.
+
+I have also optimized RAM management with Wan 2.2 so that loras and modules will be loaded only once in RAM and Reserved RAM, this saves up to 5 GB of RAM which can make a difference...
+
+And this time I really removed Vace Cocktail Light which gave a blurry vision.
+
+### July 29 2025: WanGP v7.4:  Just another release ... Wan 2.2 Preview
+Wan 2.2 is here.  The good news is that WanGP wont require a single byte of extra VRAM to run it and it will be as fast as Wan 2.1. The bad news is that you will need much more RAM if you want to leverage entirely this new model since it has twice has many parameters.
+
+So here is a preview version of Wan 2.2 that is without the 5B model and Wan 2.2 image to video for the moment.
+
+However as I felt bad to deliver only half of the wares, I gave you instead .....** Wan 2.2 Vace Experimental Cocktail** !
+
+Very good surprise indeed, the loras and Vace partially work with Wan 2.2. We will need to wait for the official Vace 2.2 release since some Vace features are broken like identity preservation
+
+Bonus zone: Flux multi images conditions has been added, or maybe not if I broke everything as I have been distracted by Wan...
+
+7.4 update: I forgot to update the version number. I also removed Vace Cocktail light which didnt work well.
+
 ### July 27 2025: WanGP v7.3 : Interlude
 While waiting for Wan 2.2, you will appreciate the model selection hierarchy which is very useful to collect even more models. You will also appreciate that WanGP remembers which model you used last in each model family.
 
