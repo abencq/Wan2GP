@@ -284,6 +284,8 @@ def _get_codec_params(codec_type, container):
             return {'codec': 'ffv1', 'pixelformat': 'rgb24'}
         else:  # mp4
             return {'codec': 'libx264', 'output_params': ['-crf', '0'], 'pixelformat': 'yuv444p'}
+    elif codec_type == 'libx264_mjpeg':
+        return {'codec': 'libx264', 'quality': 10, 'mode': 'I'}
     else:  # libx264
         return {'codec': 'libx264', 'pixelformat': 'yuv420p'}
 

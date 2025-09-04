@@ -8587,6 +8587,7 @@ def generate_configuration_tab(state, blocks, header, model_family, model_choice
                         ("x265 High Quality (CRF 8)", 'libx265_8'),
                         ("x264 High Quality (Level 10)", 'libx264_10'),
                         ("x264 Lossless", 'libx264_lossless'),
+                        ("x264 MJPEG", 'libx264_mjpeg'),
                     ],
                     value=server_config.get("video_output_codec", "libx264_8"),
                     label="Video Codec to use"
