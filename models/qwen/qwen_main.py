@@ -17,7 +17,7 @@ from .autoencoder_kl_qwenimage import AutoencoderKLQwenImage
 from diffusers import FlowMatchEulerDiscreteScheduler
 from .pipeline_qwenimage import QwenImagePipeline
 from PIL import Image
-from shared.utils.utils import calculate_new_dimensions
+from shared.utils.utils import calculate_new_dimensions, convert_tensor_to_image
 
 def stitch_images(img1, img2):
     # Resize img2 to match img1's height
@@ -44,7 +44,7 @@ class model_factory():
         save_quantized = False,
         dtype = torch.bfloat16,
         VAE_dtype = torch.float32,
-        mixed_precision_transformer = False
+        mixed_precision_transformer = False,
     ):
     
 
@@ -103,6 +103,8 @@ class model_factory():
         n_prompt = None,
         sampling_steps: int = 20,
         input_ref_images = None,
+        input_frames= None,
+        input_masks= None,
         width= 832,
         height=480,
         guide_scale: float = 4,
@@ -114,6 +116,9 @@ class model_factory():
         VAE_tile_size = None, 
         joint_pass = True,
         sample_solver='default',
+        denoising_strength = 1.,
+        model_mode = 0,
+        outpainting_dims = None,
         **bbargs
     ):
         # Generate with different aspect ratios
@@ -175,7 +180,10 @@ class model_factory():
         if n_prompt is None or len(n_prompt) == 0:
             n_prompt=  "text, watermark, copyright, blurry, low resolution"
 
-        if input_ref_images is not None:
+        image_mask = None if input_masks is None else convert_tensor_to_image(input_masks, mask_levels= True) 
+        if input_frames is not None:
+            input_ref_images = [convert_tensor_to_image(input_frames) ] 
+        elif input_ref_images is not None:
             # image stiching method
             stiched = input_ref_images[0]
             if "K" in video_prompt_type :
@@ -190,6 +198,7 @@ class model_factory():
             prompt=input_prompt,
             negative_prompt=n_prompt,
             image = input_ref_images,
+            image_mask = image_mask,
             width=width,
             height=height,
             num_inference_steps=sampling_steps,
@@ -199,8 +208,18 @@ class model_factory():
             pipeline=self,
             loras_slists=loras_slists,
             joint_pass = joint_pass,
-            generator=torch.Generator(device="cuda").manual_seed(seed)
+            denoising_strength=denoising_strength,
+            generator=torch.Generator(device="cuda").manual_seed(seed),
+            lora_inpaint = image_mask is not None and model_mode == 1,
+            outpainting_dims = outpainting_dims,
         )        
         if image is None: return None
         return image.transpose(0, 1)
+
+    def get_loras_transformer(self, get_model_recursive_prop, model_type, model_mode, **kwargs):
+        if model_mode == 0: return [], []
+        preloadURLs = get_model_recursive_prop(model_type,  "preload_URLs")
+        if len(preloadURLs) == 0: return [], []
+        return [os.path.join("ckpts", os.path.basename(preloadURLs[0]))] , [1]
+
 
