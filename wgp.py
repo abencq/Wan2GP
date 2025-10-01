@@ -7177,6 +7177,7 @@ def get_resolution_choices(current_resolution_choice, model_resolutions= None):
             ("1920x832 (21:9)", "1920x832"),
             ("832x1920 (9:21)", "832x1920"),
             # 720p
+            ("1600x680 (21:9)", "1600x680"),
             ("1024x1024 (1:1)", "1024x1024"),
             ("1280x720 (16:9)", "1280x720"),
             ("720x1280 (9:16)", "720x1280"), 
@@ -8223,6 +8224,8 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             ("4", "4"),
                             ("6", "6"),
                             ("8", "8"),
+                            ("10", "10"),
+                            ("12", "12"),
                             ("15", "15"), 
                             ("16", "16"), 
                             ("23", "23"), 
