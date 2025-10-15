@@ -7,7 +7,8 @@
 
 WanGP supports the Wan (and derived models), Hunyuan Video and LTV Video models with:
 - Low VRAM requirements (as low as 6 GB of VRAM is sufficient for certain models)
-- Support for old GPUs (RTX 10XX, 20xx, ...)
+- Support for old Nvidia GPUs (RTX 10XX, 20xx, ...)
+- Support for AMD GPUs Radeon RX 76XX, 77XX, 78XX & 79XX, instructions in the Installation Section Below.
 - Very Fast on the latest GPUs
 - Easy to use Full Web based interface
 - Auto download of the required model adapted to your specific architecture
@@ -185,6 +186,7 @@ If using Pinokio use Pinokio to update otherwise:
 Get in the directory where WanGP is installed and:
 ```bash
 git pull
+conda activate wan2gp
 pip install -r requirements.txt
 ```
 
@@ -217,8 +219,13 @@ This automated script will:
 
 ## 📦 Installation
 
+### Nvidia
 For detailed installation instructions for different GPU generations:
 - **[Installation Guide](docs/INSTALLATION.md)** - Complete setup instructions for RTX 10XX to RTX 50XX
+
+### AMD
+For detailed installation instructions for different GPU generations:
+- **[Installation Guide](docs/AMD-INSTALLATION.md)** - Complete setup instructions for Radeon RX 76XX, 77XX, 78XX & 79XX
 
 ## 🎯 Usage
 
