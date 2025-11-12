@@ -338,9 +338,9 @@ class WanSelfAttention(nn.Module):
         self.norm_k(k)
         q,k,v = q.view(b, s, n, d), k.view(b, s, n, d), v.view(b, s, n, d)
         del x
+
         qklist = [q,k]
         del q,k
-
         q,k = apply_rotary_emb(qklist, freqs, head_first=False)
 
         if standin_phase >= 1:
@@ -475,8 +475,10 @@ class WanI2VCrossAttention(WanSelfAttention):
             audio_x = self.processor(q, audio_proj, grid_sizes[0], audio_context_lens)
         k_img = self.k_img(context_img)
         self.norm_k_img(k_img)
-        k_img = k_img.view(b, -1, n, d)
-        v_img = self.v_img(context_img).view(b, -1, n, d)
+        k_img = k_img.view(1, -1, n, d)
+        v_img = self.v_img(context_img).view(1, -1, n, d)
+        if b > 1:
+            k_img, v_img = k_img.expand(b, -1, -1, -1), v_img.expand(b, -1, -1, -1)
         qkv_list = [q, k_img, v_img]
         del q, k_img, v_img
         img_x = pay_attention(qkv_list)
@@ -900,20 +902,39 @@ class WanModel(ModelMixin, ConfigMixin):
         if first == None:
             return sd
 
-        new_sd = {}
 
-        # for k,v in sd.items():
-        #     if k.endswith("modulation.diff"):
-        #         pass
-        #     else:
-        #         new_sd[ k] = v
-        # sd = new_sd
+        new_sd = {}
+        for k,v in sd.items():
+            if k.endswith("modulation.diff"):
+                pass
+            else:
+                new_sd[ k] = v
+        sd = new_sd
 
         # if first.startswith("blocks."):
         #     new_sd = {}
         #     for k,v in sd.items():
         #         new_sd["diffusion_model." + k] = v
         #     sd = new_sd
+        if ".default." in first:
+            new_sd = {}
+            for k,v in sd.items():
+                k = k.replace(".default.", ".")
+                new_sd[k] = v 
+            sd = new_sd
+
+        if first.startswith("vace_blocks."):
+            new_sd = {}
+            for k,v in sd.items():
+                if k.startswith("vace_blocks."):
+                    l = k.split(".")
+                    block_no = self.vace_layers[int(l[1])]
+                    l[0] = "blocks." + str(block_no)
+                    l[1] = "vace"
+                    k = ".".join(l)
+                    print(k)
+                new_sd[k] = v 
+            sd = new_sd
 
         if first.startswith("lora_unet_"):
             new_sd = {}
@@ -1182,8 +1203,8 @@ class WanModel(ModelMixin, ConfigMixin):
                 if hasattr(layer, "weight") and layer.weight.dtype != current_dtype:
                     if not isinstance(layer.weight.data, QTensor):
                         layer.weight.data = layer.weight.data.to(current_dtype)
-                    if hasattr(layer, "bias"):
-                        layer.bias.data = layer.bias.data.to(current_dtype)
+                        if hasattr(layer, "bias"):
+                            layer.bias.data = layer.bias.data.to(current_dtype)
 
         self._lock_dtype = dtype
 
@@ -1696,3 +1717,4 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
+

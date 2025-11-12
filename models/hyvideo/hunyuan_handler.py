@@ -43,6 +43,8 @@ class family_handler():
         extra_model_def["frames_minimum"] = 5
         extra_model_def["frames_steps"] = 4
         extra_model_def["sliding_window"] = False
+        extra_model_def["flow_shift"] = True
+
         if base_model_type in ["hunyuan", "hunyuan_i2v"]:
             extra_model_def["embedded_guidance"] = True
         else:
@@ -130,7 +132,7 @@ class family_handler():
         } 
 
     @staticmethod
-    def load_model(model_filename, model_type = None,  base_model_type = None, model_def = None, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized = False, submodel_no_list = None):
+    def load_model(model_filename, model_type = None,  base_model_type = None, model_def = None, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized = False, submodel_no_list = None, override_text_encoder = None):
         from .hunyuan import HunyuanVideoSampler
         from mmgp import offload
 
@@ -138,7 +140,7 @@ class family_handler():
             model_filepath = model_filename,
             model_type = model_type, 
             base_model_type = base_model_type,
-            text_encoder_filepath = get_hunyuan_text_encoder_filename(text_encoder_quantization),
+            text_encoder_filepath = get_hunyuan_text_encoder_filename(text_encoder_quantization) if override_text_encoder is None else override_text_encoder,
             dtype = dtype,
             quantizeTransformer = quantizeTransformer,
             VAE_dtype = VAE_dtype, 
