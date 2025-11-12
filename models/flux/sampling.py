@@ -1,8 +1,9 @@
 import math
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
@@ -12,8 +13,6 @@ from .modules.autoencoder import AutoEncoder
 from .modules.conditioner import HFEmbedder
 from .modules.image_embedders import CannyImageEncoder, DepthImageEncoder, ReduxImageEncoder
 from .util import PREFERED_KONTEXT_RESOLUTIONS
-from einops import rearrange, repeat
-from typing import Literal
 import torchvision.transforms.functional as TVF
 
 
@@ -24,16 +23,31 @@ def get_noise(
     device: torch.device,
     dtype: torch.dtype,
     seed: int,
+    *,
+    channels: int = 16,
+    patch_size: int = 2,
 ):
+    generator = torch.Generator(device=device).manual_seed(seed)
+    if channels == 16 and patch_size == 2:
+        return torch.randn(
+            num_samples,
+            channels,
+            # allow for packing
+            2 * math.ceil(height / 16),
+            2 * math.ceil(width / 16),
+            dtype=dtype,
+            device=device,
+            generator=generator,
+        )
+
     return torch.randn(
         num_samples,
-        16,
-        # allow for packing
-        2 * math.ceil(height / 16),
-        2 * math.ceil(width / 16),
+        channels,
+        height,
+        width,
         dtype=dtype,
         device=device,
-        generator=torch.Generator(device=device).manual_seed(seed),
+        generator=generator,
     )
 
 
@@ -59,16 +73,16 @@ def prepare_prompt(t5: HFEmbedder, clip: HFEmbedder, bs: int, prompt: str | list
     }
 
 
-def prepare_img( img: Tensor) -> dict[str, Tensor]:
+def prepare_img(img: Tensor, patch_size: int = 2) -> dict[str, Tensor]:
     bs, c, h, w = img.shape
 
-    img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+    img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size)
     if img.shape[0] == 1 and bs > 1:
         img = repeat(img, "1 ... -> bs ...", bs=bs)
 
-    img_ids = torch.zeros(h // 2, w // 2, 3)
-    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
-    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+    img_ids = torch.zeros(h // patch_size, w // patch_size, 3)
+    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // patch_size)[:, None]
+    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // patch_size)[None, :]
     img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
 
     return {
@@ -129,9 +143,22 @@ def prepare_redux(
         "vec": vec.to(img.device),
     }
 
+def resizeinput(img):
+    multiple_of = 16
+    image_height, image_width = img.height, img.width
+    aspect_ratio = image_width / image_height
+    _, image_width, image_height = min(
+        (abs(aspect_ratio - w / h), w, h) for w, h in PREFERED_KONTEXT_RESOLUTIONS
+    )
+    image_width = image_width // multiple_of * multiple_of
+    image_height = image_height // multiple_of * multiple_of
+    if (image_width, image_height) != img.size:
+        img = img.resize((image_width, image_height), Image.LANCZOS)
+    return img
+
 
 def prepare_kontext(
-    ae: AutoEncoder,
+    ae: AutoEncoder | None,
     img_cond_list: list,
     seed: int,
     device: torch.device,
@@ -139,6 +166,9 @@ def prepare_kontext(
     target_height: int | None = None,
     bs: int = 1,
     img_mask = None,
+    *,
+    patch_size: int = 2,
+    noise_channels: int = 16,
 ) -> tuple[dict[str, Tensor], int, int]:
     # load and encode the conditioning image
 
@@ -150,20 +180,19 @@ def prepare_kontext(
     height_offset = 0
     width_offset = 0
     for cond_no, img_cond in enumerate(img_cond_list): 
-        width, height = img_cond.size
-        aspect_ratio = width / height
         if res_match_output:
-            width, height = target_width, target_height
+            if img_cond.size != (target_width, target_height):
+                img_cond = img_cond.resize((target_width, target_height), Image.Resampling.LANCZOS)
         else:
-            # Kontext is trained on specific resolutions, using one of them is recommended
-            _, width, height = min((abs(aspect_ratio - w / h), w, h) for w, h in PREFERED_KONTEXT_RESOLUTIONS)
-        width = 2 * int(width / 16)
-        height = 2 * int(height / 16)
+            img_cond = resizeinput(img_cond)
+        width, height = img_cond.size
+        width, height = width // 8, height // 8
 
-        img_cond = img_cond.resize((8 * width, 8 * height), Image.Resampling.LANCZOS)
         img_cond = np.array(img_cond)
         img_cond = torch.from_numpy(img_cond).float() / 127.5 - 1.0
         img_cond = rearrange(img_cond, "h w c -> 1 c h w")
+        if ae is None:
+            raise ValueError("Image conditioning is not supported for this model.")
         with torch.no_grad():
             img_cond_latents = ae.encode(img_cond.to(device))
 
@@ -217,8 +246,10 @@ def prepare_kontext(
         device=device,
         dtype=torch.bfloat16,
         seed=seed,
+        channels=noise_channels,
+        patch_size=patch_size,
     )
-    return_dict.update(prepare_img(img))
+    return_dict.update(prepare_img(img, patch_size=patch_size))
 
     return return_dict, target_height, target_width
 
@@ -284,9 +315,18 @@ def denoise(
     img_msk_latents = None,
     img_msk_rebuilt = None,
     denoising_strength = 1,
+    preview_meta = None,
+    radiance_cache = None,
 ):
 
-    kwargs = {'pipeline': pipeline, 'callback': callback, "img_len" : img.shape[1], "siglip_embedding": siglip_embedding, "siglip_embedding_ids": siglip_embedding_ids}
+    kwargs = {
+        'pipeline': pipeline,
+        'callback': callback,
+        "img_len": img.shape[1],
+        "siglip_embedding": siglip_embedding,
+        "siglip_embedding_ids": siglip_embedding_ids,
+        "radiance_cache": radiance_cache,
+    }
 
     if callback != None:
         callback(-1, None, True)
@@ -382,7 +422,7 @@ def denoise(
 
         if callback is not None:
             preview = unpack_latent(img).transpose(0,1)
-            callback(i, preview, False)         
+            callback(i, preview, False, preview_meta=preview_meta)
 
 
     return img
@@ -396,9 +436,20 @@ def prepare_multi_ip(
     target_height: int | None = None,
     bs: int = 1,
     pe: Literal["d", "h", "w", "o"] = "d",
+    conditions_zero_start = False,
+    set_cond_index = False,
+    res_match_output = True,
+    patch_size: int = 2    
+    
 ) -> dict[str, Tensor]:
-    ref_imgs = img_cond_list
+
     assert pe in ["d", "h", "w", "o"]
+
+    if img_cond_list == None: img_cond_list = []
+
+    if not res_match_output:
+        for i, img_cond in enumerate(img_cond_list):
+            img_cond_list[i]= resizeinput(img_cond)
 
     ref_imgs = [
         ae.encode(
@@ -412,16 +463,19 @@ def prepare_multi_ip(
     img = get_noise( bs, target_height, target_width, device=device, dtype=torch.bfloat16, seed=seed)
     bs, c, h, w = img.shape
     # tgt img
-    img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+    img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size)
     if img.shape[0] == 1 and bs > 1:
         img = repeat(img, "1 ... -> bs ...", bs=bs)
 
-    img_ids = torch.zeros(h // 2, w // 2, 3)
-    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
-    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+    img_ids = torch.zeros(h // patch_size, w // patch_size, 3)
+    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // patch_size)[:, None]
+    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // patch_size)[None, :]
     img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
     img_cond_seq = img_cond_seq_ids = None
-    pe_shift_w, pe_shift_h = w // 2, h // 2
+    if conditions_zero_start:
+        pe_shift_w = pe_shift_h = 0
+    else:
+        pe_shift_w, pe_shift_h = w // patch_size, h // patch_size
     for cond_no, ref_img in enumerate(ref_imgs):
         _, _, ref_h1, ref_w1 = ref_img.shape
         ref_img = rearrange(
@@ -430,7 +484,8 @@ def prepare_multi_ip(
         if ref_img.shape[0] == 1 and bs > 1:
             ref_img = repeat(ref_img, "1 ... -> bs ...", bs=bs)
         ref_img_ids1 = torch.zeros(ref_h1 // 2, ref_w1 // 2, 3)
-        # img id分别在宽高偏移各自最大值
+        if set_cond_index:
+            ref_img_ids1[..., 0] = cond_no + 1
         h_offset = pe_shift_h if pe in {"d", "h"} else 0
         w_offset = pe_shift_w if pe in {"d", "w"} else 0
         ref_img_ids1[..., 1] = (
@@ -472,4 +527,14 @@ def unpack(x: Tensor, height: int, width: int) -> Tensor:
         w=math.ceil(width / 16),
         ph=2,
         pw=2,
+    )
+
+
+def patches_to_image(x: Tensor, height: int, width: int, patch_size: int) -> Tensor:
+    tokens = x.transpose(1, 2)
+    return F.fold(
+        tokens,
+        output_size=(height, width),
+        kernel_size=patch_size,
+        stride=patch_size,
     )

@@ -1,4 +1,5 @@
 import torch
+from PIL import Image
 from shared.utils import files_locator as fl 
 
 def get_ltxv_text_encoder_filename(text_encoder_quantization):
@@ -10,7 +11,7 @@ def get_ltxv_text_encoder_filename(text_encoder_quantization):
 class family_handler():
     @staticmethod
     def query_supported_types():
-        return ["flux", "flux_chroma", "flux_dev_kontext", "flux_dev_umo", "flux_dev_uso", "flux_schnell" ]
+        return ["flux", "flux_chroma", "flux_chroma_radiance", "flux_dev_kontext", "flux_dev_umo", "flux_dev_uso", "flux_schnell", "flux_dev_kontext_dreamomni2" ]
 
     @staticmethod
     def query_family_maps():
@@ -21,10 +22,12 @@ class family_handler():
             "flux_dev_uso" : "flux",
             "flux_schnell" : "flux",
             "flux_chroma" : "flux",
+            "flux_chroma_radiance": "flux",
+            "flux_dev_kontext_dreamomni2": "flux",
         }
 
         models_comp_map = { 
-                    "flux": ["flux_chroma", "flux_dev_kontext", "flux_dev_umo", "flux_dev_uso", "flux_schnell" ]
+                    "flux": ["flux_chroma", "flux_chroma_radiance", "flux_dev_kontext", "flux_dev_umo", "flux_dev_uso", "flux_schnell", "flux_dev_kontext_dreamomni2" ]
                     }
         return models_eqv_map, models_comp_map
     @staticmethod
@@ -32,17 +35,22 @@ class family_handler():
         flux_model = "flux-dev" if base_model_type == "flux" else base_model_type.replace("_", "-")
         flux_schnell = flux_model == "flux-schnell" 
         flux_chroma = flux_model == "flux-chroma" 
+        flux_chroma_radiance = flux_model == "flux-chroma-radiance"
         flux_uso = flux_model == "flux-dev-uso"
         flux_umo = flux_model == "flux-dev-umo"
         flux_kontext = flux_model == "flux-dev-kontext"
-        
+        flux_kontext_dreamomni2 = flux_model == "flux-dev-kontext-dreamomni2"
+
         extra_model_def = {
             "image_outputs" : True,
-            "no_negative_prompt" : not flux_chroma,
+            "no_negative_prompt" : not (flux_chroma or flux_chroma_radiance),
             "flux-model": flux_model,
         }
-        if flux_chroma:
+        extra_model_def["profiles_dir"] = [] if flux_schnell else  ["flux"] 
+        if flux_chroma or flux_chroma_radiance:
             extra_model_def["guidance_max_phases"] = 1
+        if flux_chroma_radiance:
+            extra_model_def["radiance"] = True
         elif not flux_schnell:
             extra_model_def["embedded_guidance"] = True
         if flux_uso :
@@ -56,17 +64,20 @@ class family_handler():
                 "label": "Reference Images / Style Images"
             }
         
-        if flux_kontext:
-            extra_model_def["inpaint_support"] = True
+        if flux_kontext or flux_kontext_dreamomni2:
+            extra_model_def["inpaint_support"] = flux_kontext
             extra_model_def["image_ref_choices"] = {
                 "choices": [
                     ("None", ""),
-                    ("Conditional Images is first Main Subject / Landscape and may be followed by People / Objects", "KI"),
+                    ("Conditional Image is first Main Subject / Landscape and may be followed by People / Objects", "KI"),
                     ("Conditional Images are People / Objects", "I"),
                     ],
                 "letters_filter": "KI",
             }
-            extra_model_def["background_removal_label"]= "Remove Backgrounds only behind People / Objects except main Subject / Landscape" 
+            if flux_kontext_dreamomni2:
+                extra_model_def["no_background_removal"] = True
+            else:                
+                extra_model_def["background_removal_label"]= "Remove Backgrounds only behind People / Objects except main Subject / Landscape" 
         elif flux_umo:
             extra_model_def["image_ref_choices"] = {
                 "choices": [
@@ -84,9 +95,36 @@ class family_handler():
 
     @staticmethod
     def get_rgb_factors(base_model_type ):
+        if base_model_type == "flux_chroma_radiance":
+            return None, None
         from shared.RGB_factors import get_rgb_factors
         latent_rgb_factors, latent_rgb_factors_bias = get_rgb_factors("flux")
         return latent_rgb_factors, latent_rgb_factors_bias
+
+    @staticmethod
+    def preview_latents(base_model_type, latents, meta):
+        if base_model_type != "flux_chroma_radiance":
+            return None
+        from .sampling import patches_to_image
+
+        tensor = latents
+        if not torch.is_tensor(tensor):
+            return None
+        tensor = tensor.detach()
+        C, T, H, W = tensor.shape
+        image = tensor.cpu().clamp(-1, 1)
+        image = image.permute(0, 2, 1, 3) # (C, T, H, W) -> (C, H, T, W)        
+        image = image.reshape(C, H, T * W) # (C, H, T, W) -> (C, H, T*W)
+        image = image.add(1).mul(127.5).clamp(0, 255).to(torch.uint8)
+        image = image.permute(1, 2, 0).numpy()
+        preview = Image.fromarray(image)
+        if preview.height > 0:
+            scale = 200 / preview.height
+            width_px = max(1, int(round(preview.width * scale)))
+            resampling_module = getattr(Image, "Resampling", Image)
+            resample_filter = getattr(resampling_module, "BILINEAR", Image.BILINEAR)
+            preview = preview.resize((width_px, 200), resample=resample_filter)
+        return preview
 
 
     @staticmethod
@@ -100,12 +138,7 @@ class family_handler():
     @staticmethod
     def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization):
         text_encoder_filename = get_ltxv_text_encoder_filename(text_encoder_quantization)    
-        return [
-            {  
-            "repoId" : "DeepBeepMeep/Flux", 
-            "sourceFolderList" :  ["siglip-so400m-patch14-384", "",],
-            "fileList" : [ ["config.json", "preprocessor_config.json", "model.safetensors"], ["flux_vae.safetensors"] ]   
-            },
+        ret = [
             {  
             "repoId" : "DeepBeepMeep/LTX_Video", 
             "sourceFolderList" :  ["T5_xxl_1.1"],
@@ -117,11 +150,35 @@ class family_handler():
             "fileList" :[ 
                             ["config.json", "merges.txt", "model.safetensors", "preprocessor_config.json", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.json"],
                             ]
-            } 
-        ]
+            },
+            {  
+            "repoId" : "DeepBeepMeep/Flux", 
+            "sourceFolderList" :  ["",],
+            "fileList" : [ ["flux_vae.safetensors"] ]   
+            }]
+
+
+        if base_model_type in ["flux_dev_uso"]:
+            ret += [
+                {  
+                "repoId" : "DeepBeepMeep/Flux", 
+                "sourceFolderList" :  ["siglip-so400m-patch14-384"],
+                "fileList" : [ ["config.json", "preprocessor_config.json", "model.safetensors"] ]   
+                }]
+
+
+        if base_model_type in ["flux_dev_kontext_dreamomni2"]:
+            ret += [
+                {  
+                "repoId" : "DeepBeepMeep/Flux", 
+                "sourceFolderList" :  ["Qwen2.5-VL-7B-DreamOmni2"],
+                "fileList" : [ ["Qwen2.5-VL-7B-DreamOmni2_quanto_bf16_int8.safetensors", "merges.txt", "tokenizer_config.json", "config.json", "vocab.json", "video_preprocessor_config.json", "preprocessor_config.json", "chat_template.jinja"] ]
+                }]
+            
+        return ret
 
     @staticmethod
-    def load_model(model_filename, model_type, base_model_type, model_def, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized = False, submodel_no_list = None):
+    def load_model(model_filename, model_type, base_model_type, model_def, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized = False, submodel_no_list = None, override_text_encoder = None):
         from .flux_main  import model_factory
 
         flux_model = model_factory(
@@ -130,7 +187,7 @@ class family_handler():
             model_type = model_type, 
             model_def = model_def,
             base_model_type=base_model_type,
-            text_encoder_filename= get_ltxv_text_encoder_filename(text_encoder_quantization),
+            text_encoder_filename= get_ltxv_text_encoder_filename(text_encoder_quantization) if override_text_encoder is None else override_text_encoder,
             quantizeTransformer = quantizeTransformer,
             dtype = dtype,
             VAE_dtype = VAE_dtype, 
@@ -144,6 +201,8 @@ class family_handler():
             pipe["siglip_model"] = flux_model.vision_encoder 
         if flux_model.feature_embedder is not None:
             pipe["feature_embedder"] = flux_model.feature_embedder 
+        if flux_model.vlm_model is not None:
+            pipe["vlm_model"] = flux_model.vlm_model 
         return flux_model, pipe
 
     @staticmethod
@@ -165,11 +224,13 @@ class family_handler():
         flux_uso = flux_model == "flux-dev-uso"
         flux_umo = flux_model == "flux-dev-umo"
         flux_kontext = flux_model == "flux-dev-kontext"
+        flux_kontext_dreamomni2 = flux_model == "flux-dev-kontext-dreamomni2"
+
         ui_defaults.update({
             "embedded_guidance":  2.5,
         })
 
-        if flux_kontext or flux_uso:
+        if flux_kontext or flux_uso or flux_kontext_dreamomni2:
             ui_defaults.update({
                 "video_prompt_type": "KI",
                 "denoising_strength": 1.,

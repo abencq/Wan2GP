@@ -121,18 +121,27 @@ class WanAny2V:
 
         ignore_unused_weights = model_def.get("ignore_unused_weights", False)
 
-        if base_model_type in ["ti2v_2_2", "lucy_edit"]:
+        vae_checkpoint2 = None
+        if model_def.get("wan_5B_class", False):
             self.vae_stride = (4, 16, 16)
             vae_checkpoint = "Wan2.2_VAE.safetensors"
             vae = Wan2_2_VAE
         else:
-            self.vae_stride = config.vae_stride
-            vae_checkpoint = "Wan2.1_VAE.safetensors"
             vae = WanVAE
+            self.vae_stride = config.vae_stride
+            if model_def.get("alpha_class", False):
+                vae_checkpoint ="wan_alpha_2.1_vae_rgb_channel.safetensors"
+                vae_checkpoint2 ="wan_alpha_2.1_vae_alpha_channel.safetensors"
+            else:
+                vae_checkpoint = "Wan2.1_VAE.safetensors"                
         self.patch_size = config.patch_size 
         
         self.vae = vae( vae_pth=fl.locate_file(vae_checkpoint), dtype= VAE_dtype, device="cpu")
-        self.vae.device = self.device
+        self.vae.device = self.device # need to set to cuda so that vae buffers are properly moved (although the rest will stay in the CPU)
+        self.vae2 = None
+        if vae_checkpoint2 is not None:
+            self.vae2 = vae( vae_pth=fl.locate_file(vae_checkpoint2), dtype= VAE_dtype, device="cpu")
+            self.vae2.device = self.device
         
         # config_filename= "configs/t2v_1.3B.json"
         # import json
@@ -154,13 +163,13 @@ class WanAny2V:
         kwargs= { "modelClass": WanModel,"do_quantize": quantizeTransformer and not save_quantized, "defaultConfigPath": base_config_file , "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "forcedConfigPath": forcedConfigPath, }
         kwargs_light= { "modelClass": WanModel,"writable_tensors": False, "preprocess_sd": preprocess_sd , "forcedConfigPath" : base_config_file}
         if module_source is not None:
-            self.model = offload.fast_load_transformers_model(model_filename[:1] + [module_source], **kwargs)
+            self.model = offload.fast_load_transformers_model(model_filename[:1] + [fl.locate_file(module_source)], **kwargs)
         if module_source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [module_source2], **kwargs)
+            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [fl.locate_file(module_source2)], **kwargs)
         if source is not None:
-            self.model = offload.fast_load_transformers_model(source,  **kwargs_light)
+            self.model = offload.fast_load_transformers_model(fl.locate_file(source),  **kwargs_light)
         if source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(source2, **kwargs_light)
+            self.model2 = offload.fast_load_transformers_model(fl.locate_file(source2), **kwargs_light)
 
         if self.model is not None or self.model2 is not None:
             from wgp import save_model
@@ -306,7 +315,7 @@ class WanAny2V:
         msk = msk.transpose(1,2)[0]
         return msk
 
-    def encode_reference_images(self, ref_images, ref_prompt="image of a face", any_guidance= False, tile_size = None):
+    def encode_reference_images(self, ref_images, ref_prompt="image of a face", any_guidance= False, tile_size = None, enable_loras = True):
         ref_images = [convert_image_to_tensor(img).unsqueeze(1).to(device=self.device, dtype=self.dtype) for img in ref_images]
         shape = ref_images[0].shape
         freqs = get_rotary_pos_embed( (len(ref_images) , shape[-2] // 8, shape[-1] // 8 )) 
@@ -320,6 +329,9 @@ class WanAny2V:
         context = torch.cat([context, context.new_zeros(self.model.text_len -context.size(0), context.size(1)) ]).unsqueeze(0) 
         clear_caches()
         get_cache("lynx_ref_buffer").update({ 0: {}, 1: {} })
+        if not enable_loras:
+            _loras_active_adapters = self.model._loras_active_adapters
+            self.model._loras_active_adapters = []
         ref_buffer = self.model(
             pipeline =self,
             x = [vae_feat, vae_feat_uncond] if any_guidance else [vae_feat],
@@ -328,6 +340,9 @@ class WanAny2V:
             t=torch.stack([torch.tensor(0, dtype=torch.float)]).to(self.device),
             lynx_feature_extractor = True,
         )
+        if not enable_loras:
+            self.model._loras_active_adapters = _loras_active_adapters
+
         clear_caches()
         return ref_buffer[0], (ref_buffer[1] if any_guidance else None)
 
@@ -480,29 +495,37 @@ class WanAny2V:
         if NAG_scale > 1: context = torch.cat([context, context_null], dim=0)
         # if NAG_scale > 1: context = torch.cat([context, context_NAG], dim=0)
         if self._interrupt: return None
-
-        vace = model_type in ["vace_1.3B","vace_14B", "vace_14B_2_2", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]
+        model_def  = self.model_def
+        vace = model_def.get("vace_class", False)
         phantom = model_type in ["phantom_1.3B", "phantom_14B"]
         fantasy = model_type in ["fantasy"]
-        multitalk = model_type in ["multitalk", "infinitetalk", "vace_multitalk_14B", "i2v_2_2_multitalk"]
+        multitalk =  model_def.get("multitalk_class", False)
         infinitetalk = model_type in ["infinitetalk"]
-        standin = model_type in ["standin", "vace_standin_14B"]
-        lynx = model_type in ["lynx_lite", "lynx", "vace_lynx_lite_14B", "vace_lynx_14B"]
+        standin = model_def.get("standin_class", False)
+        lynx = model_def.get("lynx_class", False)
         recam = model_type in ["recam_1.3B"]
-        ti2v = model_type in ["ti2v_2_2", "lucy_edit"]
+        ti2v = model_def.get("wan_5B_class", False)
+        alpha_class = model_def.get("alpha_class", False)
         lucy_edit=  model_type in ["lucy_edit"]
         animate=  model_type in ["animate"]
+        chrono_edit = model_type in ["chrono_edit"]
         start_step_no = 0
         ref_images_count = 0
         trim_frames = 0
-        extended_overlapped_latents = clip_image_start = clip_image_end = image_mask_latents = None
+        last_latent_output = False
+        extended_overlapped_latents = clip_image_start = clip_image_end = image_mask_latents = latent_slice = None
         no_noise_latents_injection = infinitetalk
         timestep_injection = False
+
+        if chrono_edit:
+            frame_num = 29
+            last_latent_output = True
+
         lat_frames = int((frame_num - 1) // self.vae_stride[0]) + 1
         extended_input_dim = 0
-        ref_images_before = False
+        ref_images_before = False            
         # image2video 
-        if model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "fantasy", "multitalk", "infinitetalk", "i2v_2_2_multitalk", "flf2v_720p"]:
+        if model_def.get("i2v_class", False) and not animate:
             any_end_frame = False
             if infinitetalk:
                 new_shot = "0" in video_prompt_type
@@ -730,12 +753,11 @@ class WanAny2V:
                     image_ref = original_input_ref_images[-1]
                     from preprocessing.face_preprocessor  import FaceProcessor 
                     face_processor = FaceProcessor()
-                    lynx_ref = face_processor.process(image_ref, resize_to = 256 )
-                    lynx_ref_buffer, lynx_ref_buffer_uncond = self.encode_reference_images([lynx_ref], tile_size=VAE_tile_size, any_guidance= any_guidance_at_all)
+                    lynx_ref = face_processor.process(image_ref, resize_to = 256)
+                    lynx_ref_buffer, lynx_ref_buffer_uncond = self.encode_reference_images([lynx_ref], tile_size=VAE_tile_size, any_guidance= any_guidance_at_all, enable_loras = False)
                     lynx_ref = None
                 gc.collect()
                 torch.cuda.empty_cache()
-                vace_lynx = model_type in ["vace_lynx_14B"]
                 kwargs["lynx_ip_scale"] = control_scale_alt
                 kwargs["lynx_ref_scale"] = control_scale_alt
 
@@ -744,13 +766,13 @@ class WanAny2V:
             from preprocessing.face_preprocessor  import FaceProcessor 
             standin_ref_pos = 1 if "K" in video_prompt_type else 0
             if len(original_input_ref_images) < standin_ref_pos + 1: 
-                if "I" in video_prompt_type and model_type in ["vace_standin_14B"]:
+                if "I" in video_prompt_type and vace:
                     print("Warning: Missing Standin ref image, make sure 'Inject only People / Objets' is selected or if there is 'Landscape and then People or Objects' there are at least two ref images.")
             else: 
                 standin_ref_pos = -1
                 image_ref = original_input_ref_images[standin_ref_pos]
                 face_processor = FaceProcessor()
-                standin_ref = face_processor.process(image_ref, remove_bg = model_type in ["vace_standin_14B"])
+                standin_ref = face_processor.process(image_ref, remove_bg = vace)
                 face_processor = None
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -764,7 +786,7 @@ class WanAny2V:
             # vace context encode
             input_frames = [input_frames.to(self.device)] +([] if input_frames2 is None else [input_frames2.to(self.device)])            
             input_masks = [input_masks.to(self.device)] + ([] if input_masks2 is None else [input_masks2.to(self.device)])
-            if model_type in ["vace_lynx_14B"] and input_ref_images is not None:
+            if lynx and input_ref_images is not None:
                 input_ref_images,input_ref_masks = input_ref_images[:-1], input_ref_masks[:-1]
             input_ref_images = None if input_ref_images is None else [ u.to(self.device) for u in input_ref_images]
             input_ref_masks = None if input_ref_masks is None else [ None if u is None else u.to(self.device) for u in input_ref_masks]
@@ -1083,7 +1105,7 @@ class WanAny2V:
                 latents_preview = latents
                 if ref_images_before and ref_images_count > 0: latents_preview = latents_preview[:, :, ref_images_count: ] 
                 if trim_frames > 0:  latents_preview=  latents_preview[:, :,:-trim_frames]
-                if image_outputs: latents_preview=  latents_preview[:, :,:1]
+                if image_outputs: latents_preview= latents_preview[:, :,-1:] if last_latent_output else latents_preview[:, :,:1]
                 if len(latents_preview) > 1: latents_preview = latents_preview.transpose(0,2)
                 callback(i, latents_preview[0], False, denoising_extra =denoising_extra )
                 latents_preview = None
@@ -1102,12 +1124,20 @@ class WanAny2V:
         if chipmunk:
             self.model.release_chipmunk() # need to add it at every exit when in prod
 
+        if image_outputs :
+            x0 = [x[:,-1:] if last_latent_output else x[:,:1] for x in x0 ]
+
         videos = self.vae.decode(x0, VAE_tile_size)
+        any_vae2= self.vae2 is not None
+        if any_vae2:
+            videos2 = self.vae2.decode(x0, VAE_tile_size)
 
         if image_outputs:
             videos = torch.cat([video[:,:1] for video in videos], dim=1) if len(videos) > 1 else videos[0][:,:1]
+            if any_vae2: videos2 = torch.cat([video[:,:1] for video in videos2], dim=1) if len(videos2) > 1 else videos2[0][:,:1]
         else:
             videos = videos[0] # return only first video
+            if any_vae2: videos2 = videos2[0] # return only first video
         if color_correction_strength > 0 and (prefix_frames_count > 0 and window_no > 1 or prefix_frames_count > 1 and window_no == 1):
             if vace and False:
                 # videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), input_frames[0].unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "progressive_blend").squeeze(0)
@@ -1115,9 +1145,16 @@ class WanAny2V:
                 # videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), videos.unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "reference").squeeze(0)
             elif color_reference_frame is not None:
                 videos = match_and_blend_colors(videos.unsqueeze(0), color_reference_frame.unsqueeze(0), color_correction_strength).squeeze(0)
-            
-        if return_latent_slice != None:
-            return { "x" : videos, "latent_slice" : latent_slice }
+
+        BGRA_frames = None
+        if alpha_class:
+            from .alpha.utils import render_video, from_BRGA_numpy_to_RGBA_torch
+            videos, BGRA_frames = render_video(videos[None], videos2[None])            
+            if image_outputs: 
+                videos = from_BRGA_numpy_to_RGBA_torch(BGRA_frames) 
+                BGRA_frames = None
+        if return_latent_slice != None or BGRA_frames != None:
+            return { "x" : videos, "latent_slice" : latent_slice, "BGRA_frames" : BGRA_frames }
         return videos
 
     def adapt_vace_model(self, model):
@@ -1144,5 +1181,10 @@ class WanAny2V:
                 preloadURLs = get_model_recursive_prop(model_type,  "preload_URLs")
                 if len(preloadURLs) > 0: 
                     return [fl.locate_file(os.path.basename(preloadURLs[0]))] , [1]
+        elif base_model_type == "vace_ditto_14B":
+            preloadURLs = get_model_recursive_prop(model_type,  "preload_URLs")
+            model_mode = int(model_mode)
+            if len(preloadURLs) > model_mode: 
+                return [fl.locate_file(os.path.basename(preloadURLs[model_mode]))] , [1]
         return [], []
 
