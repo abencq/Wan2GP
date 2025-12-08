@@ -37,6 +37,22 @@ WanGP supports the Wan (and derived models), Hunyuan Video and LTV Video models 
 
 ## 🔥 Latest Updates : 
 
+### December 5 2025: WanGP v9.81, Simple Pleasures...
+
+These two features are going to change the life of many people:
+- **Pause Button**: ever had a urge to use your GPU for a very important task that can't wait (a game for instance ?), here comes your new friend the *Pause* button. Not only it will suspend the current gen in progress but it will free most of the VRAM used by WanGP (please note that the RAM by WanGP used wont be released). When you are done just click the *Resume* button to restart exactly from where you stopped.
+
+- **WanGP Headless**:  trouble running remotely WanGP or having some stability issues with Gradio or your Web Browser. This is all past thanks to *WanGP Headless* mode. Here is how it works : first make you shopping list of Video Gen using the classic WanGP gradio interface. When you are done, click the *Save Queue* button and quit WanGP.
+
+- **Hunyuan Video 1.5 i2v distilled** : for those in need of their daily dose of new models, added *Hunyuan Video 1.5 i2v Distilled* (official release) + Lora Accelerator extracted from it (to be used in future finetunes). Also added *Magcache* support (optimized for 20 steps) for Hunyuan Video 1.5.
+
+Then in your terminal window just write this:
+```bash
+python wgp.py --process my_queue.zip
+```
+
+*update 9.81*: added Hunyuan Video 1.5 i2v distilled + magcache
+
 ### December 4 2025: WanGP v9.74, The Alpha & the Omega ... and the Dancer
 
 - **Flux 2**: the best ever open source *Image Generator* has just landed. It does everything very well: generate an *Image* based a *Text Prompt* or combine up to 10 *Images References* 
@@ -259,6 +275,15 @@ git fetch origin && git reset --hard origin/main
 conda activate wan2gp
 pip install -r requirements.txt
 ```
+
+**Run headless (batch processing):**
+
+Process saved queues without launching the web UI:
+```bash
+# Process a saved queue
+python wgp.py --process my_queue.zip
+```
+Create your queue in the web UI, save it with "Save Queue", then process it headless. See [CLI Documentation](docs/CLI.md) for details.
 
 ## 🐳 Docker:
 
