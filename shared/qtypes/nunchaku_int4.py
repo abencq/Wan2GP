@@ -317,8 +317,10 @@ def _unpack_nunchaku_w4a4_weight(qweight, out_features, in_features):
     k_tiles = in_features // mem_k
     packed_i32 = qweight.view(torch.int32)
     packed_i32 = packed_i32.view(n_tiles, k_tiles, 1, 8, 8, 4, 2, 2, 1)
-    shifts = torch.tensor([0, 4, 8, 12, 16, 20, 24, 28], device=packed_i32.device, dtype=torch.int32)
-    vals = (packed_i32.unsqueeze(-1) >> shifts) & 0xF
+    vals = torch.stack(
+        [(packed_i32 >> shift) & 0xF for shift in (0, 4, 8, 12, 16, 20, 24, 28)],
+        dim=-1,
+    )
     vals = vals.permute(0, 3, 6, 4, 8, 1, 2, 7, 5, 9).contiguous()
     vals = vals.view(out_features, in_features).to(torch.int16)
     vals -= (vals >= 8).to(torch.int16) * 16
@@ -346,9 +348,7 @@ def _unpack_int4_from_int32(qweight, out_features, in_features):
 
     q = qweight.view(torch.int32).reshape(out_features, in_features // 8)
     q = q.to(torch.int64) & 0xFFFFFFFF
-    shifts = torch.arange(0, 32, 4, device=q.device, dtype=torch.int64)
-    mask = torch.tensor(0x0F, device=q.device, dtype=torch.int64)
-    vals = (q.unsqueeze(-1) >> shifts) & mask
+    vals = torch.stack([(q >> shift) & 0xF for shift in range(0, 32, 4)], dim=-1)
     return vals.reshape(out_features, in_features)
 
 
@@ -587,6 +587,7 @@ class NunchakuSVDQWeightTensor(NunchakuBaseWeightTensor):
         out = out[: x.shape[0]]
         return out.reshape(*input.shape[:-1], self.shape[0])
 
+    @torch.compiler.disable()
     def linear(self, input, bias=None):
         if torch.is_tensor(input) and input.device.type == "cuda":
             return self._linear_cuda(input, bias=bias)
@@ -669,6 +670,21 @@ class NunchakuSVDQWeightTensor(NunchakuBaseWeightTensor):
             if isinstance(t, NunchakuSVDQWeightTensor):
                 if (dim0, dim1) in ((0, 1), (1, 0), (-2, -1), (-1, -2)):
                     return _transpose_nunchaku_weight(t)
+        if op is torch.ops.aten.addmm:
+            input, mat1, mat2 = args[:3]
+            if isinstance(mat2, NunchakuSVDQWeightTensor):
+                ref = getattr(mat2, "_nunchaku_transpose_ref", None)
+                if ref is not None:
+                    alpha = kwargs.get("alpha", 1)
+                    beta = kwargs.get("beta", 1)
+                    out = ref.linear(mat1, bias=None)
+                    if alpha != 1:
+                        out.mul_(alpha)
+                    if beta != 0 and input is not None:
+                        if input.dtype != out.dtype:
+                            input = input.to(out.dtype)
+                        out.add_(input, alpha=beta)
+                    return _apply_mod_params_if_needed(ref, out)
         if op is torch.ops.aten.mm or op is torch.ops.aten.matmul:
             mat1, mat2 = args[:2]
             if isinstance(mat2, NunchakuSVDQWeightTensor):
@@ -847,6 +863,7 @@ class NunchakuAWQWeightTensor(NunchakuBaseWeightTensor):
             out.add_(bias.view(view_shape))
         return out.reshape(*input.shape[:-1], out.shape[-1])
 
+    @torch.compiler.disable()
     def linear(self, input, bias=None):
         if torch.is_tensor(input) and input.device.type == "cuda":
             return self._linear_cuda(input, bias=bias)
@@ -921,6 +938,21 @@ class NunchakuAWQWeightTensor(NunchakuBaseWeightTensor):
             if isinstance(t, NunchakuAWQWeightTensor):
                 if (dim0, dim1) in ((0, 1), (1, 0), (-2, -1), (-1, -2)):
                     return _transpose_nunchaku_weight(t)
+        if op is torch.ops.aten.addmm:
+            input, mat1, mat2 = args[:3]
+            if isinstance(mat2, NunchakuAWQWeightTensor):
+                ref = getattr(mat2, "_nunchaku_transpose_ref", None)
+                if ref is not None:
+                    alpha = kwargs.get("alpha", 1)
+                    beta = kwargs.get("beta", 1)
+                    out = ref.linear(mat1, bias=None)
+                    if alpha != 1:
+                        out.mul_(alpha)
+                    if beta != 0 and input is not None:
+                        if input.dtype != out.dtype:
+                            input = input.to(out.dtype)
+                        out.add_(input, alpha=beta)
+                    return _apply_mod_params_if_needed(ref, out)
         if op is torch.ops.aten.mm or op is torch.ops.aten.matmul:
             mat1, mat2 = args[:2]
             if isinstance(mat2, NunchakuAWQWeightTensor):
