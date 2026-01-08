@@ -2434,8 +2434,7 @@ def get_model_filename(model_type, quantization ="int8", dtype_policy = "", modu
     if len(quantization) == 0:
         quantization = "bf16"
 
-    model_family =  get_model_family(model_type) 
-    dtype = get_transformer_dtype(model_family, dtype_policy)
+    dtype = get_transformer_dtype(model_type, dtype_policy)
     if len(choices) <= 1:
         raw_filename = choices[0]
     else:
@@ -2461,7 +2460,13 @@ def get_model_filename(model_type, quantization ="int8", dtype_policy = "", modu
 
     return raw_filename
 
-def get_transformer_dtype(model_family, transformer_dtype_policy):
+def get_transformer_dtype(model_type, transformer_dtype_policy):
+    base_model_type = get_base_model_type(model_type)
+    model_def = get_model_def(base_model_type)
+    dtype = model_def.get("dtype", None)
+    if dtype is not None: 
+        return torch.float16 if dtype =="fp16" else torch.bfloat16
+    model_family =  get_model_family(base_model_type) 
     if not isinstance(transformer_dtype_policy, str):
         return transformer_dtype_policy
     if len(transformer_dtype_policy) == 0:
@@ -3284,7 +3289,7 @@ def load_models(model_type, override_profile = -1, **model_kwargs):
         print(f"Autoquantize is not yet supported if some modules are declared")
         quantizeTransformer = False
     model_family = get_model_family(model_type)
-    transformer_dtype = get_transformer_dtype(model_family, transformer_dtype_policy)
+    transformer_dtype = get_transformer_dtype(model_type, transformer_dtype_policy)
     if quantizeTransformer or "quanto" in model_filename:
         transformer_dtype = torch.bfloat16 if "bf16" in model_filename or "BF16" in model_filename else transformer_dtype
         transformer_dtype = torch.float16 if "fp16" in model_filename or"FP16" in model_filename else transformer_dtype
@@ -3357,15 +3362,11 @@ def load_models(model_type, override_profile = -1, **model_kwargs):
     profile, mmgp_profile = init_pipe(pipe, kwargs, override_profile)
     if server_config.get("enhancer_mode", 0) == 0:
         setup_prompt_enhancer(pipe, kwargs)
-    loras_transformer = []
+    loras_transformer = kwargs.pop("loras", [])
     if "transformer" in pipe:
         loras_transformer += ["transformer"]        
     if "transformer2" in pipe:
         loras_transformer += ["transformer2"]
-    if "text_embedding_projection" in pipe and "text_embedding_projection" not in loras_transformer:
-        loras_transformer += ["text_embedding_projection"]
-    if "text_embeddings_connector" in pipe and "text_embeddings_connector" not in loras_transformer:
-        loras_transformer += ["text_embeddings_connector"]
     if len(compile) > 0 and hasattr(wan_model, "custom_compile"):
         wan_model.custom_compile(backend= "inductor", mode ="default")
     compile_modules = model_def.get("compile", compile) if len(compile) > 0 else ""
@@ -3900,6 +3901,7 @@ def select_video(state, current_gallery_tab, input_file_list, file_selected, aud
             labels +=["Creation Date"]
         else: 
             video_prompt =  html.escape(configs.get("prompt", "")[:1024]).replace("\n", "<BR>")
+            enhanced_video_prompt = html.escape(configs.get("enhanced_prompt", "")[:1024]).replace("\n", "<BR>")
             video_video_prompt_type = configs.get("video_prompt_type", "")
             video_image_prompt_type = configs.get("image_prompt_type", "")
             video_audio_prompt_type = configs.get("audio_prompt_type", "")
@@ -3994,6 +3996,9 @@ def select_video(state, current_gallery_tab, input_file_list, file_selected, aud
             video_activated_loras_str = "<TABLE style='border:0px;padding:0px'>" + "".join(video_activated_loras) + "</TABLE>" if len(video_activated_loras) > 0 else ""
             values +=  misc_values + [video_prompt]
             labels +=  misc_labels + ["Text Prompt"]
+            if len(enhanced_video_prompt):
+                values += [enhanced_video_prompt]
+                labels += ["Enhanced Text Prompt"]
             if len(video_other_prompts) >0 :
                 values += [video_other_prompts]
                 labels += ["Other Prompts"]
@@ -5594,7 +5599,7 @@ def generate_video(
                 print(f"Enhanced prompts: {enhanced_prompts}" )
                 task["prompt"] = "\n".join(["!enhanced!"] + enhanced_prompts)
                 send_cmd("output")
-                prompt = enhanced_prompts[0]            
+                prompts = enhanced_prompts            
                 abort = gen.get("abort", False)
 
         while not abort:
@@ -8585,9 +8590,10 @@ def get_max_frames(nb):
 def change_guidance_phases(state, guidance_phases):
     model_type = get_state_model_type(state)
     model_def = get_model_def(model_type)
+    virtual_higher_phases = model_def.get("virtual_higher_phases", False) 
     multiple_submodels = model_def.get("multiple_submodels", False)
     label ="Phase 1-2" if guidance_phases ==3 else ( "Model / Guidance Switch Threshold" if multiple_submodels  else "Guidance Switch Threshold" )
-    return gr.update(visible= guidance_phases >=3 and multiple_submodels) , gr.update(visible= guidance_phases >=2), gr.update(visible= guidance_phases >=2, label = label), gr.update(visible= guidance_phases >=3), gr.update(visible= guidance_phases >=2), gr.update(visible= guidance_phases >=3)
+    return gr.update(visible= guidance_phases >=3 and multiple_submodels) , gr.update(visible= guidance_phases >=2 and not virtual_higher_phases), gr.update(visible= guidance_phases >=2, label = label), gr.update(visible= guidance_phases >=3), gr.update(visible= guidance_phases >=2 and not virtual_higher_phases), gr.update(visible= guidance_phases >=3 and not virtual_higher_phases)
 
 
 memory_profile_choices= [   ("Profile 1, HighRAM_HighVRAM: at least 64 GB of RAM and 24 GB of VRAM, the fastest for short videos with a RTX 3090 / RTX 4090", 1),
