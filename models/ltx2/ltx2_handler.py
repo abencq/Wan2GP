@@ -39,6 +39,7 @@ class family_handler:
     def query_model_def(base_model_type, model_def):
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
         extra_model_def = {
+            "dtype": "bf16",
             "fps": 24,
             "frames_minimum": 17,
             "frames_steps": 8,
@@ -62,7 +63,7 @@ class family_handler:
                 {
                     "lock_inference_steps": True,
                     "no_negative_prompt": True,
-                    "guidance_max_phases": 1,
+                    "guidance_max_phases": 0,
                 }
             )
         else:
@@ -166,6 +167,10 @@ class family_handler:
         }
         if ltx2_model.model2 is not None:
             pipe["transformer2"] = ltx2_model.model2
+
+        if model_def.get("ltx2_pipeline", "") != "distilled":
+            pipe = { "pipe": pipe, "loras" : ["text_embedding_projection", "text_embeddings_connector"] }
+
         return ltx2_model, pipe
 
     @staticmethod
