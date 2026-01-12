@@ -46,7 +46,37 @@ class family_handler:
             "sliding_window": True,
             "image_prompt_types_allowed": "TSEV",
             "returns_audio": True,
+            "any_audio_prompt": True,
+            "audio_prompt_choices": True,
+            "one_speaker_only": True,
+            "audio_guide_label": "Audio Prompt (Soundtrack)",
+            "audio_scale_name": "Audio Strength (if Audio Prompt provided)",
+            "audio_prompt_type_sources": {
+                "selection": ["", "A"],
+                "labels": {
+                    "": "Generate Video & Soundtrack based on Text Prompt",
+                    "A": "Generate Video based on Soundtrack and Text Prompt",
+                },
+                "show_label": False,
+            },
+            "audio_guide_window_slicing": True,
+            "custom_denoising_strength": True,
             "profiles_dir": ["ltx2_19B"],
+        }
+        extra_model_def["extra_control_frames"] = 1
+        extra_model_def["dont_cat_preguide"] = True
+        extra_model_def["input_video_strength"] = "Image / Source Video Strength (you may try values lower value than 1 to get more motion)"
+        extra_model_def["guide_preprocessing"] = {
+            "selection": ["", "PVG", "DVG", "EVG", "VG"],
+            "labels": {
+                "PVG": "Transfer Human Motion",
+                "DVG": "Transfer Depth",
+                "EVG": "Transfer Canny Edges",
+                "VG": "Use LTX-2 raw format",
+            },
+        }
+        extra_model_def["mask_preprocessing"] = {
+            "selection": ["", "A", "NA", "XA", "XNA"],
         }
         extra_model_def["sliding_window_defaults"] = {
             "overlap_min": 1,
@@ -115,7 +145,7 @@ class family_handler:
             {
                 "repoId": "DeepBeepMeep/LTX-2",
                 "sourceFolderList": [""],
-                "fileList": [[_SPATIAL_UPSCALER_FILENAME, _DISTILLED_LORA_FILENAME] + computeList(model_filename)],
+                "fileList": [[_SPATIAL_UPSCALER_FILENAME] + computeList(model_filename)],
             },
             {
                 "repoId": "DeepBeepMeep/LTX-2",
@@ -124,6 +154,14 @@ class family_handler:
             },
         ]
         return download_def
+
+    @staticmethod
+    def validate_generative_settings(base_model_type, model_def, inputs):
+        audio_prompt_type = inputs.get("audio_prompt_type") or ""
+        if "A" in audio_prompt_type and inputs.get("audio_guide") is None:
+            audio_source = inputs.get("audio_source")
+            if audio_source is not None:
+                inputs["audio_guide"] = audio_source
 
     @staticmethod
     def load_model(
@@ -161,6 +199,7 @@ class family_handler:
             "text_embeddings_connector": ltx2_model.text_embeddings_connector,
             "vae": ltx2_model.video_decoder,
             "video_encoder": ltx2_model.video_encoder,
+            "audio_encoder": ltx2_model.audio_encoder,
             "audio_decoder": ltx2_model.audio_decoder,
             "vocoder": ltx2_model.vocoder,
             "spatial_upsampler": ltx2_model.spatial_upsampler,
@@ -179,14 +218,25 @@ class family_handler:
         if pipeline_kind != "distilled" and ui_defaults.get("guidance_phases", 0) < 2:
             ui_defaults["guidance_phases"] = 2
 
+        if settings_version < 2.43:
+            ui_defaults.update(
+                {
+                    "denoising_strength": 1.0,
+                    "masking_strength": 0,
+                }
+            )
+
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
         ui_defaults.update(
             {
                 "sliding_window_size": 481,
-                "sliding_window_overlap": 9,
+                "sliding_window_overlap": 17,
+                "denoising_strength": 1.0,
+                "masking_strength": 0,
             }
         )
+        ui_defaults.setdefault("audio_scale", 1.0)
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
         if pipeline_kind != "distilled":
             ui_defaults.setdefault("guidance_phases", 2)

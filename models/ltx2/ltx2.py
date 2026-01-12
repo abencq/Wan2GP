@@ -4,10 +4,14 @@ import types
 from typing import Callable, Iterator
 
 import torch
+import torchaudio
 
 from shared.utils import files_locator as fl
 
+from .ltx_core.conditioning import AudioConditionByLatent
+from .ltx_core.model.audio_vae import AudioProcessor
 from .ltx_core.model.video_vae import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
+from .ltx_core.types import AudioLatentShape, VideoPixelShape
 from .ltx_pipelines.distilled import DistilledPipeline
 from .ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE, DEFAULT_NEGATIVE_PROMPT
@@ -15,6 +19,7 @@ from .ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE, DEFAULT_NEGATIVE_P
 
 _GEMMA_FOLDER = "gemma-3-12b-it-qat-q4_0-unquantized"
 _SPATIAL_UPSCALER_FILENAME = "ltx-2-spatial-upscaler-x2-1.0.safetensors"
+LTX2_USE_FP32_ROPE_FREQS = True #False
 
 
 class _AudioVAEWrapper(torch.nn.Module):
@@ -298,6 +303,10 @@ class LTX2:
         self.model_def = model_def
         self._interrupt = False
         self.vae = _LTX2VAEHelper()
+        from .ltx_core.model.transformer import rope as rope_utils
+
+        self.use_fp32_rope_freqs = bool(model_def.get("ltx2_rope_freqs_fp32", LTX2_USE_FP32_ROPE_FREQS))
+        rope_utils.set_use_fp32_rope_freqs(self.use_fp32_rope_freqs)
 
         if isinstance(model_filename, (list, tuple)):
             if not model_filename:
@@ -347,6 +356,7 @@ class LTX2:
         self.video_embeddings_connector = self.text_embeddings_connector.video_embeddings_connector
         self.audio_embeddings_connector = self.text_embeddings_connector.audio_embeddings_connector
         self.video_encoder = ledger.video_encoder()
+        self.audio_encoder = ledger.audio_encoder()
         self.video_decoder = ledger.video_decoder()
         self.audio_decoder = ledger.audio_decoder()
         self.vocoder = ledger.vocoder()
@@ -358,6 +368,7 @@ class LTX2:
         ledger.text_embedding_projection = lambda: self.text_embedding_projection
         ledger.text_embeddings_connector = lambda: self.text_embeddings_connector
         ledger.video_encoder = lambda: self.video_encoder
+        ledger.audio_encoder = lambda: self.audio_encoder
         ledger.video_decoder = lambda: self.video_decoder
         ledger.audio_decoder = lambda: self.audio_decoder
         ledger.vocoder = lambda: self.vocoder
@@ -376,6 +387,7 @@ class LTX2:
         self.video_embeddings_connector = self.text_embeddings_connector.video_embeddings_connector
         self.audio_embeddings_connector = self.text_embeddings_connector.audio_embeddings_connector
         self.video_encoder = ledger_1.video_encoder()
+        self.audio_encoder = ledger_1.audio_encoder()
         self.video_decoder = ledger_1.video_decoder()
         self.audio_decoder = ledger_1.audio_decoder()
         self.vocoder = ledger_1.vocoder()
@@ -387,6 +399,7 @@ class LTX2:
         ledger_1.text_embedding_projection = lambda: self.text_embedding_projection
         ledger_1.text_embeddings_connector = lambda: self.text_embeddings_connector
         ledger_1.video_encoder = lambda: self.video_encoder
+        ledger_1.audio_encoder = lambda: self.audio_encoder
         ledger_1.video_decoder = lambda: self.video_decoder
         ledger_1.audio_decoder = lambda: self.audio_decoder
         ledger_1.vocoder = lambda: self.vocoder
@@ -396,6 +409,7 @@ class LTX2:
         ledger_2.text_embedding_projection = lambda: self.text_embedding_projection
         ledger_2.text_embeddings_connector = lambda: self.text_embeddings_connector
         ledger_2.video_encoder = lambda: self.video_encoder
+        ledger_2.audio_encoder = lambda: self.audio_encoder
         ledger_2.video_decoder = lambda: self.video_decoder
         ledger_2.audio_decoder = lambda: self.audio_decoder
         ledger_2.vocoder = lambda: self.vocoder
@@ -440,6 +454,24 @@ class LTX2:
             trans = self.model
         return trans, None
 
+    def get_loras_transformer(self, get_model_recursive_prop, model_type, video_prompt_type, **kwargs):
+        map = {
+            "P": "pose",
+            "D": "depth",
+            "E": "canny",
+        }
+        loras = []
+        video_prompt_type = video_prompt_type or ""
+        preload_urls = get_model_recursive_prop(model_type, "preload_URLs")
+        for letter, signature in map.items():
+            if letter in video_prompt_type:
+                for file_name in preload_urls:
+                    if signature in file_name:
+                        loras.append(fl.locate_file(os.path.basename(file_name)))
+                        break
+        loras_mult = [1.0] * len(loras)
+        return loras, loras_mult
+
     def generate(
         self,
         input_prompt: str,
@@ -465,6 +497,112 @@ class LTX2:
 
         input_video = kwargs.get("input_video")
         prefix_frames_count = int(kwargs.get("prefix_frames_count") or 0)
+        input_frames = kwargs.get("input_frames")
+        input_frames2 = kwargs.get("input_frames2")
+        input_masks = kwargs.get("input_masks")
+        input_masks2 = kwargs.get("input_masks2")
+        masking_strength = kwargs.get("masking_strength")
+        input_video_strength = kwargs.get("input_video_strength")
+        return_latent_slice = kwargs.get("return_latent_slice")
+        video_prompt_type = kwargs.get("video_prompt_type") or ""
+        denoising_strength = kwargs.get("denoising_strength")
+
+        def _get_frame_dim(video_tensor: torch.Tensor) -> int | None:
+            if video_tensor.dim() < 2:
+                return None
+            if video_tensor.dim() == 5:
+                if video_tensor.shape[1] in (1, 3, 4):
+                    return 2
+                if video_tensor.shape[-1] in (1, 3, 4):
+                    return 1
+            if video_tensor.shape[0] in (1, 3, 4):
+                return 1
+            if video_tensor.shape[-1] in (1, 3, 4):
+                return 0
+            return 0
+
+        def _frame_count(video_value) -> int | None:
+            if not torch.is_tensor(video_value):
+                return None
+            frame_dim = _get_frame_dim(video_value)
+            if frame_dim is None:
+                return None
+            return int(video_value.shape[frame_dim])
+
+        def _slice_frames(video_value: torch.Tensor, start: int, end: int) -> torch.Tensor:
+            frame_dim = _get_frame_dim(video_value)
+            if frame_dim == 1:
+                return video_value[:, start:end]
+            if frame_dim == 2:
+                return video_value[:, :, start:end]
+            return video_value[start:end]
+
+        def _maybe_trim_control(video_value, target_frames: int):
+            if not torch.is_tensor(video_value) or target_frames <= 0:
+                return video_value, None
+            current_frames = _frame_count(video_value)
+            if current_frames is None:
+                return video_value, None
+            if current_frames > target_frames:
+                video_value = _slice_frames(video_value, 0, target_frames)
+                current_frames = target_frames
+            return video_value, current_frames
+
+        try:
+            masking_strength = float(masking_strength) if masking_strength is not None else 0.0
+        except (TypeError, ValueError):
+            masking_strength = 0.0
+        try:
+            input_video_strength = float(input_video_strength) if input_video_strength is not None else 1.0
+        except (TypeError, ValueError):
+            input_video_strength = 1.0
+        input_video_strength = max(0.0, min(1.0, input_video_strength))
+        if "G" not in video_prompt_type:
+            denoising_strength = 1.0
+            masking_strength = 0.0
+
+        video_conditioning = None
+        masking_source = None
+        if input_frames is not None or input_frames2 is not None:
+            control_start_frame = int(prefix_frames_count)
+            expected_guide_frames = max(1, int(frame_num) - control_start_frame + (1 if prefix_frames_count > 1 else 0))
+            if prefix_frames_count > 1:
+                control_start_frame = -control_start_frame
+            input_frames, frames_len = _maybe_trim_control(input_frames, expected_guide_frames)
+            input_frames2, frames_len2 = _maybe_trim_control(input_frames2, expected_guide_frames)
+            input_masks, _ = _maybe_trim_control(input_masks, expected_guide_frames)
+            input_masks2, _ = _maybe_trim_control(input_masks2, expected_guide_frames)
+
+            control_strength = 1.0
+            if denoising_strength is not None and "G" in video_prompt_type:
+                try:
+                    control_strength = float(denoising_strength)
+                except (TypeError, ValueError):
+                    control_strength = 1.0
+            control_strength = max(0.0, min(1.0, control_strength))
+
+            conditioning_entries = []
+            if input_frames is not None:
+                conditioning_entries.append((input_frames, control_start_frame, control_strength))
+            if input_frames2 is not None:
+                conditioning_entries.append((input_frames2, control_start_frame, control_strength))
+            if conditioning_entries:
+                video_conditioning = conditioning_entries
+            if masking_strength > 0.0:
+                if input_masks is not None and input_frames is not None:
+                    masking_source = {
+                        "video": input_frames,
+                        "mask": input_masks,
+                        "start_frame": control_start_frame,
+                    }
+                elif input_masks2 is not None and input_frames2 is not None:
+                    masking_source = {
+                        "video": input_frames2,
+                        "mask": input_masks2,
+                        "start_frame": control_start_frame,
+                    }
+
+        latent_conditioning_stage2 = None
 
         latent_stride = 8
         if hasattr(self.pipeline, "pipeline_components"):
@@ -481,13 +619,25 @@ class LTX2:
         use_guiding_latent_for_start_image = bool(self.model_def.get("use_guiding_latent_for_start_image", False))
         use_guiding_start_image = use_guiding_latent_for_start_image and is_start_image_only
 
+        def _append_prefix_entries(target_list, extra_list=None):
+            if not has_prefix_frames or is_start_image_only:
+                return
+            frame_count = min(prefix_frames_count, input_video.shape[1])
+            if frame_count <= 0:
+                return
+            frame_indices = list(range(0, frame_count, latent_stride))
+            last_idx = frame_count - 1
+            if frame_indices[-1] != last_idx:
+                # Ensure the latest prefix frame dominates its latent slot.
+                frame_indices.append(last_idx)
+            for frame_idx in frame_indices:
+                entry = (input_video[:, frame_idx], _to_latent_index(frame_idx, latent_stride), input_video_strength)
+                target_list.append(entry)
+                if extra_list is not None:
+                    extra_list.append(entry)
+
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
-            if has_prefix_frames and not is_start_image_only:
-                frame_count = min(prefix_frames_count, input_video.shape[1])
-                for frame_idx in range(0, frame_count, latent_stride):
-                    entry = (input_video[:, frame_idx], _to_latent_index(frame_idx, latent_stride), 1.0)
-                    images.append(entry)
-                    images_stage2.append(entry)
+            _append_prefix_entries(images, images_stage2)
 
             if image_end is not None:
                 entry = (image_end, _to_latent_index(frame_num - 1, latent_stride), 1.0)
@@ -495,7 +645,7 @@ class LTX2:
                 images_stage2.append(entry)
 
             if image_start is not None:
-                entry = (image_start, _to_latent_index(0, latent_stride), 1.0)
+                entry = (image_start, _to_latent_index(0, latent_stride), input_video_strength, "lanczos")
                 if use_guiding_start_image:
                     guiding_images.append(entry)
                     images_stage2.append(entry)
@@ -504,12 +654,9 @@ class LTX2:
                     images.append(entry)
                     images_stage2.append(entry)
         else:
-            if has_prefix_frames:
-                frame_count = min(prefix_frames_count, input_video.shape[1])
-                for frame_idx in range(0, frame_count, latent_stride):
-                    images.append((input_video[:, frame_idx], _to_latent_index(frame_idx, latent_stride), 1.0))
+            _append_prefix_entries(images)
             if image_start is not None:
-                images.append((image_start, _to_latent_index(0, latent_stride), 1.0))
+                images.append((image_start, _to_latent_index(0, latent_stride), input_video_strength, "lanczos"))
             if image_end is not None:
                 images.append((image_end, _to_latent_index(frame_num - 1, latent_stride), 1.0))
 
@@ -518,6 +665,95 @@ class LTX2:
         loras_slists = kwargs.get("loras_slists")
         text_connectors = getattr(self, "_text_connectors", None)
 
+        audio_conditionings = None
+        audio_guide = kwargs.get("audio_guide")
+        if audio_guide:
+            audio_scale = kwargs.get("audio_scale")
+            if audio_scale is None:
+                audio_scale = 1.0
+            audio_strength = max(0.0, min(1.0, float(audio_scale)))
+            if audio_strength > 0.0:
+                if self._interrupt:
+                    return None
+                if not os.path.isfile(audio_guide):
+                    raise FileNotFoundError(f"Audio guide '{audio_guide}' not found.")
+                waveform, waveform_sample_rate = torchaudio.load(audio_guide)
+                if self._interrupt:
+                    return None
+                if waveform.ndim == 1:
+                    waveform = waveform.unsqueeze(0).unsqueeze(0)
+                elif waveform.ndim == 2:
+                    waveform = waveform.unsqueeze(0)
+                target_channels = int(getattr(self.audio_encoder, "in_channels", waveform.shape[1]))
+                if target_channels <= 0:
+                    target_channels = waveform.shape[1]
+                if waveform.shape[1] != target_channels:
+                    if waveform.shape[1] == 1 and target_channels > 1:
+                        waveform = waveform.repeat(1, target_channels, 1)
+                    elif target_channels == 1:
+                        waveform = waveform.mean(dim=1, keepdim=True)
+                    else:
+                        waveform = waveform[:, :target_channels, :]
+                        if waveform.shape[1] < target_channels:
+                            pad_channels = target_channels - waveform.shape[1]
+                            pad = torch.zeros(
+                                (waveform.shape[0], pad_channels, waveform.shape[2]),
+                                dtype=waveform.dtype,
+                            )
+                            waveform = torch.cat([waveform, pad], dim=1)
+
+                audio_processor = AudioProcessor(
+                    sample_rate=self.audio_encoder.sample_rate,
+                    mel_bins=self.audio_encoder.mel_bins,
+                    mel_hop_length=self.audio_encoder.mel_hop_length,
+                    n_fft=self.audio_encoder.n_fft,
+                )
+                waveform = waveform.to(device="cpu", dtype=torch.float32)
+                audio_processor = audio_processor.to(waveform.device)
+                mel = audio_processor.waveform_to_mel(waveform, waveform_sample_rate)
+                if self._interrupt:
+                    return None
+                audio_params = next(self.audio_encoder.parameters(), None)
+                audio_device = audio_params.device if audio_params is not None else self.device
+                audio_dtype = audio_params.dtype if audio_params is not None else self.dtype
+                mel = mel.to(device=audio_device, dtype=audio_dtype)
+                with torch.inference_mode():
+                    audio_latent = self.audio_encoder(mel)
+                if self._interrupt:
+                    return None
+                audio_downsample = getattr(
+                    getattr(self.audio_encoder, "patchifier", None),
+                    "audio_latent_downsample_factor",
+                    4,
+                )
+                target_shape = AudioLatentShape.from_video_pixel_shape(
+                    VideoPixelShape(
+                        batch=audio_latent.shape[0],
+                        frames=int(frame_num),
+                        width=1,
+                        height=1,
+                        fps=float(fps),
+                    ),
+                    channels=audio_latent.shape[1],
+                    mel_bins=audio_latent.shape[3],
+                    sample_rate=self.audio_encoder.sample_rate,
+                    hop_length=self.audio_encoder.mel_hop_length,
+                    audio_latent_downsample_factor=audio_downsample,
+                )
+                target_frames = target_shape.frames
+                if audio_latent.shape[2] < target_frames:
+                    pad_frames = target_frames - audio_latent.shape[2]
+                    pad = torch.zeros(
+                        (audio_latent.shape[0], audio_latent.shape[1], pad_frames, audio_latent.shape[3]),
+                        device=audio_latent.device,
+                        dtype=audio_latent.dtype,
+                    )
+                    audio_latent = torch.cat([audio_latent, pad], dim=2)
+                elif audio_latent.shape[2] > target_frames:
+                    audio_latent = audio_latent[:, :, :target_frames, :]
+                audio_latent = audio_latent.to(device=self.device, dtype=self.dtype)
+                audio_conditionings = [AudioConditionByLatent(audio_latent, audio_strength)]
+
         target_height = int(height)
         target_width = int(width)
         if target_height % 64 != 0:
@@ -525,9 +761,20 @@ class LTX2:
         if target_width % 64 != 0:
             target_width = int(math.ceil(target_width / 64) * 64)
 
+        if latent_conditioning_stage2 is not None:
+            expected_lat_h = target_height // 32
+            expected_lat_w = target_width // 32
+            if (
+                latent_conditioning_stage2.shape[3] != expected_lat_h
+                or latent_conditioning_stage2.shape[4] != expected_lat_w
+            ):
+                latent_conditioning_stage2 = None
+            else:
+                latent_conditioning_stage2 = latent_conditioning_stage2.to(device=self.device, dtype=self.dtype)
+
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
             negative_prompt = n_prompt if n_prompt else DEFAULT_NEGATIVE_PROMPT
-            video, audio = self.pipeline(
+            pipeline_output = self.pipeline(
                 prompt=input_prompt,
                 negative_prompt=negative_prompt,
                 seed=int(seed),
@@ -540,15 +787,21 @@ class LTX2:
                 images=images,
                 guiding_images=guiding_images or None,
                 images_stage2=images_stage2 if stage2_override else None,
+                video_conditioning=video_conditioning,
+                latent_conditioning_stage2=latent_conditioning_stage2,
                 tiling_config=tiling_config,
                 enhance_prompt=False,
+                audio_conditionings=audio_conditionings,
                 callback=callback,
                 interrupt_check=interrupt_check,
                 loras_slists=loras_slists,
                 text_connectors=text_connectors,
+                masking_source=masking_source,
+                masking_strength=masking_strength,
+                return_latent_slice=return_latent_slice,
             )
         else:
-            video, audio = self.pipeline(
+            pipeline_output = self.pipeline(
                 prompt=input_prompt,
                 seed=int(seed),
                 height=target_height,
@@ -556,13 +809,25 @@ class LTX2:
                 num_frames=int(frame_num),
                 frame_rate=float(fps),
                 images=images,
+                video_conditioning=video_conditioning,
+                latent_conditioning_stage2=latent_conditioning_stage2,
                 tiling_config=tiling_config,
                 enhance_prompt=False,
+                audio_conditionings=audio_conditionings,
                 callback=callback,
                 interrupt_check=interrupt_check,
                 loras_slists=loras_slists,
                 text_connectors=text_connectors,
+                masking_source=masking_source,
+                masking_strength=masking_strength,
+                return_latent_slice=return_latent_slice,
             )
+
+        latent_slice = None
+        if isinstance(pipeline_output, tuple) and len(pipeline_output) == 3:
+            video, audio, latent_slice = pipeline_output
+        else:
+            video, audio = pipeline_output
 
         if video is None or audio is None:
             return None
@@ -578,8 +843,11 @@ class LTX2:
         if audio_np is not None and audio_np.ndim == 2:
             if audio_np.shape[0] in (1, 2) and audio_np.shape[1] > audio_np.shape[0]:
                 audio_np = audio_np.T
-        return {
+        result = {
             "x": video_tensor,
             "audio": audio_np,
             "audio_sampling_rate": AUDIO_SAMPLE_RATE,
         }
+        if latent_slice is not None:
+            result["latent_slice"] = latent_slice
+        return result
