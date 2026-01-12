@@ -6171,8 +6171,6 @@ def generate_video(
                     container = server_config.get("video_container", "mp4")
                     extension = container 
 
-                #tc_str = f"{skip_steps_cache_type}{skip_steps_multiplier:.2f}" if skip_steps_cache_type else f""
-                #file_name = f"{time_flag}_{model_type}_seed{seed}_steps{num_inference_steps}{tc_str}_{width}x{height}x{video_length}@{fps:.0f}_scale{scale:.2f}.{extension}"
                 inputs = get_function_arguments(generate_video, locals())
                 if len(output_filename):
                     from shared.utils.filename_formatter import FilenameFormatter
@@ -6180,7 +6178,10 @@ def generate_video(
                     file_name = f"{sanitize_file_name(truncate_for_filesystem(os.path.splitext(os.path.basename(file_name))[0])).strip()}.{extension}"
                     file_name = os.path.basename(get_available_filename(save_path, file_name))
                 else:
-                    file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(truncate_for_filesystem(save_prompt)).strip()}.{extension}"
+                    #file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(truncate_for_filesystem(save_prompt)).strip()}.{extension}"
+                    tc_str = f"{skip_steps_cache_type}{skip_steps_multiplier:.2f}" if skip_steps_cache_type else f""
+                    file_name = f"{time_flag}_{model_type}_seed{seed}_steps{num_inference_steps}{tc_str}_{width}x{height}x{video_length}@{fps:.0f}_scale{scale:.2f}.{extension}"
+
                 video_path = os.path.join(save_path, file_name)
                 mmaudio_enabled, mmaudio_mode, mmaudio_persistence, mmaudio_model_name, mmaudio_model_path = get_mmaudio_settings(server_config)
                 any_mmaudio = MMAudio_setting != 0 and mmaudio_enabled and sample.shape[1] >=fps
