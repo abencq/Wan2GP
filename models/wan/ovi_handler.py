@@ -31,7 +31,7 @@ class family_handler:
         return wan_family_handler.register_lora_cli_args(parser)
 
     @staticmethod
-    def get_wan_text_encoder_filename(text_encoder_quantization):
+    def get_text_encoder_filename(text_encoder_quantization):
         text_encoder_filename =  "umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors"
         if text_encoder_quantization =="int8":
             text_encoder_filename = text_encoder_filename.replace("bf16", "quanto_int8") 
@@ -68,7 +68,7 @@ class family_handler:
         return cfg
 
     @staticmethod
-    def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization):
+    def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization, model_def=None):
 
         from .wan_handler import family_handler
         download_def = family_handler.query_model_files(computeList, "ti2v_2_2", model_filename, text_encoder_quantization)
@@ -101,7 +101,7 @@ class family_handler:
         mixed_precision_transformer=False,
         save_quantized=False,
         submodel_no_list=None,
-        override_text_encoder=None,
+        text_encoder_filename=None,
     ):
         from .ovi_fusion_engine import OviFusionEngine 
 
@@ -112,7 +112,7 @@ class family_handler:
             checkpoint_dir=checkpoint_dir,
             model_def=model_def,
             model_filename = model_filename, 
-            text_encoder_filename = family_handler.get_wan_text_encoder_filename(text_encoder_quantization),
+            text_encoder_filename = family_handler.get_text_encoder_filename(text_encoder_quantization),
             dtype=dtype,
         )
 
