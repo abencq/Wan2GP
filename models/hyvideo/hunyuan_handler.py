@@ -201,7 +201,7 @@ class family_handler():
         return latent_rgb_factors, latent_rgb_factors_bias
 
     @staticmethod
-    def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization):
+    def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization, model_def=None):
         text_encoder_filename = get_hunyuan_text_encoder_filename(base_model_type,text_encoder_quantization)    
 
         if test_hunyuan_1_5(base_model_type):
@@ -234,7 +234,7 @@ class family_handler():
         return download_def 
 
     @staticmethod
-    def load_model(model_filename, model_type = None,  base_model_type = None, model_def = None, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized = False, submodel_no_list = None, override_text_encoder = None):
+    def load_model(model_filename, model_type = None,  base_model_type = None, model_def = None, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized = False, submodel_no_list = None, text_encoder_filename = None):
         from .hunyuan import HunyuanVideoSampler
         from mmgp import offload
 
@@ -243,7 +243,7 @@ class family_handler():
             model_type = model_type, 
             base_model_type = base_model_type,
             model_def = model_def,
-            text_encoder_filepath = get_hunyuan_text_encoder_filename(base_model_type, text_encoder_quantization) if override_text_encoder is None else override_text_encoder,
+            text_encoder_filepath = get_hunyuan_text_encoder_filename(base_model_type, text_encoder_quantization) if text_encoder_filename is None else text_encoder_filename,
             dtype = dtype,
             quantizeTransformer = quantizeTransformer,
             VAE_dtype = VAE_dtype, 

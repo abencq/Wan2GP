@@ -104,7 +104,7 @@ class family_handler:
         return get_rgb_factors("wan")
 
     @staticmethod
-    def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization):
+    def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization, model_def=None):
         text_encoder_filename = get_longcat_text_encoder_filename(text_encoder_quantization)
         download_def = [
             {
@@ -144,7 +144,7 @@ class family_handler:
         mixed_precision_transformer=False,
         save_quantized=False,
         submodel_no_list=None,
-        override_text_encoder=None,
+        text_encoder_filename=None,
         **kwargs,
     ):
         from .longcat_main import LongCatModel
@@ -156,8 +156,8 @@ class family_handler:
             model_def=model_def,
             base_model_type=base_model_type,
             text_encoder_filename=get_longcat_text_encoder_filename(text_encoder_quantization)
-            if override_text_encoder is None
-            else override_text_encoder,
+            if text_encoder_filename is None
+            else text_encoder_filename,
             quantizeTransformer=quantizeTransformer,
             dtype=dtype,
             VAE_dtype=VAE_dtype,
