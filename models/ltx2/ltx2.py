@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import types
 from typing import Callable, Iterator
 
@@ -46,6 +47,11 @@ LTX2_USE_FP32_ROPE_FREQS = True #False
 def _normalize_config(config_value):
     if isinstance(config_value, dict):
         return config_value
+    if isinstance(config_value, (bytes, bytearray, memoryview)):
+        try:
+            config_value = bytes(config_value).decode("utf-8")
+        except Exception:
+            return {}
     if isinstance(config_value, str):
         try:
             return json.loads(config_value)
@@ -54,8 +60,8 @@ def _normalize_config(config_value):
     return {}
 
 
-def _load_config_from_checkpoint(path):
-    from mmgp import safetensors2
+def _load_config_from_checkpoint(path, fallback_config_path: str | None = None):
+    from mmgp import quant_router
 
     if isinstance(path, (list, tuple)):
         if not path:
@@ -63,19 +69,49 @@ def _load_config_from_checkpoint(path):
         path = path[0]
     if not path:
         return {}
-    _, metadata = safetensors2.load_metadata_state_dict(path)
-    if not metadata:
+
+    def _read_config_metadata(one_path: str) -> dict:
+        if not one_path:
+            return {}
+        _, metadata = quant_router.load_metadata_state_dict(one_path)
+        if not metadata:
+            return {}
+        return _normalize_config(metadata.get("config"))
+
+    config = _read_config_metadata(path)
+    if config:
+        return config
+    if not fallback_config_path:
         return {}
-    return _normalize_config(metadata.get("config"))
+    try:
+        with open(fallback_config_path, "r", encoding="utf-8") as reader:
+            return _normalize_config(json.load(reader))
+    except Exception:
+        return {}
 
 
 def _strip_model_prefix(key: str) -> str:
-    if key.startswith("model."):
-        return key[len("model.") :]
+    for prefix in ("model.", "velocity_model."):
+        if key.startswith(prefix):
+            return _strip_model_prefix(key[len(prefix) :])
     return key
 
 
 def _apply_sd_ops(state_dict: dict, quantization_map: dict | None, sd_ops):
+    if sd_ops is not None:
+        has_match = False
+        for key in state_dict.keys():
+            key = _strip_model_prefix(key)
+            if sd_ops.apply_to_key(key) is not None:
+                has_match = True
+                break
+        if not has_match:
+            new_sd = {_strip_model_prefix(k): v for k, v in state_dict.items()}
+            new_qm = {}
+            if quantization_map:
+                new_qm = {_strip_model_prefix(k): v for k, v in quantization_map.items()}
+            return new_sd, new_qm
+
     new_sd = {}
     for key, value in state_dict.items():
         key = _strip_model_prefix(key)
@@ -263,7 +299,9 @@ def _attach_lora_preprocessor(transformer: torch.nn.Module) -> None:
             return None, ""
 
         new_sd = {}
+        dropped_keys = []
         for key, value in sd.items():
+            original_key = key
             if key.startswith("model."):
                 key = key[len("model.") :]
             if key.startswith("diffusion_model."):
@@ -277,14 +315,23 @@ def _attach_lora_preprocessor(transformer: torch.nn.Module) -> None:
 
             module_name, suffix = split_lora_key(key)
             if not module_name:
+                dropped_keys.append(original_key)
                 continue
             if module_name not in module_names:
                 prefixed_name = f"velocity_model.{module_name}"
                 if prefixed_name in module_names:
                     module_name = prefixed_name
                 else:
+                    dropped_keys.append(original_key)
                     continue
             new_sd[f"{module_name}{suffix}"] = value
+        if dropped_keys:
+            sample = ", ".join(dropped_keys[:8])
+            if len(dropped_keys) > 8:
+                sample += ", ..."
+            raise ValueError(
+                f"LTX2 LoRA preprocessing dropped {len(dropped_keys)} unmatched keys for model '{model_type}': {sample}"
+            )
         return new_sd
 
     transformer.preprocess_loras = types.MethodType(preprocess_loras, transformer)
@@ -359,6 +406,29 @@ def _build_tiling_config(tile_size: int | tuple | list | None, fps: float | None
     return TilingConfig(spatial_config=spatial_config, temporal_config=temporal_config)
 
 
+def _infer_ic_lora_downscale_factor(loras_selected) -> int | None:
+    factors = []
+    for lora_path in loras_selected or []:
+        name = os.path.basename(str(lora_path)).lower()
+        if "ic-lora" not in name:
+            continue
+        match = re.search(r"-ref([0-9]+(?:\.[0-9]+)?)", name)
+        if not match:
+            factors.append(1)
+            continue
+        ref_ratio = float(match.group(1))
+        if ref_ratio <= 0:
+            factors.append(1)
+            continue
+        factors.append(max(1, int(round(1.0 / ref_ratio))))
+    if not factors:
+        return None
+    unique_factors = sorted(set(factors))
+    if len(unique_factors) > 1:
+        raise ValueError(f"Conflicting IC-LoRA reference downscale factors in selected LoRAs: {unique_factors}")
+    return unique_factors[0]
+
+
 def _collect_video_chunks(
     video: Iterator[torch.Tensor] | torch.Tensor,
     interrupt_check: Callable[[], bool] | None = None,
@@ -378,8 +448,9 @@ def _collect_video_chunks(
     if not chunks:
         return None
     frames = torch.cat(chunks, dim=0)
-    frames = frames.to(dtype=torch.float32).div_(127.5).sub_(1.0)
-    return frames.permute(3, 0, 1, 2).contiguous()
+    return frames.permute(3, 0, 1, 2)
+    # frames = frames.to(dtype=torch.float32).div_(127.5).sub_(1.0)
+    # return frames.permute(3, 0, 1, 2).contiguous()
 
 
 class LTX2:
@@ -398,6 +469,7 @@ class LTX2:
         self.device = torch.device("cuda")
         self.dtype = dtype
         self.VAE_dtype = VAE_dtype
+        self.base_model_type = base_model_type
         self.model_def = model_def
         self._interrupt = False
         self.vae = _LTX2VAEHelper()
@@ -421,7 +493,13 @@ class LTX2:
         gemma_root = text_encoder_filepath if text_encoder_filename is None else text_encoder_filename
         if not gemma_root:
             raise ValueError("Missing Gemma text encoder path.")
-        spatial_upsampler_path = fl.locate_file(_SPATIAL_UPSCALER_FILENAME)
+        if component_paths:
+            spatial_upsampler_path = component_paths.get("spatial_upsampler")
+        else:
+            spatial_upsampler_path = None
+        if not spatial_upsampler_path:
+            spatial_upsampler_name = model_def.get("ltx2_spatial_upscaler_file", _SPATIAL_UPSCALER_FILENAME)
+            spatial_upsampler_path = fl.locate_file(spatial_upsampler_name)
 
         # Internal FP8 handling is disabled; mmgp manages quantization/dtypes.
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
@@ -455,7 +533,8 @@ class LTX2:
     ):
         from mmgp import offload as mmgp_offload
 
-        base_config = _load_config_from_checkpoint(transformer_path)
+        fallback_config_path = component_paths.get("model_config") if component_paths else None
+        base_config = _load_config_from_checkpoint(transformer_path, fallback_config_path=fallback_config_path)
         if not base_config:
             raise ValueError("Missing config in transformer checkpoint.")
 
@@ -468,10 +547,10 @@ class LTX2:
             return transformer_path
 
         def _component_config(path):
-            config = _load_config_from_checkpoint(path)
+            config = _load_config_from_checkpoint(path, fallback_config_path=fallback_config_path)
             return config or base_config
 
-        def _load_component(model, path, sd_ops=None, postprocess=None):
+        def _load_component(model, path, sd_ops=None, postprocess=None, ignore_unused_weights=False):
             if postprocess is None and sd_ops is not None:
                 postprocess = _make_sd_postprocess(sd_ops)
             mmgp_offload.load_model_data(
@@ -479,17 +558,12 @@ class LTX2:
                 path,
                 postprocess_sd=postprocess,
                 default_dtype=self.dtype,
+                writable_tensors=False,
                 ignore_missing_keys=False,
+                ignore_unused_weights=ignore_unused_weights,
             )
             model.eval().requires_grad_(False)
             return model
-
-        # text_encoder = build_gemma_text_encoder(gemma_root, default_dtype=self.dtype)
-        # text_projection_path = _component_path("text_embedding_projection")
-        # text_projection_config = _component_config(text_projection_path)
-        # with init_empty_weights():
-        #     text_embedding_projection = GemmaFeaturesExtractorProjLinear.from_config(text_projection_config)
-        # text_embedding_projection = _load_component( text_embedding_projection, text_projection_path, TEXT_EMBEDDING_PROJECTION_KEY_OPS )
 
         transformer_sd_ops = LTXV_MODEL_COMFY_RENAMING_MAP
         with init_empty_weights():
@@ -497,14 +571,14 @@ class LTX2:
         velocity_model = _load_component(velocity_model, transformer_path, transformer_sd_ops)
         transformer = X0Model(velocity_model)
         transformer.eval().requires_grad_(False)
-
-        video_vae_path = _component_path("video_vae")
+        VAE_URLs = self.model_def.get("VAE_URLs", None)
+        video_vae_path =  fl.locate_file(VAE_URLs[0]) if VAE_URLs is not None and len(VAE_URLs) else _component_path("video_vae")
         video_config = _component_config(video_vae_path)
         with init_empty_weights():
             video_encoder = VideoEncoderConfigurator.from_config(video_config)
             video_decoder = VideoDecoderConfigurator.from_config(video_config)
             video_vae = _VAEContainer(video_encoder, video_decoder)
-        video_vae = _load_component(video_vae, video_vae_path, postprocess=_make_vae_postprocess("vae."))
+        video_vae = _load_component(video_vae, video_vae_path, postprocess=_make_vae_postprocess("vae."), ignore_unused_weights=True)
         video_encoder = video_vae.encoder
         video_decoder = video_vae.decoder
 
@@ -605,21 +679,30 @@ class LTX2:
             trans = self.model
         return trans, None
 
-    def get_loras_transformer(self, get_model_recursive_prop, model_type, video_prompt_type, **kwargs):
-        map = {
+    def get_loras_transformer(self, get_model_recursive_prop, model_type, video_prompt_type, base_model_type=None, model_def = None, **kwargs):
+        control_map = {
             "P": "pose",
             "D": "depth",
             "E": "canny",
         }
         loras = []
         video_prompt_type = video_prompt_type or ""
+        if model_def.get("ltx2_pipeline","two_stage") != "distilled":
+            return [], []
         preload_urls = get_model_recursive_prop(model_type, "preload_URLs")
-        for letter, signature in map.items():
-            if letter in video_prompt_type:
+        if (base_model_type or self.base_model_type) == "ltx2_22B":
+            if any(letter in video_prompt_type for letter in control_map):
                 for file_name in preload_urls:
-                    if signature in file_name:
+                    if "union-control" in os.path.basename(file_name):
                         loras.append(fl.locate_file(os.path.basename(file_name)))
                         break
+        else:
+            for letter, signature in control_map.items():
+                if letter in video_prompt_type:
+                    for file_name in preload_urls:
+                        if signature in file_name:
+                            loras.append(fl.locate_file(os.path.basename(file_name)))
+                            break
         loras_mult = [1.0] * len(loras)
         return loras, loras_mult
 
@@ -631,6 +714,37 @@ class LTX2:
         image_end=None,
         sampling_steps: int = 40,
         guide_scale: float = 4.0,
+        alt_guide_scale: float = 1.0,
+        input_video=None,
+        prefix_frames_count: int = 0,
+        input_frames=None,
+        input_frames2=None,
+        input_masks=None,
+        input_masks2=None,
+        masking_strength: float | None = None,
+        input_video_strength: float | None = None,
+        return_latent_slice=None,
+        video_prompt_type: str = "",
+        denoising_strength: float | None = None,
+        cfg_star_switch: int = 0,
+        apg_switch: int = 0,
+        perturbation_switch: int = 0,
+        perturbation_layers: list[int] | None = None,
+        perturbation_start: float = 0.0,
+        perturbation_end: float = 1.0,
+        audio_cfg_scale: float | None = None,
+        alt_scale: float = 0.0,
+        self_refiner_setting: int = 0,
+        self_refiner_plan: str = "",
+        self_refiner_f_uncertainty: float = 0.1,
+        self_refiner_certain_percentage: float = 0.999,
+        loras_slists=None,
+        loras_selected=None,
+        text_connectors=None,
+        input_waveform=None,
+        input_waveform_sample_rate=None,
+        audio_scale: float | None = None,
+        masking_source: dict | None = None,
         frame_num: int = 121,
         height: int = 1024,
         width: int = 1536,
@@ -646,17 +760,9 @@ class LTX2:
         image_start = _coerce_image_list(image_start)
         image_end = _coerce_image_list(image_end)
 
-        input_video = kwargs.get("input_video")
-        prefix_frames_count = int(kwargs.get("prefix_frames_count") or 0)
-        input_frames = kwargs.get("input_frames")
-        input_frames2 = kwargs.get("input_frames2")
-        input_masks = kwargs.get("input_masks")
-        input_masks2 = kwargs.get("input_masks2")
-        masking_strength = kwargs.get("masking_strength")
-        input_video_strength = kwargs.get("input_video_strength")
-        return_latent_slice = kwargs.get("return_latent_slice")
-        video_prompt_type = kwargs.get("video_prompt_type") or ""
-        denoising_strength = kwargs.get("denoising_strength")
+        prefix_frames_count = int(prefix_frames_count or 0)
+        video_prompt_type = video_prompt_type or ""
+        self_refiner_max_plans = int(self.model_def.get("self_refiner_max_plans", 1))
 
         def _get_frame_dim(video_tensor: torch.Tensor) -> int | None:
             if video_tensor.dim() < 2:
@@ -711,6 +817,10 @@ class LTX2:
         if "G" not in video_prompt_type:
             denoising_strength = 1.0
             masking_strength = 0.0
+        ic_lora_downscale_factor = None
+        if self.model_def.get("ltx2_pipeline", "two_stage") == "distilled":
+            ic_lora_downscale_factor = _infer_ic_lora_downscale_factor(loras_selected)
+        video_conditioning_downscale_factor = ic_lora_downscale_factor or 1
 
         video_conditioning = None
         masking_source = None
@@ -813,22 +923,17 @@ class LTX2:
 
         tiling_config = _build_tiling_config(VAE_tile_size, fps)
         interrupt_check = lambda: self._interrupt
-        loras_slists = kwargs.get("loras_slists")
-        text_connectors = getattr(self, "_text_connectors", None)
+        text_connectors = text_connectors or getattr(self, "_text_connectors", None)
 
         audio_conditionings = None
-        audio_guide = kwargs.get("audio_guide")
-        if audio_guide:
-            audio_scale = kwargs.get("audio_scale")
+        if input_waveform is not None:
             if audio_scale is None:
                 audio_scale = 1.0
             audio_strength = max(0.0, min(1.0, float(audio_scale)))
             if audio_strength > 0.0:
                 if self._interrupt:
                     return None
-                if not os.path.isfile(audio_guide):
-                    raise FileNotFoundError(f"Audio guide '{audio_guide}' not found.")
-                waveform, waveform_sample_rate = torchaudio.load(audio_guide)
+                waveform, waveform_sample_rate =  torch.from_numpy(input_waveform), input_waveform_sample_rate
                 if self._interrupt:
                     return None
                 if waveform.ndim == 1:
@@ -935,10 +1040,20 @@ class LTX2:
                 frame_rate=float(fps),
                 num_inference_steps=int(sampling_steps),
                 cfg_guidance_scale=float(guide_scale),
+                audio_cfg_guidance_scale=float(guide_scale if audio_cfg_scale is None else audio_cfg_scale),
+                cfg_star_switch=cfg_star_switch,
+                apg_switch=apg_switch,
+                perturbation_switch=perturbation_switch,
+                perturbation_layers=perturbation_layers,
+                perturbation_start=perturbation_start,
+                perturbation_end=perturbation_end,
+                alt_guidance_scale=float(alt_guide_scale),
+                alt_scale=float(alt_scale),
                 images=images,
                 guiding_images=guiding_images or None,
                 images_stage2=images_stage2 if stage2_override else None,
                 video_conditioning=video_conditioning,
+                video_conditioning_downscale_factor=video_conditioning_downscale_factor,
                 latent_conditioning_stage2=latent_conditioning_stage2,
                 tiling_config=tiling_config,
                 enhance_prompt=False,
@@ -950,6 +1065,11 @@ class LTX2:
                 masking_source=masking_source,
                 masking_strength=masking_strength,
                 return_latent_slice=return_latent_slice,
+                self_refiner_setting=self_refiner_setting,
+                self_refiner_plan=self_refiner_plan,
+                self_refiner_f_uncertainty=self_refiner_f_uncertainty,
+                self_refiner_certain_percentage=self_refiner_certain_percentage,
+                self_refiner_max_plans=self_refiner_max_plans,
             )
         else:
             pipeline_output = self.pipeline(
@@ -960,7 +1080,9 @@ class LTX2:
                 num_frames=int(frame_num),
                 frame_rate=float(fps),
                 images=images,
+                alt_guidance_scale=float(alt_guide_scale),
                 video_conditioning=video_conditioning,
+                video_conditioning_downscale_factor=video_conditioning_downscale_factor,
                 latent_conditioning_stage2=latent_conditioning_stage2,
                 tiling_config=tiling_config,
                 enhance_prompt=False,
@@ -972,6 +1094,11 @@ class LTX2:
                 masking_source=masking_source,
                 masking_strength=masking_strength,
                 return_latent_slice=return_latent_slice,
+                self_refiner_setting=self_refiner_setting,
+                self_refiner_plan=self_refiner_plan,
+                self_refiner_f_uncertainty=self_refiner_f_uncertainty,
+                self_refiner_certain_percentage=self_refiner_certain_percentage,
+                self_refiner_max_plans=self_refiner_max_plans,
             )
 
         latent_slice = None
@@ -994,10 +1121,11 @@ class LTX2:
         if audio_np is not None and audio_np.ndim == 2:
             if audio_np.shape[0] in (1, 2) and audio_np.shape[1] > audio_np.shape[0]:
                 audio_np = audio_np.T
+        output_audio_sampling_rate = int(getattr(self.vocoder, "output_sampling_rate", AUDIO_SAMPLE_RATE))
         result = {
             "x": video_tensor,
             "audio": audio_np,
-            "audio_sampling_rate": AUDIO_SAMPLE_RATE,
+            "audio_sampling_rate": output_audio_sampling_rate,
         }
         if latent_slice is not None:
             result["latent_slice"] = latent_slice

@@ -7,6 +7,11 @@ from optimum.quanto import QModuleMixin
 from optimum.quanto.tensor.qtensor import QTensor
 from optimum.quanto.tensor.qtype import qtype as _quanto_qtype, qtypes as _quanto_qtypes
 
+try:
+    from torch._subclasses.fake_tensor import FakeTensor as _TorchFakeTensor
+except Exception:  # pragma: no cover
+    _TorchFakeTensor = ()
+
 def _maybe_add_nvfp4_cu13_dll_dir():
     if os.name != "nt":
         return
@@ -44,6 +49,7 @@ if _NVFP4_QTYPE_NAME not in _quanto_qtypes:
         qmax=6.0,
     )
 _NVFP4_QTYPE = _quanto_qtypes[_NVFP4_QTYPE_NAME]
+HANDLER_PRIORITY = 1
 
 _NVFP4_LAYOUT_LEGACY = "legacy"
 _NVFP4_LAYOUT_TENSORCORE = "tensorcore"
@@ -59,6 +65,19 @@ _NVFP4_KERNEL_AVAILABLE = False
 _NVFP4_KERNEL_CHECKED = False
 _NVFP4_KERNEL_BACKEND = None
 _NVFP4_ACT_SCALE_CACHE = {}
+
+_NVFP4_SPLIT_FIELDS = {
+    "weight": 0,
+    "bias": 0,
+    "weight_scale": 0,
+    "weight_scale_2": 0,
+    "input_scale": 0,
+    "input_global_scale": 0,
+    "alpha": 0,
+    "input_absmax": 0,
+    "weight_global_scale": 0,
+    "output_scale": 0,
+}
 
 _NVFP4_BACKEND = os.environ.get("WGP_NVFP4_BACKEND", _NVFP4_BACKEND_AUTO).strip().lower()
 _NVFP4_BACKEND = _NVFP4_BACKEND_LIGHTX2V
@@ -76,6 +95,41 @@ def _normalize_nvfp4_backend(name):
     if norm in ("off", "none", "fallback", "disable", "disabled"):
         return "fallback"
     return norm
+
+
+def _split_or_share_nvfp4_scale(src, *, dim, split_sizes, context):
+    if src is None or not torch.is_tensor(src):
+        return None
+    total = sum(split_sizes)
+    if src.numel() == 1:
+        return [src] * len(split_sizes)
+    if src.dim() > dim and src.size(dim) == total:
+        return torch.split(src, split_sizes, dim=dim)
+    if src.ndim > 1 and src.size(1) == total:
+        return torch.split(src, split_sizes, dim=1)
+    return [src] * len(split_sizes)
+
+
+def split_fused_weights(state_dict, fused_split_map, quantization_map=None, allowed_bases=None, default_dtype=None, verboseLevel=1):
+    from mmgp import offload
+    return offload.sd_split_linear(
+        state_dict,
+        fused_split_map,
+        split_fields=dict(_NVFP4_SPLIT_FIELDS),
+        split_handlers={
+            "weight_scale": _split_or_share_nvfp4_scale,
+            "weight_scale_2": _split_or_share_nvfp4_scale,
+            "input_scale": _split_or_share_nvfp4_scale,
+            "input_global_scale": _split_or_share_nvfp4_scale,
+            "alpha": _split_or_share_nvfp4_scale,
+            "input_absmax": _split_or_share_nvfp4_scale,
+            "weight_global_scale": _split_or_share_nvfp4_scale,
+            "output_scale": _split_or_share_nvfp4_scale,
+        },
+        verboseLevel=verboseLevel,
+        allowed_bases=allowed_bases,
+        return_split_bases=True,
+    )
 
 
 _NVFP4_BACKEND = _normalize_nvfp4_backend(_NVFP4_BACKEND)
@@ -217,6 +271,10 @@ def _supports_nvfp4_kernel(device):
 _init_nvfp4_kernel_support()
 
 
+def _is_fake_tensor(tensor):
+    return isinstance(tensor, _TorchFakeTensor)
+
+
 def _nvfp4_layout(weight):
     return getattr(weight, "_layout", _NVFP4_LAYOUT_LEGACY)
 
@@ -254,6 +312,8 @@ def _nvfp4_can_use_kernel(input, weight):
         return False
     if getattr(weight._input_global_scale, "is_meta", False):
         return False
+    if _is_fake_tensor(input):
+        return True
     try:
         if not torch.isfinite(weight._input_global_scale).all():
             return False
@@ -413,6 +473,27 @@ def _nvfp4_linear_cuda(input, weight, bias=None):
     if _NVFP4_KERNEL_BACKEND == _NVFP4_BACKEND_LIGHTX2V:
         return _nvfp4_linear_cuda_lightx2v(input, weight, bias=bias)
     return _nvfp4_linear_cuda_comfy(input, weight, bias=bias)
+
+
+@torch.compiler.disable()
+def _nvfp4_linear(input, weight, bias=None, op=None):
+    if _nvfp4_can_use_kernel(input, weight):
+        if _is_fake_tensor(input):
+            return input.new_empty((*input.shape[:-1], weight.size(0)))
+        return _nvfp4_linear_cuda(input, weight, bias=bias)
+    _nvfp4_note_fallback()
+    if _is_fake_tensor(input):
+        return input.new_empty((*input.shape[:-1], weight.size(0)))
+
+    if torch.is_tensor(input):
+        qweight = weight.dequantize(dtype=input.dtype, device=input.device)
+        bias_arg = bias
+        if bias_arg is not None and torch.is_tensor(bias_arg):
+            if bias_arg.device != input.device or bias_arg.dtype != input.dtype:
+                bias_arg = bias_arg.to(device=input.device, dtype=input.dtype)
+        return torch.nn.functional.linear(input, qweight, bias=bias_arg)
+
+    return torch.nn.functional.linear(input, weight.dequantize(), bias=bias)
 
 
 def _is_float8_dtype(dtype):
@@ -719,6 +800,11 @@ class NVFP4WeightTensor(QTensor):
         self._layout = layout
         self._allow_kernel = allow_kernel
 
+    def __repr__(self):
+        return f"NVFP4WeightTensor(shape={tuple(self.shape)}, dtype={self.dtype}, device={self.device}, layout={self._layout})"
+
+    __str__ = __repr__
+
     def dequantize(self, dtype=None, device=None):
         if dtype is None:
             dtype = self.dtype
@@ -818,15 +904,7 @@ class NVFP4WeightTensor(QTensor):
             weight = args[1] if len(args) > 1 else kwargs.get("weight", None)
             bias = args[2] if len(args) > 2 else kwargs.get("bias", None)
             if isinstance(weight, NVFP4WeightTensor):
-                if _nvfp4_can_use_kernel(input, weight):
-                    return _nvfp4_linear_cuda(input, weight, bias=bias)
-                _nvfp4_note_fallback()
-                dtype = input.dtype if torch.is_tensor(input) else weight.dtype
-                device = input.device if torch.is_tensor(input) else weight.device
-                w = weight.dequantize(dtype=dtype, device=device)
-                if bias is not None and torch.is_tensor(bias) and bias.dtype != dtype:
-                    bias = bias.to(dtype)
-                return torch.nn.functional.linear(input, w, bias)
+                return _nvfp4_linear(input, weight, bias=bias)
         with torch._C.DisableTorchFunctionSubclass():
             return func(*args, **kwargs)
 
@@ -838,15 +916,7 @@ class NVFP4WeightTensor(QTensor):
             weight = args[1]
             bias = args[2] if len(args) > 2 else None
             if isinstance(weight, NVFP4WeightTensor):
-                if _nvfp4_can_use_kernel(input, weight):
-                    return _nvfp4_linear_cuda(input, weight, bias=bias)
-                _nvfp4_note_fallback()
-                dtype = input.dtype if torch.is_tensor(input) else weight.dtype
-                device = input.device if torch.is_tensor(input) else weight.device
-                w = weight.dequantize(dtype=dtype, device=device)
-                if bias is not None and torch.is_tensor(bias) and bias.dtype != dtype:
-                    bias = bias.to(dtype)
-                return op(input, w, bias)
+                return _nvfp4_linear(input, weight, bias=bias, op=op)
         if op is torch.ops.aten.detach:
             t = args[0]
             return NVFP4WeightTensor.create(
@@ -994,18 +1064,12 @@ class QLinearNVFP4(QModuleMixin, torch.nn.Linear):
             if weight_scale_2 is None:
                 missing_keys.append(scale2_key)
             if input_scale is None:
-                allow_kernel = False
                 if torch.is_tensor(weight_scale_2):
-                    input_scale = torch.full(
-                        (),
-                        float("nan"),
-                        dtype=weight_scale_2.dtype,
-                        device=weight_scale_2.device,
-                    )
+                    input_scale = torch.ones((), dtype=torch.float32, device=weight_scale_2.device)
                 elif torch.is_tensor(weight_u8):
-                    input_scale = torch.full((), float("nan"), dtype=torch.float32, device=weight_u8.device)
+                    input_scale = torch.ones((), dtype=torch.float32, device=weight_u8.device)
                 else:
-                    input_scale = torch.tensor(float("nan"), dtype=torch.float32)
+                    input_scale = torch.ones((), dtype=torch.float32)
         else:
             if input_global_scale is None or alpha is None:
                 if input_absmax is not None and weight_global_scale is not None:
