@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator
 import torch
 
 from ..ltx_core.components.diffusion_steps import EulerDiffusionStep
-from ..ltx_core.components.guiders import CFGGuider
+from ..ltx_core.components.guiders import CFGGuider, CFGStarRescalingGuider, LtxAPGGuider
 from ..ltx_core.components.noisers import GaussianNoiser
 from ..ltx_core.components.protocols import DiffusionStepProtocol
 from ..ltx_core.components.schedulers import LTX2Scheduler
@@ -38,6 +38,7 @@ from .utils.helpers import (
 from .utils.media_io import encode_video
 from .utils.types import PipelineComponents
 from shared.utils.loras_mutipliers import update_loras_slists
+from shared.utils.text_encoder_cache import TextEncoderCache
 
 device = get_device()
 
@@ -78,6 +79,7 @@ class KeyframeInterpolationPipeline:
             dtype=self.dtype,
             device=device,
         )
+        self.text_encoder_cache = TextEncoderCache()
 
     @torch.inference_mode()
     def __call__(  # noqa: PLR0913
@@ -92,6 +94,15 @@ class KeyframeInterpolationPipeline:
         num_inference_steps: int,
         cfg_guidance_scale: float,
         images: list[tuple[str, int, float]],
+        audio_cfg_guidance_scale: float | None = None,
+        cfg_star_switch: int = 0,
+        apg_switch: int = 0,
+        perturbation_switch: int = 0,
+        perturbation_layers: list[int] | None = None,
+        perturbation_start: float = 0.0,
+        perturbation_end: float = 1.0,
+        alt_guidance_scale: float = 1.0,
+        alt_scale: float = 0.0,
         tiling_config: TilingConfig | None = None,
         enhance_prompt: bool = False,
         audio_conditionings: list | None = None,
@@ -108,7 +119,14 @@ class KeyframeInterpolationPipeline:
         mask_generator = torch.Generator(device=self.device).manual_seed(int(seed) + 1)
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
-        cfg_guider = CFGGuider(cfg_guidance_scale)
+        audio_cfg_guidance_scale = cfg_guidance_scale if audio_cfg_guidance_scale is None else audio_cfg_guidance_scale
+        guider_cls = CFGGuider
+        if apg_switch:
+            guider_cls = LtxAPGGuider
+        elif cfg_star_switch:
+            guider_cls = CFGStarRescalingGuider
+        video_cfg_guider = guider_cls(cfg_guidance_scale)
+        audio_cfg_guider = guider_cls(audio_cfg_guidance_scale)
         dtype = torch.bfloat16
 
         text_encoder = self.stage_1_model_ledger.text_encoder()
@@ -116,20 +134,26 @@ class KeyframeInterpolationPipeline:
             prompt = generate_enhanced_prompt(
                 text_encoder, prompt, images[0][0] if len(images) > 0 else None, seed=seed
             )
-        raw_contexts = encode_text(text_encoder, prompts=[prompt, negative_prompt])
         feature_extractor, video_connector, audio_connector = resolve_text_connectors(
             text_encoder, text_connectors
+        )
+        encode_fn = lambda prompts: postprocess_text_embeddings(
+            encode_text(text_encoder, prompts=prompts),
+            feature_extractor,
+            video_connector,
+            audio_connector,
+        )
+        contexts = self.text_encoder_cache.encode(
+            encode_fn,
+            [prompt, negative_prompt],
+            device=self.device,
+            parallel=True,
         )
 
         torch.cuda.synchronize()
         del text_encoder
         cleanup_memory()
-        context_p, context_n = postprocess_text_embeddings(
-            raw_contexts,
-            feature_extractor,
-            video_connector,
-            audio_connector,
-        )
+        context_p, context_n = contexts
         v_context_p, a_context_p = context_p
         v_context_n, a_context_n = context_n
 
@@ -165,18 +189,26 @@ class KeyframeInterpolationPipeline:
                 audio_state=audio_state,
                 stepper=stepper,
                 denoise_fn=guider_denoising_func(
-                    cfg_guider,
+                    video_cfg_guider,
+                    audio_cfg_guider,
                     v_context_p,
                     v_context_n,
                     a_context_p,
                     a_context_n,
                     transformer=transformer,  # noqa: F821
+                    alt_guidance_scale=alt_guidance_scale,
+                    alt_scale=alt_scale,
+                    perturbation_switch=perturbation_switch,
+                    perturbation_layers=perturbation_layers,
+                    perturbation_start=perturbation_start,
+                    perturbation_end=perturbation_end,
                 ),
                 mask_context=mask_context,
                 interrupt_check=interrupt_check,
                 callback=callback,
                 preview_tools=preview_tools,
                 pass_no=1,
+                transformer=transformer,
             )
 
         stage_1_output_shape = VideoPixelShape(
@@ -272,12 +304,14 @@ class KeyframeInterpolationPipeline:
                     video_context=v_context_p,
                     audio_context=a_context_p,
                     transformer=transformer,  # noqa: F821
+                    alt_guidance_scale=1.0,
                 ),
                 mask_context=mask_context,
                 interrupt_check=interrupt_check,
                 callback=callback,
                 preview_tools=preview_tools,
                 pass_no=2,
+                transformer=transformer,
             )
 
         stage_2_output_shape = VideoPixelShape(batch=1, frames=num_frames, width=width, height=height, fps=frame_rate)

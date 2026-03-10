@@ -31,6 +31,7 @@ from .unified_sampler import UnifiedSampler
 from .pipeline_output import ZImagePipelineOutput
 from shared.utils.utils import get_outpainting_frame_location, resize_lanczos, calculate_new_dimensions, convert_image_to_tensor, fit_image_into_canvas
 from shared.utils.loras_mutipliers import update_loras_slists
+from shared.utils.text_encoder_cache import TextEncoderCache
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -62,6 +63,12 @@ EXAMPLE_DOC_STRING = """
         >>> image.save("zimage.png")
         ```
 """
+
+# Default negative prompt for Z-Image when user input is empty.
+DEFAULT_NEGATIVE_PROMPT = (
+    "low quality, worst quality, blurry, pixelated, noisy, artifacts, watermark, text, logo, "
+    "bad anatomy, bad hands, extra limbs"
+)
 
 
 # Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
@@ -218,6 +225,7 @@ class ZImagePipeline(DiffusionPipeline, FromSingleFileMixin):
             2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
         )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor * 2)
+        self.text_encoder_cache = TextEncoderCache()
 
     def encode_prompt(
         self,
@@ -244,9 +252,20 @@ class ZImagePipeline(DiffusionPipeline, FromSingleFileMixin):
 
         if do_classifier_free_guidance:
             if negative_prompt is None:
-                negative_prompt = ["" for _ in prompt]
+                negative_prompt = [DEFAULT_NEGATIVE_PROMPT for _ in prompt]
+            elif isinstance(negative_prompt, str):
+                negative_prompt = (
+                    [DEFAULT_NEGATIVE_PROMPT for _ in prompt]
+                    if not negative_prompt.strip()
+                    else [negative_prompt]
+                )
             else:
-                negative_prompt = [negative_prompt] if isinstance(negative_prompt, str) else negative_prompt
+                # Keep list behavior but fill empty items when lengths match.
+                if len(negative_prompt) == len(prompt):
+                    negative_prompt = [
+                        DEFAULT_NEGATIVE_PROMPT if (p is None or (isinstance(p, str) and not p.strip())) else p
+                        for p in negative_prompt
+                    ]
             assert len(prompt) == len(negative_prompt)
             negative_prompt_embeds = self._encode_prompt(
                 prompt=negative_prompt,
@@ -278,41 +297,37 @@ class ZImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         if isinstance(prompt, str):
             prompt = [prompt]
 
-        for i, prompt_item in enumerate(prompt):
-            messages = [
-                {"role": "user", "content": prompt_item},
-            ]
-            prompt_item = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=True,
+        def encode_fn(prompts):
+            formatted_prompts = []
+            for prompt_item in prompts:
+                messages = [
+                    {"role": "user", "content": prompt_item},
+                ]
+                formatted_prompts.append(
+                    self.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=True,
+                    )
+                )
+            text_inputs = self.tokenizer(
+                formatted_prompts,
+                padding="max_length",
+                max_length=max_sequence_length,
+                truncation=True,
+                return_tensors="pt",
             )
-            prompt[i] = prompt_item
+            text_input_ids = text_inputs.input_ids.to(device)
+            prompt_masks = text_inputs.attention_mask.to(device).bool()
+            prompt_embeds = self.text_encoder(input_ids=text_input_ids, attention_mask=prompt_masks, output_hidden_states=True).hidden_states[-2]
+            embeddings_list = []
+            for i in range(len(prompt_embeds)):
+                embeddings_list.append(prompt_embeds[i][prompt_masks[i]])
+            return embeddings_list
 
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=max_sequence_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-
-        text_input_ids = text_inputs.input_ids.to(device)
-        prompt_masks = text_inputs.attention_mask.to(device).bool()
-
-        prompt_embeds = self.text_encoder(
-            input_ids=text_input_ids,
-            attention_mask=prompt_masks,
-            output_hidden_states=True,
-        ).hidden_states[-2]
-
-        embeddings_list = []
-
-        for i in range(len(prompt_embeds)):
-            embeddings_list.append(prompt_embeds[i][prompt_masks[i]])
-
-        return embeddings_list
+        cache_keys = [(max_sequence_length, p) for p in prompt]
+        return self.text_encoder_cache.encode(encode_fn, prompt, device=device, cache_keys=cache_keys)
 
     def prepare_latents(
         self,
@@ -495,7 +510,8 @@ class ZImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         self._guidance_scale = guidance_scale
         kwargs = {}
         NAG = None
-        if NAG_scale > 1:
+        # NAG is only safe without CFG; skip it when guidance > 1.
+        if NAG_scale > 1 and guidance_scale <= 1:
             NAG = { "scale": NAG_scale, "tau": NAG_tau, "alpha": NAG_alpha, }
 
         dtype = (

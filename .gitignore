@@ -6,6 +6,8 @@
 *.gif
 *.bmp
 *.mp4
+*.webm
+*.npy
 *.mov
 *.mkv
 *.log
@@ -45,3 +47,5 @@ loras_i2v/
 settings/
 
 wgp_config.json
+plugins_local.json
+loras_url_cache.json
