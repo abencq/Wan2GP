@@ -249,7 +249,10 @@ class _LTX2VAEHelper:
         mixed_precision: bool,
         output_height: int | None = None,
         output_width: int | None = None,
-    ) -> int:
+    ) -> int | tuple[int, int]:
+        if vae_config >= 4:
+            vae_config = 0
+
         if vae_config == 0:
             if mixed_precision:
                 device_mem_capacity = device_mem_capacity / 1.5
@@ -266,13 +269,15 @@ class _LTX2VAEHelper:
         if ref_size is not None and ref_size > 480:
             use_vae_config += 1
 
+        spatial_tile_size = 128
         if use_vae_config <= 1:
-            return 0
-        if use_vae_config == 2:
-            return 512
-        if use_vae_config == 3:
-            return 256
-        return 128
+            spatial_tile_size = 0
+        elif use_vae_config == 2:
+            spatial_tile_size = 512
+        elif use_vae_config == 3:
+            spatial_tile_size = 256
+
+        return spatial_tile_size
 
 
 def _attach_lora_preprocessor(transformer: torch.nn.Module) -> None:
@@ -376,11 +381,15 @@ def _normalize_temporal_overlap(overlap_frames: int, tile_frames: int) -> int:
 
 
 def _build_tiling_config(tile_size: int | tuple | list | None, fps: float | None) -> TilingConfig | None:
+    temporal_tiling_divisor = 1
     spatial_config = None
     if isinstance(tile_size, (tuple, list)):
         if len(tile_size) == 0:
             tile_size = None
-        tile_size = tile_size[-1]
+        else:
+            if len(tile_size) > 1:
+                temporal_tiling_divisor = max(1, int(tile_size[0] or 1))
+            tile_size = tile_size[-1]
     if tile_size is not None:
         tile_size = _normalize_tiling_size(tile_size)
         if tile_size > 0:
@@ -392,7 +401,8 @@ def _build_tiling_config(tile_size: int | tuple | list | None, fps: float | None
 
     temporal_config = None
     if fps is not None and fps > 0:
-        tile_frames = _normalize_temporal_tiling_size(int(math.ceil(float(fps) * 5.0)))
+        temporal_tiling_divisor = max(1, temporal_tiling_divisor)
+        tile_frames = _normalize_temporal_tiling_size(int(math.ceil(float(fps) * 5.0 / temporal_tiling_divisor)))
         if tile_frames > 0:
             overlap_frames = int(round(tile_frames * 3 / 8))
             overlap_frames = _normalize_temporal_overlap(overlap_frames, tile_frames)
@@ -568,7 +578,7 @@ class LTX2:
         transformer_sd_ops = LTXV_MODEL_COMFY_RENAMING_MAP
         with init_empty_weights():
             velocity_model = LTXModelConfigurator.from_config(base_config)
-        velocity_model = _load_component(velocity_model, transformer_path, transformer_sd_ops)
+        velocity_model = _load_component(velocity_model, transformer_path, transformer_sd_ops, ignore_unused_weights=True)
         transformer = X0Model(velocity_model)
         transformer.eval().requires_grad_(False)
         VAE_URLs = self.model_def.get("VAE_URLs", None)
@@ -719,8 +729,10 @@ class LTX2:
         prefix_frames_count: int = 0,
         input_frames=None,
         input_frames2=None,
+        input_ref_images=None,
         input_masks=None,
         input_masks2=None,
+        frames_relative_positions_list=None,
         masking_strength: float | None = None,
         input_video_strength: float | None = None,
         return_latent_slice=None,
@@ -759,6 +771,18 @@ class LTX2:
 
         image_start = _coerce_image_list(image_start)
         image_end = _coerce_image_list(image_end)
+        if input_ref_images is None:
+            input_ref_images = []
+        elif isinstance(input_ref_images, (list, tuple)):
+            input_ref_images = list(input_ref_images)
+        else:
+            input_ref_images = [input_ref_images]
+        if frames_relative_positions_list is None:
+            frames_relative_positions_list = []
+        elif isinstance(frames_relative_positions_list, (list, tuple)):
+            frames_relative_positions_list = list(frames_relative_positions_list)
+        else:
+            frames_relative_positions_list = [frames_relative_positions_list]
 
         prefix_frames_count = int(prefix_frames_count or 0)
         video_prompt_type = video_prompt_type or ""
@@ -824,7 +848,8 @@ class LTX2:
 
         video_conditioning = None
         masking_source = None
-        if input_frames is not None or input_frames2 is not None:
+        injected_ref_count = min(len(input_ref_images), len(frames_relative_positions_list))
+        if input_frames is not None or input_frames2 is not None or injected_ref_count > 0:
             control_start_frame = int(prefix_frames_count)
             expected_guide_frames = max(1, int(frame_num) - control_start_frame + (1 if prefix_frames_count > 1 else 0))
             if prefix_frames_count > 1:
@@ -847,6 +872,8 @@ class LTX2:
                 conditioning_entries.append((input_frames, control_start_frame, control_strength))
             if input_frames2 is not None:
                 conditioning_entries.append((input_frames2, control_start_frame, control_strength))
+            for ref_image, frame_idx in zip(input_ref_images[:injected_ref_count], frames_relative_positions_list[:injected_ref_count]):
+                conditioning_entries.append((ref_image, int(frame_idx), control_strength))
             if conditioning_entries:
                 video_conditioning = conditioning_entries
             if masking_strength > 0.0:
