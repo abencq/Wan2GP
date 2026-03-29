@@ -27,7 +27,7 @@ _ARCH_SPECS = {
     "ltx2_22B": {
         "repo_id": "DeepBeepMeep/LTX-2",
         "config_file": "ltx2_22b_config.json",
-        "spatial_upscaler": "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+        "spatial_upscaler": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
         "temporal_upscaler": "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
         "distilled_lora": "ltx-2.3-22b-distilled-lora-384.safetensors",
         "union_control_lora": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
@@ -109,7 +109,15 @@ class family_handler:
 
     @staticmethod
     def query_family_maps():
-        return {}, {}
+
+        models_eqv_map = {
+            "ltx2_19B" : "ltx2_22B",
+        }
+
+        models_comp_map = { 
+                    "ltx2_19B" : [ "ltx2_22B"],
+                    }
+        return models_eqv_map, models_comp_map
 
     @staticmethod
     def query_model_family():
@@ -165,16 +173,20 @@ class family_handler:
             "ltx2_spatial_upscaler_file": spec["spatial_upscaler"],
             "self_refiner": True,
             "self_refiner_max_plans": 2,
+            "no_background_removal": True,
+            "vae_block_size": 64,
         }
         extra_model_def["extra_control_frames"] = 1
         extra_model_def["dont_cat_preguide"] = True
         extra_model_def["input_video_strength"] = "Image / Source Video Strength (you may try values lower value than 1 to get more motion)"
         
-        control_choices = [("No Video Process", ""), ("Transfer Human Motion", "PVG") , ("Transfer Depth", "DVG") , ("Transfer Canny Edges", "EVG"), ("Use LTX-2 raw format Control Video", "VG")] if distilled else []
+        control_choices = [("No Video Process", "")]
+        control_choices += [ ("Transfer Human Motion", "PVG") , ("Transfer Depth", "DVG") , ("Transfer Canny Edges", "EVG"), ("Use LTX-2 raw format Control Video", "VG")] if distilled else []
         control_choices +=   [("Inject Frames", "KFI")]
         extra_model_def["guide_custom_choices"] = {
             "choices": control_choices,
             "letters_filter": "PDEVGKFI",
+            "default": "",
             "label": "Control Video / Frames Injection"
         }
 
@@ -261,10 +273,6 @@ class family_handler:
         # if base_model_type == "ltx2_22B":
         #     return getattr(args, "lora_dir_ltx2_22b", None) or os.path.join(lora_root, "ltx2_22B")
         return getattr(args, "lora_dir_ltx2", None) or os.path.join(lora_root, "ltx2")
-
-    @staticmethod
-    def get_vae_block_size(base_model_type):
-        return 64
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):

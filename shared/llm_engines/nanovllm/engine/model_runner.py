@@ -42,7 +42,7 @@ def find_available_port(start_port: int = 2333, max_attempts: int = 100) -> int:
 
 class ModelRunner:
 
-    def __init__(self, config: Config, rank: int, event: Event | list[Event], model_object=None):
+    def __init__(self, config: Config, rank: int, event: Event | list[Event], model_object=None, graph_pool_handle=None):
         # Enable capturing scalar outputs to avoid graph breaks from Tensor.item() calls
         torch._dynamo.config.capture_scalar_outputs = True
         
@@ -95,6 +95,7 @@ class ModelRunner:
         self._logits_bias_cache = {}
         self._sampling_generator = None
         self._runtime_signature = None
+        self._graph_pool_seed = graph_pool_handle
         self._guard_counts = {}
         self._guard_seen_details = set()
         torch.set_default_dtype(config_dtype)
@@ -466,12 +467,19 @@ class ModelRunner:
         method = getattr(self, method_name, None)
         return method(*args)
 
+    def _get_kv_cache_modules(self):
+        if self.model is None:
+            return []
+        return [module for module in self.model.modules() if hasattr(module, "k_cache") and hasattr(module, "v_cache")]
+
     def allocate_kv_cache(self):
         config = self.config
         hf_config = config.hf_config
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * self.dtype.itemsize
+        kv_cache_modules = self._get_kv_cache_modules()
+        kv_cache_layer_count = len(kv_cache_modules)
+        block_bytes = 2 * kv_cache_layer_count * self.block_size * num_kv_heads * head_dim * self.dtype.itemsize
 
         # Strict policy: allocate exactly the blocks required by requested runtime limits.
         required_blocks_per_seq = (config.max_model_len + self.block_size - 1) // self.block_size
@@ -494,7 +502,7 @@ class ModelRunner:
         try:
             self.kv_cache = torch.empty(
                 2,
-                hf_config.num_hidden_layers,
+                kv_cache_layer_count,
                 config.num_kvcache_blocks,
                 self.block_size,
                 num_kv_heads,
@@ -511,12 +519,9 @@ class ModelRunner:
                     f"Current free VRAM: {free_now / 1024**3:.2f} GB / {total_now / 1024**3:.2f} GB total."
                 ) from exc
             raise
-        layer_id = 0
-        for module in self.model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache = self.kv_cache[0, layer_id]
-                module.v_cache = self.kv_cache[1, layer_id]
-                layer_id += 1
+        for layer_id, module in enumerate(kv_cache_modules):
+            module.k_cache = self.kv_cache[0, layer_id]
+            module.v_cache = self.kv_cache[1, layer_id]
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         bs = len(seqs)
@@ -931,7 +936,7 @@ class ModelRunner:
         if not self.graph_bs:
             self.graph_bs = [max_bs]
         self.graphs = {}
-        self.graph_pool = None
+        self.graph_pool = self._graph_pool_seed
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
