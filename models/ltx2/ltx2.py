@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import os
@@ -349,7 +350,12 @@ def _coerce_image_list(image_value):
 
 
 def _to_latent_index(frame_idx: int, stride: int) -> int:
-    return int(frame_idx) // int(stride)
+    frame_idx = int(frame_idx)
+    stride = int(stride)
+    if frame_idx <= 0:
+        return 0
+    # Causal LTX VAEs keep pixel frame 0 in its own latent slot.
+    return (frame_idx - 1) // stride + 1
 
 
 def _normalize_tiling_size(tile_size: int) -> int:
@@ -442,23 +448,52 @@ def _infer_ic_lora_downscale_factor(loras_selected) -> int | None:
 def _collect_video_chunks(
     video: Iterator[torch.Tensor] | torch.Tensor,
     interrupt_check: Callable[[], bool] | None = None,
+    expected_frames: int | None = None,
+    expected_height: int | None = None,
+    expected_width: int | None = None,
 ) -> torch.Tensor | None:
+    iterator = None
     if video is None:
         return None
-    if torch.is_tensor(video):
-        chunks = [video]
-    else:
-        chunks = []
-        for chunk in video:
-            if interrupt_check is not None and interrupt_check():
+    try:
+        if torch.is_tensor(video):
+            frames = video
+            if expected_height is not None or expected_width is not None:
+                frames = frames[:, :expected_height, :expected_width]
+            return frames.permute(3, 0, 1, 2)
+        else:
+            iterator = iter(video)
+            video_tensor = None
+            write_pos = 0
+            for chunk in iterator:
+                if interrupt_check is not None and interrupt_check():
+                    return None
+                if chunk is None:
+                    continue
+                chunk = chunk if torch.is_tensor(chunk) else torch.tensor(chunk)
+                if expected_height is not None or expected_width is not None:
+                    chunk = chunk[:, :expected_height, :expected_width]
+                if video_tensor is None:
+                    channels = int(chunk.shape[-1])
+                    frame_capacity = int(expected_frames) if expected_frames is not None and expected_frames > 0 else int(chunk.shape[0])
+                    video_tensor = torch.empty(
+                        (channels, frame_capacity, chunk.shape[1], chunk.shape[2]),
+                        dtype=chunk.dtype,
+                        device=chunk.device,
+                    )
+                frame_count = min(int(chunk.shape[0]), int(video_tensor.shape[1] - write_pos))
+                if frame_count <= 0:
+                    break
+                video_tensor[:, write_pos : write_pos + frame_count].copy_(chunk[:frame_count].permute(3, 0, 1, 2))
+                write_pos += frame_count
+            if video_tensor is None:
                 return None
-            if chunk is None:
-                continue
-            chunks.append(chunk if torch.is_tensor(chunk) else torch.tensor(chunk))
-    if not chunks:
-        return None
-    frames = torch.cat(chunks, dim=0)
-    return frames.permute(3, 0, 1, 2)
+            return video_tensor[:, :write_pos]
+    finally:
+        if iterator is not None:
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close()
     # frames = frames.to(dtype=torch.float32).div_(127.5).sub_(1.0)
     # return frames.permute(3, 0, 1, 2).contiguous()
 
@@ -583,7 +618,12 @@ class LTX2:
         transformer.eval().requires_grad_(False)
         VAE_URLs = self.model_def.get("VAE_URLs", None)
         video_vae_path =  fl.locate_file(VAE_URLs[0]) if VAE_URLs is not None and len(VAE_URLs) else _component_path("video_vae")
-        video_config = _component_config(video_vae_path)
+        video_config = copy.deepcopy(_component_config(video_vae_path))
+        video_config_vae = video_config.setdefault("vae", {})
+        video_config_vae["spatial_padding_mode"] = "reflect"
+        video_config_vae["encoder_spatial_padding_mode"] = "reflect"
+        video_config_vae["decoder_spatial_padding_mode"] = "reflect"
+        # print("[LTX2 VAE Config] forcing encoder/decoder spatial_padding_mode=reflect")
         with init_empty_weights():
             video_encoder = VideoEncoderConfigurator.from_config(video_config)
             video_decoder = VideoDecoderConfigurator.from_config(video_config)
@@ -848,8 +888,7 @@ class LTX2:
 
         video_conditioning = None
         masking_source = None
-        injected_ref_count = min(len(input_ref_images), len(frames_relative_positions_list))
-        if input_frames is not None or input_frames2 is not None or injected_ref_count > 0:
+        if input_frames is not None or input_frames2 is not None:
             control_start_frame = int(prefix_frames_count)
             expected_guide_frames = max(1, int(frame_num) - control_start_frame + (1 if prefix_frames_count > 1 else 0))
             if prefix_frames_count > 1:
@@ -872,8 +911,6 @@ class LTX2:
                 conditioning_entries.append((input_frames, control_start_frame, control_strength))
             if input_frames2 is not None:
                 conditioning_entries.append((input_frames2, control_start_frame, control_strength))
-            for ref_image, frame_idx in zip(input_ref_images[:injected_ref_count], frames_relative_positions_list[:injected_ref_count]):
-                conditioning_entries.append((ref_image, int(frame_idx), control_strength))
             if conditioning_entries:
                 video_conditioning = conditioning_entries
             if masking_strength > 0.0:
@@ -900,6 +937,7 @@ class LTX2:
 
         images = []
         guiding_images = []
+        guiding_images_stage2 = []
         images_stage2 = []
         stage2_override = False
         has_prefix_frames = input_video is not None and torch.is_tensor(input_video) and prefix_frames_count > 0
@@ -924,13 +962,21 @@ class LTX2:
                 if extra_list is not None:
                     extra_list.append(entry)
 
+        def _append_injected_ref_entries(target_list, extra_list=None):
+            injected_ref_count = min(len(input_ref_images), len(frames_relative_positions_list))
+            for ref_image, frame_idx in zip(input_ref_images[:injected_ref_count], frames_relative_positions_list[:injected_ref_count]):
+                entry = (ref_image, int(frame_idx), input_video_strength, "lanczos")
+                target_list.append(entry)
+                if extra_list is not None:
+                    extra_list.append(entry)
+
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
             _append_prefix_entries(images, images_stage2)
 
             if image_end is not None:
-                entry = (image_end, _to_latent_index(frame_num - 1, latent_stride), 1.0)
-                images.append(entry)
-                images_stage2.append(entry)
+                entry = (image_end, int(frame_num - 1), input_video_strength)
+                guiding_images.append(entry)
+                guiding_images_stage2.append(entry)
 
             if image_start is not None:
                 entry = (image_start, _to_latent_index(0, latent_stride), input_video_strength, "lanczos")
@@ -941,12 +987,16 @@ class LTX2:
                 else:
                     images.append(entry)
                     images_stage2.append(entry)
+            _append_injected_ref_entries(guiding_images, guiding_images_stage2)
         else:
             _append_prefix_entries(images)
             if image_start is not None:
                 images.append((image_start, _to_latent_index(0, latent_stride), input_video_strength, "lanczos"))
             if image_end is not None:
-                images.append((image_end, _to_latent_index(frame_num - 1, latent_stride), 1.0))
+                entry = (image_end, int(frame_num - 1), input_video_strength)
+                guiding_images.append(entry)
+                guiding_images_stage2.append(entry)
+            _append_injected_ref_entries(guiding_images, guiding_images_stage2)
 
         tiling_config = _build_tiling_config(VAE_tile_size, fps)
         interrupt_check = lambda: self._interrupt
@@ -1078,6 +1128,7 @@ class LTX2:
                 alt_scale=float(alt_scale),
                 images=images,
                 guiding_images=guiding_images or None,
+                guiding_images_stage2=guiding_images_stage2 or None,
                 images_stage2=images_stage2 if stage2_override else None,
                 video_conditioning=video_conditioning,
                 video_conditioning_downscale_factor=video_conditioning_downscale_factor,
@@ -1107,6 +1158,8 @@ class LTX2:
                 num_frames=int(frame_num),
                 frame_rate=float(fps),
                 images=images,
+                guiding_images=guiding_images or None,
+                guiding_images_stage2=guiding_images_stage2 or None,
                 alt_guidance_scale=float(alt_guide_scale),
                 video_conditioning=video_conditioning,
                 video_conditioning_downscale_factor=video_conditioning_downscale_factor,
@@ -1139,7 +1192,13 @@ class LTX2:
 
         if self._interrupt:
             return None
-        video_tensor = _collect_video_chunks(video, interrupt_check=interrupt_check)
+        video_tensor = _collect_video_chunks(
+            video,
+            interrupt_check=interrupt_check,
+            expected_frames=int(frame_num),
+            expected_height=int(height),
+            expected_width=int(width),
+        )
         if video_tensor is None:
             return None
 

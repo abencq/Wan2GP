@@ -25,6 +25,7 @@ mutagen
 pyloudnorm
 librosa==0.11.0
 speechbrain==1.0.3
+openai-whisper==20250625
 audio-separator==0.36.1
 pyannote.audio==3.3.2
 torchcodec
@@ -86,6 +87,7 @@ stringzilla==4.0.14
 xxhash
 munch
 wetext==0.1.2
+markdown
 # Optional / commented out
 # transformers==4.46.3  # for llamallava pre-patch
 # rembg==2.0.65         # non-GPU fallback
