@@ -1,12 +1,16 @@
 import os
+import shutil
+import sys
 import torch
 from shared.utils import files_locator as fl
 from shared.utils.hf import build_hf_url
+import gradio as gr
 
 _GEMMA_FOLDER_URL = "https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/gemma-3-12b-it-qat-q4_0-unquantized/"
 _GEMMA_FOLDER = "gemma-3-12b-it-qat-q4_0-unquantized"
 _GEMMA_FILENAME = f"{_GEMMA_FOLDER}.safetensors"
 _GEMMA_QUANTO_FILENAME = f"{_GEMMA_FOLDER}_quanto_bf16_int8.safetensors"
+_DEV_DISTILLED_LORAS_MIGRATED = False
 
 _ARCH_SPECS = {
     "ltx2_19B": {
@@ -15,13 +19,17 @@ _ARCH_SPECS = {
         "spatial_upscaler": "ltx-2-spatial-upscaler-x2-1.0.safetensors",
         "temporal_upscaler": "ltx-2-temporal-upscaler-x2-1.0.safetensors",
         "distilled_lora": "ltx-2-19b-distilled-lora-384.safetensors",
+        "union_control_lora": "ltx-2-19b-ic-lora-union-control-ref0.5.safetensors",
+        "id_lora": "id-lora-celebvhq-ltx2.safetensors",
         "video_vae": "ltx-2-19b_vae.safetensors",
         "audio_vae": "ltx-2-19b_audio_vae.safetensors",
         "vocoder": "ltx-2-19b_vocoder.safetensors",
         "text_embedding_projection": "ltx-2-19b_text_embedding_projection.safetensors",
         "dev_embeddings_connector": "ltx-2-19b-dev_embeddings_connector.safetensors",
         "distilled_embeddings_connector": "ltx-2-19b-distilled_embeddings_connector.safetensors",
-        "profiles_dir": "ltx2_19B",
+        "profiles_dir": "ltx2",
+        "preset_profiles_dir": "ltx2_presets",
+        "distilled_preset_profiles_dir": "ltx2_distilled_presets",
         "lora_dir": "ltx2",
     },
     "ltx2_22B": {
@@ -31,12 +39,15 @@ _ARCH_SPECS = {
         "temporal_upscaler": "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
         "distilled_lora": "ltx-2.3-22b-distilled-lora-384.safetensors",
         "union_control_lora": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+        "id_lora": "id-lora-celebvhq-ltx2.3.safetensors",
         "video_vae": "ltx-2.3-22b_vae.safetensors",
         "audio_vae": "ltx-2.3-22b_audio_vae.safetensors",
         "vocoder": "ltx-2.3-22b_vocoder.safetensors",
         "text_embedding_projection": "ltx-2.3-22b_text_embedding_projection.safetensors",
         "embeddings_connector": "ltx-2.3-22b_embeddings_connector.safetensors",
-        "profiles_dir": "ltx2_22B",
+        "profiles_dir": "ltx2",
+        "preset_profiles_dir": "ltx2_presets",
+        "distilled_preset_profiles_dir": "ltx2_distilled_presets",
         "lora_dir": "ltx2_22B",
     },
 }
@@ -65,8 +76,6 @@ def _default_dev_settings(base_model_type: str | None) -> dict:
         "cfg_star_switch": 0,
         "guidance_phases": 2,
     }
-
-
 def _get_embeddings_connector_filename(model_def, base_model_type):
     spec = _get_arch_spec(base_model_type)
     shared_connector = spec.get("embeddings_connector")
@@ -100,11 +109,31 @@ def _resolve_multi_file_paths(model_def, base_model_type):
     return paths
 
 
+def _migrate_dev_distilled_loras():
+    global _DEV_DISTILLED_LORAS_MIGRATED
+    if _DEV_DISTILLED_LORAS_MIGRATED:
+        return
+    wgp = sys.modules.get("wgp")
+    if wgp is None or not hasattr(wgp, "get_lora_root"):
+        return
+    try:
+        lora_root = wgp.get_lora_root()
+    except NameError:
+        return
+    for model_type, spec in _ARCH_SPECS.items():
+        filename = spec["distilled_lora"]
+        legacy_lora = os.path.join(lora_root, spec["lora_dir"], filename)
+        if os.path.isfile(legacy_lora):
+            target = fl.get_download_location(filename)
+            shutil.move(legacy_lora, target)
+            print(f"[WAN2GP][LTX2] Moved legacy distilled LoRA '{legacy_lora}' -> '{target}'")
+    _DEV_DISTILLED_LORAS_MIGRATED = True
 
 
 class family_handler:
     @staticmethod
     def query_supported_types():
+        _migrate_dev_distilled_loras()
         return ["ltx2_19B", "ltx2_22B"]
 
     @staticmethod
@@ -133,10 +162,11 @@ class family_handler:
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
 
         distilled = pipeline_kind == "distilled"
-        audio_prompt_selection = ["", "A", "K"] if distilled else ["", "A"]
+        audio_prompt_selection = ["", "A", "K"] if distilled else ["", "A", "A1OF"]
         audio_prompt_labels = {
             "": "Generate Video & Soundtrack based on Text Prompt",
             "A": "Generate Video based on Soundtrack and Text Prompt",
+            "A1OF": "Generate Video based on Reference Voice (ID-LoRA) and Text Prompt",
         }
         if distilled:
             audio_prompt_labels["K"] = "Generate Video based on Control Video + its Audio Track and Text Prompt"
@@ -159,15 +189,23 @@ class family_handler:
             "any_audio_prompt": True,
             "audio_prompt_choices": True,
             "one_speaker_only": True,
-            "audio_guide_label": "Audio Prompt (Soundtrack)",
+            "audio_guide_label": "Audio Prompt (Soundtrack, leave blank to to use a Null Audio)",
             "audio_scale_name": "Prompt Audio Strength",
             "audio_prompt_type_sources": {
                 "selection": audio_prompt_selection,
                 "labels": audio_prompt_labels,
+                "custom_flags": {
+                    "1": "Reference Voice (ID-LoRA)",
+                },
+                "letters_filter": "A1OFK",
                 "show_label": False,
             },
+            "auto_null_audio": True,
             "audio_guide_window_slicing": True,
+            "video_length_not_limited_by_audio": True,
             "output_audio_is_input_audio": True,
+            "multimedia_generation": True,
+            "multiple_images_as_text_prompts": True,
             "custom_denoising_strength": distilled,
             "profiles_dir": [spec["profiles_dir"]],
             "ltx2_spatial_upscaler_file": spec["spatial_upscaler"],
@@ -176,12 +214,30 @@ class family_handler:
             "no_background_removal": True,
             "vae_block_size": 64,
         }
+        
+        if distilled and base_model_type in ["ltx2_22B"]:
+            extra_model_def["video_guide_outpainting"] = [0,1]
+            extra_model_def["video_guide_outpainting_label"] = "Enable Spatial Outpainting on Control Video using Ic Lora Outpaint"
+            extra_model_def["guide_inpaint_color"] = 0
+
+        extra_model_def["preset_profiles_dir"] = [spec.get("distilled_preset_profiles_dir") if distilled else spec.get("preset_profiles_dir")]
         extra_model_def["extra_control_frames"] = 1
         extra_model_def["dont_cat_preguide"] = True
-        extra_model_def["input_video_strength"] = "Image / Source Video Strength (you may try values lower value than 1 to get more motion)"
+        extra_model_def["input_video_strength"] = {
+            "label": "Start Image / Source Strength (lower values may create more motion)",
+            "name": "Start Image / Source Strength",
+        }
+        extra_model_def["denoising_strength"] = {
+            "label": "Control Video Strength (higher = closer to the Control Video)",
+            "name": "Control Video Strength",
+        }
+        extra_model_def["masking_strength"] = {
+            "label": "Masked Control Duration (higher = longer masked reinjection)",
+            "name": "Masked Control Duration",
+        }
         
         control_choices = [("No Video Process", "")]
-        control_choices += [ ("Transfer Human Motion", "PVG") , ("Transfer Depth", "DVG") , ("Transfer Canny Edges", "EVG"), ("Use LTX-2 raw format Control Video", "VG")] if distilled else []
+        control_choices += [ ("Transfer Human Motion", "PVG") , ("Transfer Depth", "DVG") , ("Transfer Canny Edges", "EVG"), ("LTX2 Raw Format / Control Video for Ic Lora", "VG")] if distilled else []
         control_choices +=   [("Inject Frames", "KFI")]
         extra_model_def["guide_custom_choices"] = {
             "choices": control_choices,
@@ -209,7 +265,8 @@ class family_handler:
             extra_model_def.update(
                 {
                     "lock_inference_steps": True,
-                    "no_negative_prompt": True,
+                    "NAG": True,
+                    "no_negative_prompt": False,
                 }
             )
         else:
@@ -229,9 +286,11 @@ class family_handler:
                     "perturbation_layers_max": 48,
                 }
             )
+            if base_model_type == "ltx2_22B":
+                extra_model_def["sample_solvers"] = [("Euler", "euler"), ("HQ (res2s)", "res2s")]
         extra_model_def["guidance_max_phases"] = 2
         extra_model_def["visible_phases"] = 0 if distilled else 1
-        extra_model_def["lock_guidance_phases"] = True
+        # extra_model_def["lock_guidance_phases"] = True
 
         # extra_model_def["custom_video_selection"] = {
         #     "choices":[
@@ -311,7 +370,57 @@ class family_handler:
 
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
-        audio_prompt_type = inputs.get("audio_prompt_type") or ""
+        pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
+        if pipeline_kind == "distilled":
+            inputs.update(
+                {
+                    "num_inference_steps": 8,
+                    "guidance_scale": 1.0,
+                    "audio_guidance_scale": 1.0,
+                    "audio_cfg_scale": 1.0,
+                    "alt_guidance_scale": 1.0,
+                    "alt_scale": 0.0,
+                }
+            )
+            if inputs.get("perturbation",0) == 2:
+                inputs["perturbation"] = 0
+        else:
+            sample_solver = inputs.get("sample_solver", "euler" if base_model_type == "ltx2_22B" else "").lower()
+            if base_model_type == "ltx2_22B":
+                if sample_solver not in {"euler", "res2s"}:
+                    return f"Unsupported LTX2 sampler '{sample_solver}'."
+                inputs["sample_solver"] = sample_solver
+                if sample_solver == "res2s":
+                    if inputs.get("apg_switch", 0):
+                        return "HQ sampler does not support APG yet."
+                    if inputs.get("cfg_star_switch", 0):
+                        return "HQ sampler does not support CFG Star yet."
+                    if inputs.get("self_refiner_setting", 0):
+                        return "HQ sampler does not support Self Refiner yet."
+                    inputs["perturbation_switch"] = 0
+            elif sample_solver not in {"", "euler"}:
+                return f"Sampler '{sample_solver}' is not supported for {base_model_type}."
+        video_guide_outpainting = inputs.get("video_guide_outpainting", None) 
+        video_guide_outpainting_ratio = inputs.get("video_guide_outpainting_ratio", "") 
+        video_prompt_type = inputs.get("video_prompt_type", "")
+        audio_prompt_type = inputs.get("audio_prompt_type", "")
+        from shared.utils.utils import get_outpainting_dims 
+        any_outpainting = get_outpainting_dims(video_guide_outpainting, video_guide_outpainting_ratio) is not None        
+        if pipeline_kind == "distilled" and any_outpainting:
+            if "V" in video_prompt_type :
+                if any(letter in video_prompt_type for letter in "PDE"):
+                    return "LTX2 outpainting on Control Video supports only LTX2 Raw Format  / Contro Video for Ic Lora."
+                if "1" in audio_prompt_type:
+                    return "LTX2 outpainting on Control Video is not compatible with the ID-LoRA option."
+                if "F" in video_prompt_type :
+                    return "LTX2 outpainting is not yet compatible with Inject Frames."
+                if "A" in video_prompt_type :
+                    return "LTX2 outpainting doesnt support Video Mask."
+
+        guide_phases = inputs.get("guidance_phases", 1)
+        if guide_phases !=1 and "V" in video_prompt_type and (any(letter in video_prompt_type for letter in "PDE") or any_outpainting):
+            inputs["guidance_phases"]=  1            
+            gr.Info("Number of Phases has been set to 1 as Outpainting is enabled" if any_outpainting else "Number of Phases is set to 1 for Pose/Edge/Depth")
         if "A" in audio_prompt_type and inputs.get("audio_guide") is None:
             audio_source = inputs.get("audio_source")
             if audio_source is not None:
@@ -388,8 +497,8 @@ class family_handler:
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
         default_perturbation_layers = _default_perturbation_layers(base_model_type)
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
-        if pipeline_kind != "distilled" and ui_defaults.get("guidance_phases", 0) < 2:
-            ui_defaults["guidance_phases"] = 2
+        if pipeline_kind != "distilled" and ui_defaults.get("sample_solver", "") in {"", None}:
+            ui_defaults["sample_solver"] = "euler"
 
         if settings_version < 2.43:
             ui_defaults.update(
@@ -429,6 +538,8 @@ class family_handler:
                 from shared.utils.self_refiner import convert_refiner_list_to_string
                 ui_defaults["self_refiner_plan"] = convert_refiner_list_to_string(plan)
 
+        if settings_version < 2.58 and pipeline_kind == "distilled":
+            ui_defaults["guidance_phases"]=2
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
         default_perturbation_layers = _default_perturbation_layers(base_model_type)
@@ -440,11 +551,16 @@ class family_handler:
                 "masking_strength": 0,
                 "audio_prompt_type": "",
                 "perturbation_layers": default_perturbation_layers,
+                "guidance_phases": 2,
 	            }
         )
         ui_defaults.setdefault("audio_scale", 1.0)
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
         if pipeline_kind != "distilled":
             ui_defaults.update(_default_dev_settings(base_model_type))
-        else:
-            ui_defaults.setdefault("guidance_phases", 1)
+            ui_defaults.setdefault("sample_solver", "euler")
+
+    @staticmethod
+    def get_custom_prompt_enhancer_instructions(model_type, prompt_enhancer_mode, is_image, enhancer_kwargs):
+        from .prompt_enhancer import  get_custom_prompt_enhancer_instructions
+        return get_custom_prompt_enhancer_instructions(model_type, prompt_enhancer_mode, is_image, enhancer_kwargs)
