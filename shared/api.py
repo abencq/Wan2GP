@@ -21,7 +21,7 @@ from typing import Any, Iterator, Sequence
 from PIL import Image
 
 from shared.utils.process_locks import set_main_generation_running
-from shared.utils.virtual_media import parse_virtual_media_path, replace_virtual_media_source
+from shared.utils.virtual_media import get_virtual_media_vsource, parse_virtual_media_path, replace_virtual_media_source
 
 _RUNTIME_LOCK = threading.RLock()
 _GENERATION_LOCK = threading.RLock()
@@ -562,7 +562,7 @@ class WanGPSession:
 
         run_webui_job(self, job, tasks)
 
-    def _build_progress_update(self, data: Any) -> ProgressUpdate:
+    def _build_progress_update(self, data: Any, *, include_state_fallback: bool = True) -> ProgressUpdate:
         current_step: int | None = None
         total_steps: int | None = None
         status = ""
@@ -582,23 +582,24 @@ class WanGPSession:
             status = str(data or "")
 
         raw_phase = None
-        progress_phase = self._state["gen"].get("progress_phase")
-        if isinstance(progress_phase, tuple) and progress_phase:
-            raw_phase = extract_status_phase_label(progress_phase[0])
-            if current_step is None and len(progress_phase) > 1 and "denoising" in raw_phase.lower():
-                try:
-                    progress_step = int(progress_phase[1])
-                except (TypeError, ValueError):
-                    progress_step = -1
-                try:
-                    inference_steps = int(self._state["gen"].get("num_inference_steps") or 0)
-                except (TypeError, ValueError):
-                    inference_steps = 0
-                if progress_step >= 0 and inference_steps > 0:
-                    current_step = progress_step
-                    total_steps = inference_steps
-        if len(status) == 0:
-            status = str(self._state["gen"].get("progress_status", "") or raw_phase or "")
+        if include_state_fallback:
+            progress_phase = self._state["gen"].get("progress_phase")
+            if isinstance(progress_phase, tuple) and progress_phase:
+                raw_phase = extract_status_phase_label(progress_phase[0])
+                if current_step is None and len(progress_phase) > 1 and "denoising" in raw_phase.lower():
+                    try:
+                        progress_step = int(progress_phase[1])
+                    except (TypeError, ValueError):
+                        progress_step = -1
+                    try:
+                        inference_steps = int(self._state["gen"].get("num_inference_steps") or 0)
+                    except (TypeError, ValueError):
+                        inference_steps = 0
+                    if progress_step >= 0 and inference_steps > 0:
+                        current_step = progress_step
+                        total_steps = inference_steps
+            if len(status) == 0:
+                status = str(self._state["gen"].get("progress_status", "") or raw_phase or "")
         status_phase_label = extract_status_phase_label(status)
         if len(status_phase_label) > 0 and len(str(raw_phase or "").strip()) > 0 and current_step is None:
             normalized_status_phase = self._normalize_phase(status_phase_label)
@@ -873,6 +874,8 @@ class WanGPSession:
         if not isinstance(value, str) or not value.strip():
             return value
         spec = parse_virtual_media_path(value)
+        if spec is not None and get_virtual_media_vsource(spec) is not None:
+            return value
         path = Path(spec.source_path if spec is not None else value)
         if path.is_absolute():
             resolved = str(path.resolve())

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from shared.api import GeneratedArtifact, GenerationError, GenerationResult, PreviewUpdate, ProgressUpdate, SessionJob, WanGPSession, _pushd, extract_status_phase_label
+from shared.api import GeneratedArtifact, GenerationError, GenerationResult, PreviewUpdate, SessionJob, WanGPSession, _pushd
 
 _NO_YIELDED_RESULT = object()
 _GRADIO_LOG_PATCH_LOCK = threading.Lock()
@@ -95,6 +95,8 @@ class _WrappedCallState:
         self.error: BaseException | None = None
         self.job: SessionJob | None = None
         self.abort_client_id = ""
+        self._abort_client_ids: list[str] = []
+        self._abort_client_ids_lock = threading.Lock()
         self.callback_context_ready = threading.Event()
         self.callback_context: dict[str, Any] | None = None
         self._followup_jobs: list[SessionJob] = []
@@ -145,6 +147,21 @@ class _WrappedCallState:
         self._primary_job_forwarded = True
         self.enable_followup_queue_triggers()
         return self.job.webui_load_queue_token
+
+    def queue_abort_client_id(self, client_id: str) -> None:
+        client_id = str(client_id or "").strip()
+        if len(client_id) == 0:
+            return
+        with self._abort_client_ids_lock:
+            self._abort_client_ids.append(client_id)
+
+    def pop_abort_client_id(self) -> str:
+        with self._abort_client_ids_lock:
+            if not self._abort_client_ids:
+                return ""
+            client_id = self._abort_client_ids.pop(0)
+        self.abort_client_id = client_id
+        return client_id
 
     def push_yielded_result(self, result: Any) -> None:
         with self._yielded_results_lock:
@@ -219,8 +236,10 @@ class WebUIQueueProbe:
         self._last_active_client_id = ""
         self._last_progress_key: tuple[Any, ...] | None = None
         self._last_preview_key: tuple[Any, ...] | None = None
+        self._active_progress_seed: Any = None
         self._cancel_issued = False
         self._cancel_requested_at: float | None = None
+        self._cancel_dispatched_client_ids: set[str] = set()
         self._submitted_at = 0.0
         self._queue_wait_suspended = False
         self._logged_admitted_client_ids: set[str] = set()
@@ -312,12 +331,11 @@ class WebUIQueueProbe:
         self._gen["early_stop_forwarded"] = False
         self._gen["status"] = ""
         self._gen["status_display"] = False
+        self._gen["last_progress_args"] = None
         self._gen["progress_args"] = None
         self._gen["preview"] = None
 
     def _poll_once(self) -> None:
-        if self._job.cancel_requested and not self._cancel_issued:
-            self._request_cancel()
         queue_client_ids, active_client_id = self._get_queue_snapshot()
         for client_id in queue_client_ids:
             if client_id in self._client_ids:
@@ -325,6 +343,8 @@ class WebUIQueueProbe:
                 if client_id not in self._logged_admitted_client_ids:
                     print(f"WanGP API admitted client_id={client_id}")
                     self._logged_admitted_client_ids.add(client_id)
+        if self._job.cancel_requested:
+            self._request_cancel()
         if self._queue_wait_suspended and any(client_id in self._admitted_client_ids for client_id in self._client_ids):
             print("WanGP back in focus API queue resumed")
             self._queue_wait_suspended = False
@@ -453,57 +473,32 @@ class WebUIQueueProbe:
             self._last_progress_key = None
             self._last_preview_key = None
             self._last_status_text = ""
-        status_text = str(self._gen.get("status", "") or "").strip()
-        queue_errors = self._gen.get("queue_errors", {}) or {}
+            self._active_progress_seed = copy.deepcopy(self._gen.get("last_progress_args"))
         live_generation_running = bool(self._gen.get("in_progress", False))
         active_client_is_live = live_generation_running and active_client_id in self._client_ids and active_client_id not in self._outputs_by_client_id and active_client_id not in self._errors_by_client_id
-        if active_client_is_live and self._session._normalize_phase(status_text) == "cancelled" and active_client_id not in queue_errors:
-            active_client_is_live = False
         if active_client_is_live:
             self._live_started_client_ids.add(active_client_id)
-            progress_update = self._session._build_progress_update(self._gen.get("progress_args"))
-            status_phase_label = extract_status_phase_label(status_text)
-            should_publish_status = len(status_text) > 0
-            if len(status_phase_label) == 0 and len(str(progress_update.raw_phase or "").strip()) > 0:
-                should_publish_status = False
-            elif self._session._normalize_phase(status_text) == "inference" and status_text.lower().startswith("generating") and len(str(progress_update.raw_phase or "").strip()) > 0:
-                should_publish_status = False
-            if should_publish_status and status_text != self._last_status_text:
-                self._last_status_text = status_text
-                self._publish("status", status_text, "on_status")
-            if len(status_text) > 0:
-                status_phase = self._session._normalize_phase(status_text)
-                progress_phases = {
-                    self._session._normalize_phase(progress_update.raw_phase),
-                    self._session._normalize_phase(progress_update.status),
-                    str(progress_update.phase or ""),
-                }
-                if status_phase not in progress_phases:
-                    if isinstance(progress_update.current_step, int):
-                        return
-                    progress_update = ProgressUpdate(
-                        phase=status_phase,
-                        status=status_text,
-                        progress=self._session._estimate_progress(status_phase, None, None),
-                        current_step=None,
-                        total_steps=None,
-                        raw_phase=extract_status_phase_label(status_text) or None,
-                        unit=progress_update.unit,
-                    )
-            progress_key = (
-                active_client_id,
-                progress_update.phase,
-                progress_update.progress,
-                progress_update.current_step,
-                progress_update.total_steps,
-                progress_update.status,
-                progress_update.unit,
-            )
-            if progress_key != self._last_progress_key:
-                self._last_progress_key = progress_key
-                self._publish("progress", progress_update, "on_progress")
+            progress_args = self._gen.get("last_progress_args")
+            progress_ready = progress_args != self._active_progress_seed
+            progress_update = self._session._build_progress_update(progress_args, include_state_fallback=False) if progress_ready else None
+            if progress_update is not None:
+                if len(progress_update.status) > 0 and progress_update.status != self._last_status_text:
+                    self._last_status_text = progress_update.status
+                    self._publish("status", progress_update.status, "on_status")
+                progress_key = (
+                    active_client_id,
+                    progress_update.phase,
+                    progress_update.progress,
+                    progress_update.current_step,
+                    progress_update.total_steps,
+                    progress_update.status,
+                    progress_update.unit,
+                )
+                if progress_key != self._last_progress_key:
+                    self._last_progress_key = progress_key
+                    self._publish("progress", progress_update, "on_progress")
             preview_image = self._gen.get("preview")
-            if preview_image is not None:
+            if preview_image is not None and progress_update is not None:
                 preview_key = (active_client_id, id(preview_image), getattr(preview_image, "size", None), progress_update.progress)
                 if preview_key != self._last_preview_key:
                     self._last_preview_key = preview_key
@@ -561,35 +556,29 @@ class WebUIQueueProbe:
             self._register_error(client_id, "Generation was cancelled", stage="cancelled")
 
     def _request_cancel(self) -> None:
-        self._cancel_issued = True
-        self._cancel_requested_at = time.time()
+        dispatched_any = False
         for client_id in self._client_ids:
             if client_id in self._outputs_by_client_id or client_id in self._errors_by_client_id:
                 continue
+            if client_id in self._cancel_dispatched_client_ids:
+                continue
             if self._remove_inline_queue_client_id(client_id):
+                self._cancel_dispatched_client_ids.add(client_id)
+                dispatched_any = True
                 continue
             if client_id in self._admitted_client_ids:
-                self._trigger_abort_event(client_id)
+                self._queue_abort_client_id(client_id)
+                self._cancel_dispatched_client_ids.add(client_id)
+                dispatched_any = True
+        if dispatched_any:
+            self._cancel_issued = True
+            self._cancel_requested_at = time.time()
 
-    def _trigger_abort_event(self, client_id: str) -> None:
-        gradio_context = getattr(self._session, "_gradio_webui_context", None)
-        if not isinstance(gradio_context, dict):
-            raise RuntimeError("WanGP WebUI abort requires an active Gradio session context.")
-        fn_index = gradio_context.get("abort_fn_index")
-        blocks = gradio_context.get("blocks")
-        request = gradio_context.get("request")
-        session_hash = gradio_context.get("session_hash")
-        if not isinstance(fn_index, int) or blocks is None or request is None or not session_hash:
-            raise RuntimeError("WanGP WebUI abort trigger is unavailable for the current Gradio session.")
-        from gradio.data_classes import PredictBodyInternal
-
-        request = _normalize_queue_request(request)
-        if getattr(blocks._queue, "server_app", None) is None and getattr(blocks, "app", None) is not None:
-            blocks._queue.set_server_app(blocks.app)
-        body = PredictBodyInternal(session_hash=session_hash, fn_index=fn_index, data=[None, client_id], request=request)
-        success, error_or_event_id = asyncio.run(blocks._queue.push(body=body, request=request, username=getattr(request, "username", None)))
-        if not success:
-            raise RuntimeError(str(error_or_event_id))
+    def _queue_abort_client_id(self, client_id: str) -> None:
+        owner = getattr(self._session, "_gradio_session_proxy", None)
+        enqueue = getattr(owner, "_enqueue_abort_client_id", None)
+        if not callable(enqueue) or not enqueue(self._job, client_id):
+            raise RuntimeError("WanGP WebUI abort trigger is unavailable for the current wrapped Gradio call.")
 
     def _remove_inline_queue_client_id(self, client_id: str) -> bool:
         inline_queue = self._gen.get("inline_queue")
@@ -946,6 +935,11 @@ class GradioWanGPSession:
                     print(f"WanGP API forwarding follow-up load_queue_trigger token={load_queue_token}")
                     yield [*self._blank_outputs(output_count), load_queue_token, gr.skip(), call_id]
                     continue
+                abort_client_id = state.pop_abort_client_id()
+                if abort_client_id:
+                    print(f"WanGP API forwarding abort_client_id={abort_client_id}")
+                    yield [*self._blank_outputs(output_count), gr.skip(), abort_client_id, call_id]
+                    continue
                 yielded_result = state.pop_yielded_result()
                 if yielded_result is not _NO_YIELDED_RESULT:
                     yield [*self._normalize_callback_result(yielded_result, output_count), gr.skip(), gr.skip(), call_id]
@@ -1027,12 +1021,17 @@ class GradioWanGPSession:
                 state.add_followup_job(job)
 
     def _capture_cancelled_job(self, job: SessionJob) -> None:
-        call_id = str(job.webui_owner_call_id or getattr(self._ui_local, "call_id", "") or "").strip()
+        return
+
+    def _enqueue_abort_client_id(self, job: SessionJob, client_id: str) -> bool:
+        call_id = str(getattr(job, "webui_owner_call_id", "") or getattr(self._ui_local, "call_id", "") or "").strip()
         if len(call_id) == 0:
-            return
+            return False
         state = self._get_wrapped_call(call_id)
-        if state is not None and not state.abort_client_id:
-            state.abort_client_id = job.primary_client_id
+        if state is None:
+            return False
+        state.queue_abort_client_id(client_id)
+        return True
 
     def _remember_wrapped_call(self, call_id: str, state: _WrappedCallState) -> None:
         with self._wrapped_calls_lock:
