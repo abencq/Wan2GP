@@ -46,7 +46,7 @@ from shared.utils.audio_video import extract_audio_tracks, combine_video_with_au
 from shared.utils.audio_video import append_sliding_window_audio, read_image_metadata, extract_audio_track_to_wav, write_wav_file, save_audio_file, get_audio_codec_extension, create_silent_wav_file
 from shared.utils.audio_metadata import read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
 from shared.utils.media_recording import record_file_metadata as shared_record_file_metadata
-from shared.utils.virtual_media import parse_virtual_media_path, replace_virtual_media_source
+from shared.utils.virtual_media import get_virtual_image, get_virtual_media_vsource, parse_virtual_media_path, replace_virtual_media_source, strip_virtual_media_suffix
 from shared.match_archi import match_nvidia_architecture
 from shared.attention import get_attention_modes, get_supported_attention_modes
 from shared.utils.utils import truncate_for_filesystem, sanitize_file_name, process_images_multithread, get_default_workers
@@ -119,7 +119,7 @@ AUTOSAVE_TEMPLATE_PATH = AUTOSAVE_FILENAME
 CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
 target_mmgp_version = "3.7.6"
-WanGP_version = "11.31"
+WanGP_version = "11.353"
 settings_version = 2.58
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
@@ -249,8 +249,11 @@ def pil_to_base64_uri(pil_image, format="png", quality=75):
         return None
 
     if isinstance(pil_image, str):
+        virtual_image = get_virtual_image(pil_image)
+        if virtual_image is not None:
+            pil_image = virtual_image
         # Check file type and load appropriately
-        if has_video_file_extension(pil_image):
+        elif has_video_file_extension(pil_image):
             from shared.utils.utils import get_video_frame
             pil_image = get_video_frame(pil_image, 0)
         elif has_image_file_extension(pil_image):
@@ -279,6 +282,13 @@ def pil_to_base64_uri(pil_image, format="png", quality=75):
         print(f"Error converting PIL to base64: {e}")
         return None
 
+
+def _open_image_input(image):
+    if not isinstance(image, str):
+        return image
+    virtual_image = get_virtual_image(image)
+    return virtual_image if virtual_image is not None else Image.open(image)
+
 def is_integer(n):
     try:
         float(n)
@@ -301,7 +311,7 @@ def clean_image_list(gradio_list):
 
     if any( not isinstance(image, (Image.Image, str))  for image in gradio_list): return None
     if any( isinstance(image, str) and not has_image_file_extension(image) for image in gradio_list): return None
-    gradio_list = [ convert_image( Image.open(img) if isinstance(img, str) else img  ) for img in gradio_list  ]        
+    gradio_list = [convert_image(_open_image_input(img)) for img in gradio_list]
     return gradio_list
 
 
@@ -1020,6 +1030,11 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
     else:        
         image_end = None
 
+    if "V" in video_prompt_type and "O" in video_prompt_type:
+        if image_start is None and video_source is None and "L" not in video_prompt_type and not all_letters(video_prompt_type, "IK"):
+            return err("Aligned Pose transfer requires a Start Image, a Source Video to continue or Background Ref Frame to be used")    
+        if "A" in video_prompt_type and any_letters(video_prompt_type, "YWZ"):
+            return err("Aligned Pose transfer supports only Inpainting process outside the masked area")    
 
     if test_any_sliding_window(model_type) and image_mode == 0:
         if video_length > sliding_window_size:
@@ -1355,6 +1370,10 @@ def _load_task_attachments(params, media_base_path, cache_dir=None, log_prefix="
                 print(f"{log_prefix} Warning: Invalid filename for key '{key}'. Skipping.")
                 continue
             virtual_spec = parse_virtual_media_path(filename)
+            if virtual_spec is not None and get_virtual_media_vsource(virtual_spec) is not None:
+                loaded_items.append(filename)
+                print(f"{log_prefix} Using virtual source: {filename}")
+                continue
             source_name = virtual_spec.source_path if virtual_spec is not None else filename
 
             if os.path.isabs(source_name):
@@ -2671,38 +2690,50 @@ def init_model_def(model_type, model_def):
     return default_model_def
 
 
-models_def_paths =  glob.glob( os.path.join("defaults", "*.json") ) + glob.glob( os.path.join("finetunes", "*.json") ) 
-models_def_paths.sort()
-for file_path in models_def_paths:
-    model_type = os.path.basename(file_path)[:-5]
-    with open(file_path, "r", encoding="utf-8") as f:
-        try:
-            json_def = json.load(f)
-        except Exception as e:
-            raise Exception(f"Error while parsing Model Definition File '{file_path}': {str(e)}")
-    model_def = json_def["model"]
-    model_def["path"] = file_path
-    del json_def["model"]      
-    settings = json_def   
-    existing_model_def = models_def.get(model_type, None) 
-    if existing_model_def is not None:
-        existing_settings = models_def.get("settings", None)
-        if existing_settings != None:
-            existing_settings.update(settings)
-        existing_model_def.update(model_def)
-    else:
-        models_def[model_type] = model_def # partial def
-        model_def= init_model_def(model_type, model_def)
-        models_def[model_type] = model_def # replace with full def
-        model_def["settings"] = settings
+def refresh_model_defs():
+    global models_def, model_types, displayed_model_types
+    models_def = {}
+    displayed_model_types = []
+    model_types = []
+    models_def_paths =  glob.glob( os.path.join("defaults", "*.json") ) 
+    defaults_paths = models_def_paths.copy()
+    models_def_paths += glob.glob( os.path.join("finetunes", "*.json") ) 
+    models_def_paths.sort()
+    for file_path in models_def_paths:
+        model_type = os.path.basename(file_path)[:-5]
+        with open(file_path, "r", encoding="utf-8") as f:
+            try:
+                json_def = json.load(f)
+            except Exception as e:
+                if file_path in defaults_paths:
+                    raise Exception(f"Error while parsing Model Definition File '{file_path}': {str(e)}")
+                else:
+                    print(f"Finetune Definition File '{file_path}' will be ignored as there was an error in its parsing: {str(e)}")
+                    continue
+        model_def = json_def["model"]
+        model_def["path"] = file_path
+        del json_def["model"]      
+        settings = json_def   
+        existing_model_def = models_def.get(model_type, None) 
+        if existing_model_def is not None:
+            existing_settings = models_def.get("settings", None)
+            if existing_settings != None:
+                existing_settings.update(settings)
+            existing_model_def.update(model_def)
+        else:
+            models_def[model_type] = model_def # partial def
+            model_def= init_model_def(model_type, model_def)
+            models_def[model_type] = model_def # replace with full def
+            model_def["settings"] = settings
 
-model_types = models_def.keys()
-displayed_model_types= []
-for model_type in model_types:
-    model_def = get_model_def(model_type)
-    if not model_def is None and model_def.get("visible", True): 
-        displayed_model_types.append(model_type)
+    model_types = models_def.keys()
+    displayed_model_types= []
+    for model_type in model_types:
+        model_def = get_model_def(model_type)
+        if not model_def is None and model_def.get("visible", True): 
+            displayed_model_types.append(model_type)
 
+refresh_model_defs()
 
 transformer_types = server_config.get("transformer_types", [])
 new_transformer_types = []
@@ -2926,22 +2957,7 @@ def get_loras_preprocessor(transformer, model_type):
     def preprocessor_wrapper(sd):
         return preprocessor(model_type, sd)
 
-    return preprocessor_wrapper
-
-def get_local_model_filename(model_filename, use_locator = True, extra_paths = None):
-    if model_filename.startswith("http"):
-        local_model_filename =os.path.basename(model_filename)
-    else:
-        local_model_filename = model_filename
-    if use_locator:
-        if extra_paths is not None:
-            if not isinstance(extra_paths, list): extra_paths = [extra_paths]
-            for path in extra_paths:
-                filename = fl.locate_file(os.path.join(path, local_model_filename), error_if_none= False)
-                if filename is not None: return filename
-        local_model_filename = fl.locate_file(local_model_filename, error_if_none= False )
-    return local_model_filename
-    
+    return preprocessor_wrapper    
 
 
 def process_files_def(repoId = None, sourceFolderList = None, fileList = None, targetFolderList = None):
@@ -2979,6 +2995,7 @@ def download_mmaudio():
 
 
 def download_file(url,filename):
+    url = url.split("|")[0]
     if url.startswith("https://huggingface.co/") and "/resolve/main/" in url:
         base_dir = os.path.dirname(filename)
         url = url[len("https://huggingface.co/"):]
@@ -3052,7 +3069,7 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
     model_type_handler = model_types_handlers[base_model_type]
  
     if not (any_source and file_type==0 or any_module_source and file_type==1):
-        local_model_filename = get_local_model_filename(model_filename, extra_paths= force_path)
+        local_model_filename = fl.get_local_model_filename(model_filename, extra_paths= force_path)
         if local_model_filename is None and len(model_filename) > 0:
             local_model_filename = fl.get_smart_download_location(os.path.basename(model_filename), force_path= force_path)
             url = model_filename
@@ -3065,7 +3082,7 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
                 if os.path.isfile(local_model_filename): os.remove(local_model_filename) 
                 raise Exception(f"'{url}' is invalid for Model '{model_type}' : {str(e)}'")
             if file_type!=0: return
-
+    lora_dir = get_lora_dir(model_type) 
     for prop, recursive in zip(["preload_URLs", "VAE_URLs"], [True, False]):
         if recursive:
             preload_URLs = get_model_recursive_prop(model_type, prop, return_list= True)
@@ -3074,9 +3091,9 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
             if isinstance(preload_URLs, str): preload_URLs = [preload_URLs]
 
         for url in preload_URLs:
-            filename = get_local_model_filename(url)
+            filename = fl.get_local_model_filename(url, lora_dir = lora_dir)
             if filename is None: 
-                filename = fl.get_download_location(os.path.basename(url))
+                filename = fl.get_download_location(url, lora_dir = lora_dir)
                 if not url.startswith("http"):
                     raise Exception(f"{prop} '{filename}' was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
                 try:
@@ -3087,7 +3104,7 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
 
     model_loras = get_model_recursive_prop(model_type, "loras", return_list= True)
     for url in model_loras:
-        filename = os.path.join(get_lora_dir(model_type), url.split("/")[-1])
+        filename = os.path.join(lora_dir, url.split("/")[-1])
         if not os.path.isfile(filename ): 
             if not url.startswith("http"):
                 raise Exception(f"Lora '{filename}' was not found in the Loras Folder and no URL was provided to download it. Please add an URL in the model definition file.")
@@ -3411,7 +3428,7 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     for filename, file_model_type, file_source_type, submodel_no in zip(model_file_list, model_type_list, source_type_list, model_submodel_no_list):
         if len(filename) == 0: continue 
         download_models(filename, file_model_type, file_source_type, submodel_no)
-        local_file_name = get_local_model_filename(filename )
+        local_file_name = fl.get_local_model_filename(filename )
         local_model_file_list.append( os.path.basename(filename) if local_file_name is None else local_file_name )
     if len(local_model_file_list) == 0:
         download_models("", model_type, 0, -1)
@@ -3435,7 +3452,7 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         text_encoder_folder = model_def.get("text_encoder_folder", None)
         if text_encoder_filename is not None:
             download_models(text_encoder_filename, file_model_type, 2, -1, force_path =text_encoder_folder)
-            text_encoder_filename =  get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder)
+            text_encoder_filename =  fl.get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder)
             _load_models_info(f"Loading Text Encoder '{text_encoder_filename}' ...")
 
 
@@ -3528,7 +3545,7 @@ def generate_header(model_type, compile, attention_mode):
     else:
         header += ", Data Type <B>BF16</B>"
 
-    quant_label = quant_router.detect_quantization_label_from_filename(get_local_model_filename(full_filename))
+    quant_label = quant_router.detect_quantization_label_from_filename(fl.get_local_model_filename(full_filename))
     if quant_label:
         header += f", Quantization <B>{quant_label}</B>"
     header += "</DIV>"
@@ -3929,14 +3946,14 @@ def select_audio(state, audio_files_paths, audio_file_selected):
     set_file_choice(gen,  audio_file_list, choice, audio_files=True )
 
 
-video_guide_processes = "PEDSLCMU"
+video_guide_processes = "OPEDSLCMU"
 all_guide_processes = video_guide_processes + "VGBH"
 
 process_map_outside_mask = { "Y" : "depth", "W": "scribble", "X": "inpaint", "Z": "flow"}
-process_map_video_guide = { "P": "pose", "D" : "depth", "S": "scribble", "E": "canny", "L": "flow", "C": "gray", "M": "inpaint", "U": "identity"}
+process_map_video_guide = { "O": "pose_align", "P": "pose", "D" : "depth", "S": "scribble", "E": "canny", "L": "flow", "C": "gray", "M": "inpaint", "U": "identity"}
 all_process_map_video_guide =  { "B": "face", "H" : "bbox"}
 all_process_map_video_guide.update(process_map_video_guide)
-processes_names = { "pose": "Open Pose", "depth": "Depth Mask", "scribble" : "Shapes", "flow" : "Flow Map", "gray" : "Gray Levels", "inpaint" : "Inpaint Mask", "identity": "Identity Mask", "raw" : "Raw Format", "canny" : "Canny Edges", "face": "Face Movements", "bbox": "BBox"}
+processes_names = { "pose": "Open Pose", "pose_align": "Aligned Open Pose", "depth": "Depth Mask", "scribble" : "Shapes", "flow" : "Flow Map", "gray" : "Gray Levels", "inpaint" : "Inpaint Mask", "identity": "Identity Mask", "raw" : "Raw Format", "canny" : "Canny Edges", "face": "Face Movements", "bbox": "BBox"}
 
 
 def resolve_media_creation_date(file_name, configs=None):
@@ -4034,7 +4051,7 @@ def select_video(state, current_gallery_tab, input_file_list, file_selected, aud
             pass 
         configs = settings_list[choice]
         file_name = files[choice]
-        values = [  os.path.basename(file_name)]
+        values = [os.path.basename(strip_virtual_media_suffix(file_name))]
         labels = [ "File Name"]
         misc_values= []
         misc_labels = []
@@ -4050,7 +4067,7 @@ def select_video(state, current_gallery_tab, input_file_list, file_selected, aud
             width, height = 0, 0
             frames_count = fps = 1
         elif not has_video_file_extension(file_name):
-            img = Image.open(file_name)
+            img = _open_image_input(file_name)
             width, height = img.size
             is_image = True
             frames_count = fps = 1
@@ -4468,7 +4485,7 @@ def convert_image(image):
     from PIL import ImageOps
     from typing import cast
     if isinstance(image, str):
-        image = Image.open(image)
+        image = _open_image_input(image)
     image = image.convert('RGB')
     return cast(Image, ImageOps.exif_transpose(image))
 
@@ -4517,14 +4534,16 @@ def get_resampled_video(video_in, start_frame, max_frames, target_fps, bridge='t
 #     return frames
 
 
-def get_preprocessor(process_type, inpaint_color):
-    if process_type=="pose":
+def get_preprocessor(process_type, inpaint_color, pre_video_guide=None):
+    if process_type in ["pose", "pose_align"]:
         from preprocessing.dwpose.pose import PoseBodyFaceVideoAnnotator
         cfg_dict = {
             "DETECTION_MODEL": fl.locate_file("pose/yolox_l.onnx"),
             "POSE_MODEL": fl.locate_file("pose/dw-ll_ucoco_384.onnx"),
             "RESIZE_SIZE": 1024
         }
+        if process_type == "pose_align" and torch.is_tensor(pre_video_guide) and pre_video_guide.ndim == 4 and pre_video_guide.shape[1] > 0:
+            cfg_dict["REF_IMAGE"] = pre_video_guide[:, -1]
         anno_ins = lambda img: PoseBodyFaceVideoAnnotator(cfg_dict).forward(img)
     elif process_type=="depth":
 
@@ -4633,7 +4652,7 @@ def extract_faces_from_video_with_mask(input_video_path, input_mask_path, max_fr
     return face_tensor
 
 
-def preprocess_video_with_mask(input_video_path, input_mask_path, height, width,  max_frames, start_frame=0, fit_canvas = None, fit_crop = False, target_fps = 16, block_size= 16, expand_scale = 2, process_type = "inpaint", process_type2 = None, to_bbox = False, RGB_Mask = False, negate_mask = False, process_outside_mask = None, inpaint_color = 127, outpainting_dims = None, outpainting_ratio = "", proc_no = 1):
+def preprocess_video_with_mask(pre_video_guide, input_video_path, input_mask_path, height, width,  max_frames, start_frame=0, fit_canvas = None, fit_crop = False, target_fps = 16, block_size= 16, expand_scale = 2, process_type = "inpaint", process_type2 = None, to_bbox = False, RGB_Mask = False, negate_mask = False, process_outside_mask = None, inpaint_color = 127, outpainting_dims = None, outpainting_ratio = "", proc_no = 1):
 
     def mask_to_xyxy_box(mask):
         rows, cols = np.where(mask == 255)
@@ -4666,10 +4685,12 @@ def preprocess_video_with_mask(input_video_path, input_mask_path, height, width,
         any_identity_mask = True
         negate_mask = False
         process_outside_mask = None
-    preproc = get_preprocessor(process_type, inpaint_color)
+    if process_type == "pose_align" and any_mask:
+        process_outside_mask = None
+    preproc = get_preprocessor(process_type, inpaint_color, pre_video_guide=pre_video_guide)
     preproc2 = None
     if process_type2 != None:
-        preproc2 = get_preprocessor(process_type2, inpaint_color) if process_type != process_type2 else preproc
+        preproc2 = get_preprocessor(process_type2, inpaint_color, pre_video_guide=pre_video_guide) if process_type != process_type2 else preproc
     if process_outside_mask == process_type :
         preproc_outside = preproc
     elif preproc2 != None and process_outside_mask == process_type2 :
@@ -4787,7 +4808,11 @@ def preprocess_video_with_mask(input_video_path, input_mask_path, height, width,
         if isinstance(processed_img_outside, (list, tuple)):
             processed_img_outside = np.full((height, width, 3), processed_img_outside, dtype=np.uint8)
         if any_mask :
-            masked_frame = np.where(mask[..., None], processed_img, processed_img_outside)
+            if process_type == "pose_align":
+                masked_frame = processed_img
+                mask = np.full_like(mask, 0)
+            else:
+                masked_frame = np.where(mask[..., None], processed_img, processed_img_outside)
             if process_outside_mask != None:
                 mask = np.full_like(mask, 255)
             mask = torch.from_numpy(mask)
@@ -4857,8 +4882,8 @@ def preprocess_video(height, width, video_in, max_frames, start_frame=0, fit_can
         else:
             scale =   ((height * width ) /  (frame_height * frame_width))**(1/2)
 
-        new_height = (int(frame_height * scale) // block_size) * block_size
-        new_width = (int(frame_width * scale) // block_size) * block_size
+        new_height = round(frame_height * scale / block_size) * block_size
+        new_width = round(frame_width * scale / block_size) * block_size
 
     def resize_frame(frame):
         if torch.is_tensor(frame):
@@ -5019,7 +5044,7 @@ def any_audio_track(model_type):
     return ( model_def.get("returns_audio", False) or model_def.get("any_audio_prompt", False) )
 
 def get_available_filename(target_path, video_source, suffix = "", force_extension = None):
-    name, extension =  os.path.splitext(os.path.basename(video_source))
+    name, extension =  os.path.splitext(os.path.basename(strip_virtual_media_suffix(video_source)))
     if force_extension != None:
         extension = force_extension
     name+= suffix
@@ -5189,7 +5214,7 @@ def edit_video(
                 from shared.utils.video_metadata import extract_source_images, save_video_metadata
                 temp_images_path = get_available_filename(save_path, video_source, force_extension= ".temp")
                 embedded_images = extract_source_images(video_source, temp_images_path)
-                save_video_metadata(new_video_path, configs, embedded_images)
+                save_video_metadata(new_video_path, configs, embedded_images, verbose_level=verbose_level)
                 if os.path.isdir(temp_images_path):
                     shutil.rmtree(temp_images_path, ignore_errors= True)
             gen["last_was_audio"] = False
@@ -5270,7 +5295,7 @@ def process_prompt_enhancer(model_type, model_def, prompt_enhancer, original_pro
             prompt_images += image_start[:1]
         if original_image_refs != None:
             prompt_images += original_image_refs[:1]
-    prompt_images = [Image.open(img) if isinstance(img,str) else img for img in prompt_images]
+    prompt_images = [_open_image_input(img) if isinstance(img, str) else img for img in prompt_images]
     if len(original_prompts) == 0 and "T" not in prompt_enhancer_mode:
         return None
     else:
@@ -5718,6 +5743,7 @@ def generate_video(
     api_return_video_uint8, api_return_audio = get_api_output_options(plugin_data)
     gen["early_stop"] = False
     gen["early_stop_forwarded"] = False
+    gen["last_progress_args"] = None
     torch.set_grad_enabled(False) 
     if mode.startswith("edit_"):
         edit_video(send_cmd, state, mode, video_source, seed, temporal_upsampling, spatial_upsampling, film_grain_intensity, film_grain_saturation, MMAudio_setting, MMAudio_prompt, MMAudio_neg_prompt, repeat_generation, audio_source)
@@ -5832,6 +5858,7 @@ def generate_video(
     prompts = prompt_parser.split_prompt_units(prompt, multi_prompts_gen_type)
     parsed_keep_frames_video_source= max_source_video_frames if len(keep_frames_video_source) ==0 else int(keep_frames_video_source) 
     transformer_loras_filenames, transformer_loras_multipliers  = get_transformer_loras(model_type)
+    lora_dir = get_lora_dir(model_type)
     if guidance_phases < 1: guidance_phases = 1
     if transformer_loras_filenames != None:
         loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(transformer_loras_multipliers, len(transformer_loras_filenames), num_inference_steps, nb_phases = guidance_phases, model_switch_phase= model_switch_phase )
@@ -5847,7 +5874,6 @@ def generate_video(
     if len(activated_loras) > 0:
         loras_list_mult_choices_nums, loras_slists, errors =  parse_loras_multipliers(loras_multipliers, len(activated_loras), num_inference_steps, nb_phases = guidance_phases, merge_slist= loras_slists, model_switch_phase= model_switch_phase )
         if len(errors) > 0: raise Exception(f"Error parsing Loras: {errors}")
-        lora_dir = get_lora_dir(model_type)
         errors = check_loras_exist(model_type, activated_loras, True, send_cmd)
         if len(errors) > 0 : raise gr.Error(errors)
         loras_selected += [ os.path.join(lora_dir, os.path.basename(lora)) for lora in activated_loras]
@@ -5957,7 +5983,7 @@ def generate_video(
     # Image Ref (non background and non positioned frames) are boxed in a white canvas in order to keep their own width/height ratio
     frames_to_inject = []
     any_background_ref  = 0
-    custom_frames_injection = model_def.get("custom_frames_injection", False) and image_refs is not None and len(image_refs)
+    custom_frames_injection = model_def.get("custom_frames_injection", False) and image_refs is not None and len(image_refs) > 0
     if "K" in video_prompt_type: 
         any_background_ref = 2 if model_def.get("all_image_refs_are_background_ref", False) or custom_frames_injection else 1
     outpainting_dims = get_outpainting_dims(video_guide_outpainting, video_guide_outpainting_ratio)
@@ -6258,14 +6284,11 @@ def generate_video(
                             else:
                                 frames_positions_list.append(int(pos)-1 + alignment_shift)
                     frames_positions_list = frames_positions_list[:len(image_refs)]
-                nb_frames_positions = len(frames_positions_list) if not custom_frames_injection else 0
+                nb_frames_positions = len(frames_positions_list) 
                 if nb_frames_positions > 0:
                     frames_to_inject = [None] * (max(frames_positions_list) + 1)
                     for i, pos in enumerate(frames_positions_list):
                         frames_to_inject[pos] = image_refs[i] 
-            if custom_frames_injection:
-                frames_relative_positions_list= [ i -aligned_window_start_frame for i in  frames_positions_list if aligned_window_start_frame <= i < aligned_window_start_frame + current_video_length ]
-
 
             video_guide_processed = video_mask_processed = video_guide_processed2 = video_mask_processed2 = sparse_video_image = None
             if video_guide is not None:
@@ -6321,10 +6344,28 @@ def generate_video(
                         context_scale = [control_net_weight /2, control_net_weight2 /2] if preprocess_type2 is not None else [control_net_weight]
 
                         if not (preprocess_type == "identity" and preprocess_type2 is None and video_mask is None):send_cmd("progress", [0, get_latest_status(state, status_info)])
-                        inpaint_color = 0 if preprocess_type=="pose" and process_outside_mask == "inpaint" else guide_inpaint_color
-                        video_guide_processed, video_mask_processed = preprocess_video_with_mask(video_guide if sparse_video_image is None else sparse_video_image, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, proc_no =1, inpaint_color =inpaint_color, block_size = block_size, to_bbox = "H" in video_prompt_type )
+                        inpaint_color = 0 if "pose" in preprocess_type and process_outside_mask == "inpaint" else guide_inpaint_color
+                        if "O" in video_prompt_type and pre_video_guide is None and all_letters(video_prompt_type, "IK"):
+                            from shared.utils.utils import get_outpainting_full_area_dimensions
+                            w, h = image_refs[0].size
+                            if outpainting_dims != None:
+                                h, w = get_outpainting_full_area_dimensions(h, w, outpainting_dims, video_guide_outpainting_ratio)
+                            image_size = calculate_new_dimensions(height, width, h, w, fit_canvas)                            
+                            sample_fit_canvas = None 
+                            ref_pose_tensor  = resize_and_remove_background(image_refs[nb_frames_positions:nb_frames_positions+1], image_size[1], image_size[0],
+                                                                                            False, True, 
+                                                                                            fit_into_canvas= model_def.get("fit_into_canvas_image_refs", 1),
+                                                                                            block_size=block_size,
+                                                                                            outpainting_dims =outpainting_dims,
+                                                                                            outpainting_ratio = video_guide_outpainting_ratio,
+                                                                                            background_ref_outpainted = model_def.get("background_ref_outpainted", True),
+                                                                                            return_tensor= True)[0][0]
+                        else:
+                            ref_pose_tensor = pre_video_guide
+ 
+                        video_guide_processed, video_mask_processed = preprocess_video_with_mask(ref_pose_tensor, video_guide if sparse_video_image is None else sparse_video_image, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, proc_no =1, inpaint_color =inpaint_color, block_size = block_size, to_bbox = "H" in video_prompt_type )
                         if preprocess_type2 != None:
-                            video_guide_processed2, video_mask_processed2 = preprocess_video_with_mask(video_guide, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type2, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, proc_no =2, block_size = block_size, to_bbox = "H" in video_prompt_type  )
+                            video_guide_processed2, video_mask_processed2 = preprocess_video_with_mask(ref_pose_tensor, video_guide, video_mask, height=image_size[0], width = image_size[1], max_frames= guide_frames_extract_count, start_frame = guide_frames_extract_start, fit_canvas = sample_fit_canvas, fit_crop = fit_crop, target_fps = fps,  process_type = preprocess_type2, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, outpainting_ratio = video_guide_outpainting_ratio, proc_no =2, block_size = block_size, to_bbox = "H" in video_prompt_type )
 
                     if video_guide_processed is not None  and sample_fit_canvas is not None:
                         image_size = video_guide_processed.shape[-2:]
@@ -6387,9 +6428,8 @@ def generate_video(
                                                                                         return_tensor= model_def.get("return_image_refs_tensor", False),
                                                                                         ignore_last_refs =model_def.get("no_processing_on_last_images_refs",0),
                                                                                         background_removal_color = model_def.get("background_removal_color", [255, 255, 255] ))
-
             frames_to_inject_parsed = frames_to_inject[ window_start_frame if extract_guide_from_window_start else guide_start_frame: guide_end_frame]
-            if video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False): 
+            if video_guide is not None or len(frames_to_inject_parsed) > 0 and not custom_frames_injection or model_def.get("forced_guide_mask_inputs", False): 
                 any_mask = video_mask is not None or model_def.get("forced_guide_mask_inputs", False)
                 any_guide_padding = model_def.get("pad_guide_video", False)
                 dont_cat_preguide = extract_guide_from_window_start or model_def.get("dont_cat_preguide", False) or sparse_video_image is not None 
@@ -6399,7 +6439,7 @@ def generate_video(
                                                                         None if dont_cat_preguide else pre_video_guide, 
                                                                         image_size, current_video_length, latent_size,
                                                                         any_mask, any_guide_padding, guide_inpaint_color, 
-                                                                        keep_frames_parsed, frames_to_inject_parsed , outpainting_dims, video_guide_outpainting_ratio)
+                                                                        keep_frames_parsed, [] if custom_frames_injection else frames_to_inject_parsed , outpainting_dims, video_guide_outpainting_ratio)
                 video_guide_processed = video_guide_processed2 = video_mask_processed = video_mask_processed2 = None
                 if len(src_videos) == 1:
                     src_video, src_video2, src_mask, src_mask2 = src_videos[0], None, src_masks[0], None 
@@ -6441,7 +6481,11 @@ def generate_video(
 
             if src_ref_images is not None or nb_frames_positions:
                 if len(frames_to_inject_parsed):
-                    new_image_refs = [convert_tensor_to_image(src_video, frame_no + (0 if extract_guide_from_window_start else (aligned_guide_start_frame - aligned_window_start_frame)) ) for frame_no, inject in enumerate(frames_to_inject_parsed) if inject]
+                    if custom_frames_injection:
+                        frames_relative_positions_list= [ frame_no + (0 if extract_guide_from_window_start else (aligned_guide_start_frame - aligned_window_start_frame)) for frame_no, frame in enumerate(frames_to_inject_parsed) if frame is not None]
+                        frames_to_inject_parsed = new_image_refs = [frame for frame in frames_to_inject_parsed if frame is not None]
+                    else:
+                        new_image_refs = [convert_tensor_to_image(src_video, frame_no + (0 if extract_guide_from_window_start else (aligned_guide_start_frame - aligned_window_start_frame)) ) for frame_no, inject in enumerate(frames_to_inject_parsed) if inject]
                 else:
                     new_image_refs = []
                 if src_ref_images is not None:
@@ -6602,7 +6646,8 @@ def generate_video(
                     top_k=top_k,
                     set_progress_status=set_progress_status,
                     loras_selected=loras_selected,
-                    frames_relative_positions_list = frames_relative_positions_list,                 
+                    frames_relative_positions_list = frames_relative_positions_list,
+                    frames_to_inject = frames_to_inject_parsed,
                 )
             except Exception as e:
                 if len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0:
@@ -7161,12 +7206,14 @@ def process_tasks(state):
             raise gr.Error(data, print_exception= False, duration = 0)
         elif cmd == "status":
             gen["status"] = data
+            status_text = str(data or "").strip()
+            gen["last_progress_args"] = [0, status_text] if len(status_text) > 0 else None
         elif cmd == "output":
             gen["preview"] = None
             gen["refresh_tab"] = True
             yield time.time(), time.time(), gr.update()
         elif cmd == "progress":
-            gen["progress_args"] = data
+            gen["last_progress_args"] = gen["progress_args"] = data
         elif cmd == "preview":
             current_model_type = "unknown"
             with lock:
@@ -8279,7 +8326,7 @@ def add_videos_to_gallery(state, input_file_list, choice, audio_files_paths, aud
                     elif has_video_file_extension(file_path):
                         fps, width, height, frames_count = get_video_info(file_path)
                     elif has_image_file_extension(file_path):
-                        width, height = Image.open(file_path).size
+                        width, height = _open_image_input(file_path).size
                         fps = 1 
                 except:
                     pass
@@ -9814,6 +9861,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                             "": "No Control Video",
                             "UV": "Keep Control Video Unchanged",
                             "PV": f"Transfer Human {pose_label}",
+                            "OV": f"Transfer Aligned Human {pose_label}",
                             "DV": "Transfer Depth",
                             "EV": "Transfer Canny Edges",
                             "SV": "Transfer Shapes",
@@ -11435,7 +11483,7 @@ def _get_dropdown_deps():
         get_model_def=get_model_def,
         get_model_recursive_prop=get_model_recursive_prop,
         get_model_filename=get_model_filename,
-        get_local_model_filename=get_local_model_filename,
+        get_local_model_filename=fl.get_local_model_filename,
         get_lora_dir=get_lora_dir,
         get_parent_model_type=get_parent_model_type,
         get_base_model_type=get_base_model_type,
