@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +18,19 @@ from .text_projection import PixArtAlphaTextProjection
 from .timestep_embedding import get_timestep_embedding
 
 
+KeyframesEmbeddingProvider = Callable[[], torch.Tensor | None]
+
+
+def apply_keyframes_absolute_embedding(hidden_states: torch.Tensor, keyframes_mask: torch.Tensor | None, embedding_provider: KeyframesEmbeddingProvider | None) -> torch.Tensor:
+    if keyframes_mask is None or embedding_provider is None:
+        return hidden_states
+    embedding = embedding_provider()
+    if embedding is None:
+        return hidden_states
+    mask = (keyframes_mask > 0).to(device=hidden_states.device, dtype=hidden_states.dtype)
+    return hidden_states + mask * embedding.to(device=hidden_states.device, dtype=hidden_states.dtype)
+
+
 @dataclass(frozen=True, eq=False)
 class TransformerArgs:
     x: torch.Tensor
@@ -28,10 +42,12 @@ class TransformerArgs:
     cross_positional_embeddings: RopeCache | None
     cross_scale_shift_timestep: torch.Tensor | None
     cross_gate_timestep: torch.Tensor | None
-    enabled: bool
+    cross_attention_mask: torch.Tensor | None = None
+    enabled: bool = True
     nag: dict | None = None
     prompt_timestep: torch.Tensor | None = None
     self_attention_mask: torch.Tensor | None = None
+    ref_context: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -168,11 +184,13 @@ class TransformerArgsPreprocessor:
         positional_embedding_theta: float,
         rope_type: LTXRopeType,
         prompt_adaln: AdaLayerNormSingle | None = None,
+        keyframes_embedding_provider: KeyframesEmbeddingProvider | None = None,
     ) -> None:
         self.patchify_proj = patchify_proj
         self.adaln = adaln
         self.caption_projection = caption_projection
         self.prompt_adaln = prompt_adaln
+        self.keyframes_embedding_provider = keyframes_embedding_provider
         self.inner_dim = inner_dim
         self.max_pos = max_pos
         self.num_attention_heads = num_attention_heads
@@ -373,6 +391,27 @@ class TransformerArgsPreprocessor:
             (attention_mask.shape[0], 1, -1, attention_mask.shape[-1])
         ) * torch.finfo(x_dtype).max
 
+    def _prepare_self_attention_mask(self, attention_mask: torch.Tensor | None, x_dtype: torch.dtype) -> torch.Tensor | None:
+        if attention_mask is None:
+            return None
+        finfo = torch.finfo(x_dtype)
+        eps = finfo.tiny
+        bias = torch.full_like(attention_mask, finfo.min, dtype=x_dtype)
+        positive = attention_mask > 0
+        if positive.any():
+            bias[positive] = torch.log(attention_mask[positive].clamp(min=eps)).to(x_dtype)
+        return bias.unsqueeze(2)
+
+    def _prepare_cross_attention_mask(self, cross_attention_mask: torch.Tensor | None, x_dtype: torch.dtype) -> torch.Tensor | None:
+        if cross_attention_mask is None:
+            return None
+        mask = cross_attention_mask.to(x_dtype)
+        if mask.ndim == 2:
+            return (mask - 1).reshape((mask.shape[0], 1, 1, mask.shape[-1])) * torch.finfo(x_dtype).max
+        if mask.ndim == 3:
+            return (mask - 1).unsqueeze(2) * torch.finfo(x_dtype).max
+        raise ValueError(f"Expected cross_attention_mask shape (B, K) or (B, Q, K), got {tuple(mask.shape)}")
+
     def _prepare_positional_embeddings(
         self,
         positions: torch.Tensor,
@@ -433,6 +472,7 @@ class TransformerArgsPreprocessor:
             self._gguf_latent_logged = True
             print(f"[GGUF][patchify_proj] latent={latent_dtype} weight={getattr(getattr(self.patchify_proj, 'weight', None), 'dtype', None)}")
         x = self.patchify_proj(latent)
+        x = apply_keyframes_absolute_embedding(x, modality.keyframes_mask, self.keyframes_embedding_provider)
         base_timestep, prompt_base_timestep = self._get_runtime_timestep_bases(modality)
         prepared = self._get_prepared_conditioning(modality.context)
         timestep, embedded_timestep = self._prepare_timestep_from_base(
@@ -448,6 +488,11 @@ class TransformerArgsPreprocessor:
             timestep, embedded_timestep = self._prepare_timestep(
                 modality.timesteps, self.adaln, x.shape[0], latent_dtype, frame_indices=modality.frame_indices
             )
+        if modality.ref_adaln is not None:
+            ref_adaln = modality.ref_adaln.to(device=timestep.device, dtype=timestep.dtype)
+            if ref_adaln.ndim == 2:
+                ref_adaln = ref_adaln.unsqueeze(1)
+            timestep = timestep + ref_adaln
         prompt_timestep = None
         if self.prompt_adaln is not None:
             prompt_timestep, _ = self._prepare_timestep_from_base(
@@ -463,6 +508,7 @@ class TransformerArgsPreprocessor:
                 prompt_timestep, _ = self._prepare_timestep(modality.sigma, self.prompt_adaln, x.shape[0], latent_dtype)
         context, attention_mask = self._prepare_context(modality.context, x, modality.context_mask)
         attention_mask = self._prepare_attention_mask(attention_mask, latent_dtype)
+        self_attention_mask = self._prepare_self_attention_mask(modality.attention_mask, latent_dtype)
         pe = self._prepare_positional_embeddings(
             positions=modality.positions,
             inner_dim=self.inner_dim,
@@ -482,9 +528,12 @@ class TransformerArgsPreprocessor:
             cross_positional_embeddings=None,
             cross_scale_shift_timestep=None,
             cross_gate_timestep=None,
+            cross_attention_mask=None,
             enabled=modality.enabled,
             nag=modality.nag,
             prompt_timestep=prompt_timestep,
+            self_attention_mask=self_attention_mask,
+            ref_context=None if modality.ref_context is None else modality.ref_context.to(device=x.device, dtype=latent_dtype),
         )
 
 
@@ -508,6 +557,7 @@ class MultiModalTransformerArgsPreprocessor:
         rope_type: LTXRopeType,
         av_ca_timestep_scale_multiplier: int,
         prompt_adaln: AdaLayerNormSingle | None = None,
+        keyframes_embedding_provider: KeyframesEmbeddingProvider | None = None,
     ) -> None:
         self.simple_preprocessor = TransformerArgsPreprocessor(
             patchify_proj=patchify_proj,
@@ -522,6 +572,7 @@ class MultiModalTransformerArgsPreprocessor:
             positional_embedding_theta=positional_embedding_theta,
             rope_type=rope_type,
             prompt_adaln=prompt_adaln,
+            keyframes_embedding_provider=keyframes_embedding_provider,
         )
         self.cross_scale_shift_adaln = cross_scale_shift_adaln
         self.cross_gate_adaln = cross_gate_adaln
@@ -581,6 +632,7 @@ class MultiModalTransformerArgsPreprocessor:
             frame_indices=modality.frame_indices,
             base_timestep=base_timestep,
         )
+        cross_attention_mask = self.simple_preprocessor._prepare_cross_attention_mask(modality.cross_attention_mask, modality.latent.dtype)
         return TransformerArgs(
             x=transformer_args.x,
             context=transformer_args.context,
@@ -591,10 +643,12 @@ class MultiModalTransformerArgsPreprocessor:
             cross_positional_embeddings=cross_pe,
             cross_scale_shift_timestep=cross_scale_shift_timestep,
             cross_gate_timestep=cross_gate_timestep,
+            cross_attention_mask=cross_attention_mask,
             enabled=transformer_args.enabled,
             nag=transformer_args.nag,
             prompt_timestep=transformer_args.prompt_timestep,
             self_attention_mask=transformer_args.self_attention_mask,
+            ref_context=transformer_args.ref_context,
         )
 
     def _prepare_cross_attention_timestep(

@@ -10,85 +10,43 @@ from contextlib import nullcontext
 import torch
 
 from mmgp import offload
+from PIL import Image
+from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoTokenizer, Qwen2TokenizerFast, Qwen2VLImageProcessorFast, Qwen2VLProcessor
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoProcessor
 
+from shared.llm_io import known_token_ids, llm_io_enabled, log_llm_io, media_descriptor
 from shared.llm_engines.nanovllm.models.qwen3_5 import Qwen3_5DynamicCache
 from shared.llm_engines.nanovllm.utils.context import reset_context
 from shared.qtypes.gguf import materialize_module_source_tensors
 from shared.utils import files_locator as fl
 
+from .assets import (
+    QWEN35_4B_TEXT_GGUF_FILENAME,
+    QWEN35_4B_TEXT_INT8_FILENAME,
+    QWEN35_4B_VISION_FILENAME,
+    QWEN35_ABLITERATED_REPO,
+    QWEN35_ABLITERATED_TEXT_REQUIRED_FILES,
+    QWEN35_TEXT_GGUF_FILENAME,
+    QWEN35_TEXT_INT8_FILENAME,
+    QWEN35_VARIANT_4B,
+    QWEN35_VARIANT_9B,
+    QWEN35_VARIANT_SPECS,
+    QWEN35_VISION_FILENAME,
+    QWEN38_VARIANT_27B,
+)
 from .qwen3_5 import load_qwen35_model_class
 
 
 UPSTREAM_MODELING_FILENAME = "modeling_qwen3_5.py"
 enhancer_quantization_GGUF = "gguf"
+enhancer_quantization_GGUF_Q2 = "gguf_q2"
 enhancer_quantization_SAFETENSORS = "safetensors"
 enhancer_quantization_QUANTO_INT8 = "quanto_int8"
 QWEN35_GGUF_LLAMACPP_ENV = "WGP_GGUF_LLAMACPP_CUDA"
-QWEN35_TEXT_GGUF_FILENAME = "Qwen3.5-9B-Abliterated-text-Q4_K_M_bis.gguf"
-# QWEN35_TEXT_GGUF_FILENAME = "Qwen3.5-9B-Abliterated-text-Q4_K_M.gguf"
-QWEN35_TEXT_INT8_FILENAME = "Qwen3.5-9B-Abliterated_quanto_bf16_int8.safetensors"
-# QWEN35_TEXT_INT8_FILENAME = "Qwen3.5-9B-Abliterated_bf16.safetensors"
-QWEN35_VISION_FILENAME = "Qwen3.5-9B-vision_bf16.safetensors"
 QWEN35_PROMPT_MIN_NEW_TOKENS = 4
-QWEN35_ABLITERATED_REPO = "DeepBeepMeep/Wan2.1"
-QWEN35_ABLITERATED_TEXT_REQUIRED_FILES = (
-    "chat_template.jinja",
-    "config.json",
-)
-QWEN35_4B_TEXT_GGUF_FILENAME = "Qwen3.5-4B-Abliterated-text-Q4_K_M.gguf"
-QWEN35_4B_VISION_FILENAME = "Qwen3.5-4B-vision_bf16.safetensors"
-QWEN35_4B_TEXT_INT8_FILENAME = "Qwen3.5-4B-Abliterated_quanto_bf16_int8.safetensors"
-QWEN35_VARIANT_9B = "9b"
-QWEN35_VARIANT_4B = "4b"
-QWEN35_VARIANT_SPECS = {
-    QWEN35_VARIANT_9B: {
-        "display_name": "Qwen3.5-9B Abliterated",
-        "assets_dir_name": "Qwen3_5_9B_Abliterated",
-        "root_repo": QWEN35_ABLITERATED_REPO,
-        "repo_subfolder": "Qwen3_5_9B_Abliterated",
-        "root_files": [
-            "chat_template.jinja",
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "video_preprocessor_config.json",
-            "vocab.json",
-        ],
-        "text_repo": QWEN35_ABLITERATED_REPO,
-        "text_required_files": list(QWEN35_ABLITERATED_TEXT_REQUIRED_FILES),
-        "text_int8_filename": QWEN35_TEXT_INT8_FILENAME,
-        "gguf_repo": QWEN35_ABLITERATED_REPO,
-        "text_gguf_filename": QWEN35_TEXT_GGUF_FILENAME,
-        "vision_filename": QWEN35_VISION_FILENAME,
-        "tie_word_embeddings": False,
-    },
-    QWEN35_VARIANT_4B: {
-        "display_name": "Qwen3.5-4B Abliterated",
-        "assets_dir_name": "Qwen3_5_4B_Abliterated",
-        "root_repo": QWEN35_ABLITERATED_REPO,
-        "repo_subfolder": "Qwen3_5_4B_Abliterated",
-        "root_files": [
-            "chat_template.jinja",
-            "config.json",
-            "generation_config.json",
-            "merges.txt",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "video_preprocessor_config.json",
-            "vocab.json",
-        ],
-        "text_repo": None,
-        "text_required_files": [],
-        "text_int8_filename": QWEN35_4B_TEXT_INT8_FILENAME,
-        "gguf_repo": QWEN35_ABLITERATED_REPO,
-        "text_gguf_filename": QWEN35_4B_TEXT_GGUF_FILENAME,
-        "vision_filename": QWEN35_4B_VISION_FILENAME,
-        "tie_word_embeddings": True,
-    },
-}
+QWEN35_IMAGE_CAPTION_MAX_EDGE = 1024
 QWEN35_VARIANT_ALIASES = {
     "": QWEN35_VARIANT_9B,
     "9": QWEN35_VARIANT_9B,
@@ -102,6 +60,10 @@ QWEN35_VARIANT_ALIASES = {
     "qwen3.5-4b": QWEN35_VARIANT_4B,
     "qwen3.5-4b abliterated": QWEN35_VARIANT_4B,
     "qwen3.5-4b_abliterated": QWEN35_VARIANT_4B,
+    "27": QWEN38_VARIANT_27B,
+    "27b": QWEN38_VARIANT_27B,
+    "qwen3.8-27b": QWEN38_VARIANT_27B,
+    "qwen3.8-27b uncensored": QWEN38_VARIANT_27B,
 }
 
 
@@ -117,7 +79,16 @@ def get_qwen35_assets_dir_name(variant: str | None = None) -> str:
 
 
 def get_qwen35_prompt_enhancer_variant(model_no) -> str:
-    return QWEN35_VARIANT_4B if int(model_no) == 3 else QWEN35_VARIANT_9B
+    return {3: QWEN35_VARIANT_4B, 4: QWEN35_VARIANT_9B, 5: QWEN38_VARIANT_27B}[int(model_no)]
+
+
+def get_qwen35_quantization(backend: str, variant: str | None = None) -> str:
+    spec = get_qwen35_variant_spec(variant)
+    if backend == enhancer_quantization_GGUF_Q2:
+        if "text_gguf_q2_filename" not in spec:
+            raise ValueError(f"{spec['display_name']} does not provide a GGUF Q2 checkpoint.")
+        return backend
+    return spec.get("backend", backend)
 
 
 def _resolve_qwen35_assets_dir(assets_dir: str | None, variant: str | None = None, error_if_none: bool = True) -> str | None:
@@ -168,12 +139,27 @@ def get_qwen35_modeling_path() -> str:
     return os.path.join(os.path.dirname(__file__), "qwen3_5", UPSTREAM_MODELING_FILENAME)
 
 
-def ensure_qwen35_prompt_enhancer_assets(process_files_def, backend: str = enhancer_quantization_QUANTO_INT8, variant: str | None = None):
+def ensure_qwen35_prompt_enhancer_assets(process_files_def, backend: str = enhancer_quantization_QUANTO_INT8, variant: str | None = None, speculative_decoding: bool = False):
     spec = get_qwen35_variant_spec(variant)
+    backend = get_qwen35_quantization(backend, variant=variant)
     repo_subfolder = spec.get("repo_subfolder", "")
     qwen35_shared_files = list(spec["root_files"])
-    qwen35_runtime_files = [spec["vision_filename"], spec["text_gguf_filename" if backend == enhancer_quantization_GGUF else "text_int8_filename"]]
-    process_files_def(repoId=spec["root_repo"], sourceFolderList=[repo_subfolder], fileList=[qwen35_shared_files + qwen35_runtime_files])
+    if spec["root_repo"] == spec.get("gguf_repo"):
+        checkpoint_filename = spec["text_int8_filename"]
+        if backend in (enhancer_quantization_GGUF, enhancer_quantization_GGUF_Q2):
+            checkpoint_filename = spec["text_gguf_q2_filename" if backend == enhancer_quantization_GGUF_Q2 else "text_gguf_filename"]
+        qwen35_shared_files += [spec["vision_filename"], checkpoint_filename]
+        if speculative_decoding and spec.get("text_mtp_filename"):
+            qwen35_shared_files.append(spec["text_mtp_filename"])
+    download_def = {"repoId": spec["root_repo"], "sourceFolderList": [repo_subfolder], "fileList": [qwen35_shared_files]}
+    if len(repo_subfolder) == 0:
+        download_def["targetFolderList"] = [spec["assets_dir_name"]]
+    process_files_def(**download_def)
+    if spec["root_repo"] != spec.get("gguf_repo"):
+        if backend not in (enhancer_quantization_GGUF, enhancer_quantization_GGUF_Q2):
+            raise ValueError(f"{spec['display_name']} supports only the GGUF backend.")
+        gguf_filename = spec["text_gguf_q2_filename" if backend == enhancer_quantization_GGUF_Q2 else "text_gguf_filename"]
+        process_files_def(repoId=spec["gguf_repo"], sourceFolderList=[spec.get("gguf_repo_subfolder", "")], fileList=[[spec["vision_filename"], gguf_filename]])
     if spec.get("text_repo") and spec.get("text_required_files"):
         process_files_def(repoId=spec["text_repo"], sourceFolderList=[repo_subfolder], fileList=[list(spec["text_required_files"])])
     qwen35_modeling_path = get_qwen35_modeling_path()
@@ -244,24 +230,41 @@ def _load_qwen35_image_processor(assets_dir: str):
     return Qwen2VLImageProcessorFast(**config)
 
 
-def get_qwen35_text_gguf_path(assets_dir: str, variant: str | None = None) -> str:
-    filename = get_qwen35_variant_spec(variant)["text_gguf_filename"]
+def get_qwen35_text_gguf_path(assets_dir: str, variant: str | None = None, backend: str = enhancer_quantization_GGUF) -> str:
+    spec = get_qwen35_variant_spec(variant)
+    filename = spec["text_gguf_q2_filename" if get_qwen35_quantization(backend, variant=variant) == enhancer_quantization_GGUF_Q2 else "text_gguf_filename"]
     return _resolve_qwen35_checkpoint_file(assets_dir, filename, variant=variant, error_if_none=False)
+
+
 def _build_qwen35_vl_gguf_preprocess_sd(patch_shape):
     def preprocess_sd(sd, quant_map=None, tied_map=None):
         new_sd = OrderedDict()
+        patch_slices = []
         for name, tensor in sd.items():
-            if name == "v.pos_embed.weight":
+            if name in ("v.pos_embed.weight", "v.position_embd.weight"):
                 target_name = "pos_embed.weight"
                 target_tensor = tensor
-            elif name == "v.patch_embed.bias":
+            elif name in ("v.patch_embed.bias", "v.patch_embd.bias"):
                 target_name = "patch_embed.proj.bias"
                 target_tensor = tensor
             elif name == "v.patch_embed.weight":
                 target_name = "patch_embed.proj.weight"
                 target_tensor = tensor.reshape(*patch_shape)
+            elif re.match(r"^v\.patch_embd\.weight(?:\.\d+)?$", name):
+                patch_index = int(name.rsplit(".", 1)[-1]) if name.rsplit(".", 1)[-1].isdigit() else 0
+                patch_slices.append((patch_index, tensor))
+                continue
             elif name.startswith("v.merger."):
                 target_name = name[2:]
+                target_tensor = tensor
+            elif name.startswith("v.post_ln."):
+                target_name = "merger.norm." + name.removeprefix("v.post_ln.")
+                target_tensor = tensor
+            elif name.startswith("mm.0."):
+                target_name = "merger.linear_fc1." + name.removeprefix("mm.0.")
+                target_tensor = tensor
+            elif name.startswith("mm.2."):
+                target_name = "merger.linear_fc2." + name.removeprefix("mm.2.")
                 target_tensor = tensor
             else:
                 vision_match = re.match(r"^v\.blk\.(\d+)\.(.+)$", name)
@@ -272,7 +275,12 @@ def _build_qwen35_vl_gguf_preprocess_sd(patch_shape):
                 prefix = f"blocks.{layer_no}."
                 target_name = None
                 target_tensor = tensor
-                if suffix == "attn_q.weight":
+                if suffix == "attn_qkv.weight" or suffix == "attn_qkv.bias":
+                    projection_suffix = suffix.rsplit(".", 1)[-1]
+                    for projection_name, projection_tensor in zip(("q_proj", "k_proj", "v_proj"), tensor.chunk(3, dim=0)):
+                        new_sd[prefix + f"attn.{projection_name}.{projection_suffix}"] = projection_tensor
+                    continue
+                elif suffix == "attn_q.weight":
                     target_name = prefix + "attn.q_proj.weight"
                 elif suffix == "attn_q.bias":
                     target_name = prefix + "attn.q_proj.bias"
@@ -288,11 +296,21 @@ def _build_qwen35_vl_gguf_preprocess_sd(patch_shape):
                     target_name = prefix + "attn.proj.weight"
                 elif suffix == "attn_out.bias":
                     target_name = prefix + "attn.proj.bias"
+                elif suffix.startswith("ffn_up."):
+                    target_name = prefix + "mlp.linear_fc1." + suffix.removeprefix("ffn_up.")
+                elif suffix.startswith("ffn_down."):
+                    target_name = prefix + "mlp.linear_fc2." + suffix.removeprefix("ffn_down.")
+                elif suffix.startswith("ln1."):
+                    target_name = prefix + "norm1." + suffix.removeprefix("ln1.")
+                elif suffix.startswith("ln2."):
+                    target_name = prefix + "norm2." + suffix.removeprefix("ln2.")
                 elif suffix.startswith("mlp.") or suffix.startswith("norm"):
                     target_name = prefix + suffix
                 if target_name is None:
                     continue
             new_sd[target_name] = target_tensor
+        if patch_slices:
+            new_sd["patch_embed.proj.weight"] = torch.stack([tensor for _, tensor in sorted(patch_slices)], dim=2).reshape(*patch_shape)
         return new_sd, quant_map, tied_map
 
     return preprocess_sd
@@ -315,10 +333,49 @@ def _resolve_execution_device(self, model_inputs=None) -> torch.device:
         return torch.device("cpu")
 
 
+def _resize_image_for_caption(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    max_edge = max(width, height)
+    if max_edge <= QWEN35_IMAGE_CAPTION_MAX_EDGE:
+        return image
+    scale = QWEN35_IMAGE_CAPTION_MAX_EDGE / max_edge
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
+def alias_qwen35_text_embedding_for_mmgp(text_model: torch.nn.Module) -> torch.nn.Module:
+    source_embedding = text_model.token_embd
+    cls = source_embedding.__class__
+    kwargs = {
+        "padding_idx": source_embedding.padding_idx,
+        "max_norm": source_embedding.max_norm,
+        "norm_type": source_embedding.norm_type,
+        "scale_grad_by_freq": source_embedding.scale_grad_by_freq,
+        "sparse": source_embedding.sparse,
+        "dtype": getattr(source_embedding, "_gguf_default_dtype", getattr(source_embedding.weight, "dtype", None)),
+        "device": "meta",
+    }
+    if hasattr(source_embedding, "weight_qtype"):
+        kwargs.update(
+            weights=source_embedding.weight_qtype,
+            activations=getattr(source_embedding, "activation_qtype", None),
+            optimizer=getattr(source_embedding, "optimizer", None),
+        )
+    embedding_model = cls(source_embedding.num_embeddings, source_embedding.embedding_dim, **kwargs)
+    embedding_model.weight = source_embedding.weight
+    for name, buffer in source_embedding._buffers.items():
+        embedding_model._buffers[name] = buffer
+    if hasattr(source_embedding, "_gguf_default_dtype"):
+        embedding_model._gguf_default_dtype = source_embedding._gguf_default_dtype
+    embedding_model.eval()
+    return embedding_model
+
+
 class _SharedQwen35TextAdapter(torch.nn.Module):
-    def __init__(self, text_model: torch.nn.Module):
+    def __init__(self, text_model: torch.nn.Module, input_embedding_model: torch.nn.Module | None = None):
         super().__init__()
         object.__setattr__(self, "_shared_text_model", text_model)
+        object.__setattr__(self, "_input_embedding_model", input_embedding_model)
         self.config = getattr(text_model, "config", None)
 
     @property
@@ -327,10 +384,11 @@ class _SharedQwen35TextAdapter(torch.nn.Module):
 
     @property
     def embed_tokens(self):
-        return self.text_model.embed_tokens
+        input_embedding_model = object.__getattribute__(self, "_input_embedding_model")
+        return input_embedding_model if input_embedding_model is not None else self.text_model.embed_tokens
 
     def get_input_embeddings(self):
-        return self.text_model.embed_tokens
+        return self.embed_tokens
 
     def set_input_embeddings(self, value):
         self.text_model.token_embd = value
@@ -594,6 +652,11 @@ def _generate_and_decode(
             for key, value in dict(model_inputs).items()
             if key not in {"use_cache", "return_dict", "output_attentions", "output_hidden_states"}
         }
+        if current_inputs.get("pixel_values") is not None or current_inputs.get("pixel_values_videos") is not None:
+            _prompt_token_ids, prompt_embeds, prompt_position_ids, _position_offset = _prepare_multimodal_vllm_prompt(self, current_inputs)
+            current_inputs = {"inputs_embeds": prompt_embeds.unsqueeze(0)}
+            if prompt_position_ids is not None:
+                current_inputs["position_ids"] = prompt_position_ids.unsqueeze(1) if prompt_position_ids.ndim == 2 else prompt_position_ids
         generated_steps = []
         min_new_tokens = int(getattr(self, "_prompt_enhancer_min_new_tokens", 0) or 0)
         step_iter = range(int(max_new_tokens))
@@ -631,8 +694,9 @@ def _generate_and_decode(
             generated_steps.append(next_token)
             if stop_token_ids and all(int(token_id) in stop_token_ids for token_id in next_token.view(-1).tolist()):
                 break
+            next_inputs_embeds = self._prompt_enhancer_text_model.embed_tokens(next_token)
             current_inputs = {
-                "input_ids": next_token,
+                "inputs_embeds": next_inputs_embeds,
                 "past_key_values": outputs.past_key_values,
             }
         if generated_steps:
@@ -741,6 +805,18 @@ def _generate_image_captions_vllm(self, images):
             top_p=None,
             top_k=None,
         )
+        if llm_io_enabled():
+            log_llm_io("OUT", "local-image-captioner", "qwen-visual-generation", {
+                "prompt": text,
+                "messages": message,
+                "image": media_descriptor(image),
+                "input_token_ids": prompt_token_ids,
+                "known_token_ids": known_token_ids(tokenizer),
+                "prompt_embeddings": prompt_embeds,
+                "prompt_position_ids": prompt_position_ids,
+                "position_offset": position_offset,
+                "generation": {"max_new_tokens": 128, "temperature": temp, "top_p": normalized_top_p, "top_k": normalized_top_k, "do_sample": False},
+            })
         response = engine.generate_embedded(
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
@@ -756,13 +832,17 @@ def _generate_image_captions_vllm(self, images):
             ignore_eos=False,
             position_offset=position_offset,
         )
-        outputs.append(_clean_generated_text("" if response is None else response.get("text", "")))
+        raw_text = "" if response is None else response.get("text", "")
+        log_llm_io("IN", "local-image-captioner", "qwen-visual-generation", {"text": raw_text, "response": response})
+        outputs.append(_clean_generated_text(raw_text))
         reset_context()
     return outputs
 
 
 def _generate_image_captions(self, images):
-    if _get_qwen35_text_runtime_helpers()._use_vllm_prompt_enhancer(self._prompt_enhancer_text_model):
+    images = [_resize_image_for_caption(image) for image in images]
+    qwen35_text_mod = _get_qwen35_text_runtime_helpers()
+    if qwen35_text_mod._use_vllm_prompt_enhancer(self._prompt_enhancer_text_model) or qwen35_text_mod._use_legacy_cuda_runner_prompt_enhancer(self._prompt_enhancer_text_model):
         return _generate_image_captions_vllm(self, images)
     outputs = []
     processor = self._prompt_enhancer_processor
@@ -793,6 +873,15 @@ def _generate_image_captions(self, images):
             return_mm_token_type_ids=True,
         )
         model_inputs = _move_batch_to_device(model_inputs, torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu"))
+        if llm_io_enabled():
+            log_llm_io("OUT", "local-image-captioner", "qwen-visual-generation", {
+                "prompt": text,
+                "messages": message,
+                "image": media_descriptor(image),
+                "input_token_ids": model_inputs["input_ids"].tolist(),
+                "known_token_ids": known_token_ids(self._prompt_enhancer_tokenizer),
+                "generation": {"max_new_tokens": 128, "do_sample": False},
+            })
         decoded = _generate_and_decode(
             self,
             model_inputs,
@@ -804,6 +893,7 @@ def _generate_image_captions(self, images):
             seed=None,
             progress_desc="Qwen3.5 image description tokens",
         )
+        log_llm_io("IN", "local-image-captioner", "qwen-visual-generation", {"text": decoded})
         outputs.extend(decoded)
     return outputs
 
@@ -826,6 +916,7 @@ def load_qwen35_vl_prompt_enhancer(
     assets_dir: str | None = None,
     attn_implementation: str = "sdpa",
     text_model: torch.nn.Module | None = None,
+    input_embedding_model: torch.nn.Module | None = None,
     backend: str = enhancer_quantization_QUANTO_INT8,
     variant: str | None = None,
 ):
@@ -866,7 +957,7 @@ def load_qwen35_vl_prompt_enhancer(
     with torch.device("meta"):
         model = model_class(config)
     model.model.visual = model.model.visual.__class__._from_config(config.vision_config)
-    model.model.language_model = _SharedQwen35TextAdapter(text_model)
+    model.model.language_model = _SharedQwen35TextAdapter(text_model, input_embedding_model)
     model.lm_head = _SharedQwen35LmHeadAdapter(text_model.lm_head)
     if str(model_path).lower().endswith(".gguf"):
         preprocess_sd = _build_qwen35_vl_gguf_preprocess_sd(tuple(model.model.visual.patch_embed.proj.weight.shape))
@@ -945,12 +1036,14 @@ __all__ = [
     "QWEN35_VARIANT_9B",
     "QWEN35_VARIANT_4B",
     "enhancer_quantization_GGUF",
+    "enhancer_quantization_GGUF_Q2",
     "enhancer_quantization_SAFETENSORS",
     "enhancer_quantization_QUANTO_INT8",
     "QWEN35_TEXT_GGUF_FILENAME",
     "QWEN35_VISION_FILENAME",
     "UPSTREAM_MODELING_FILENAME",
     "get_qwen35_prompt_enhancer_variant",
+    "get_qwen35_quantization",
     "get_qwen35_assets_dir_name",
     "get_qwen35_modeling_path",
     "get_qwen35_variant_spec",

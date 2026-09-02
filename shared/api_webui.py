@@ -3,12 +3,13 @@ import copy
 import asyncio
 import functools
 import inspect
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from shared.api import GeneratedArtifact, GenerationError, GenerationResult, PreviewUpdate, SessionJob, WanGPSession, _pushd
+from shared.api import GeneratedArtifact, GenerationError, GenerationResult, PreviewUpdate, SessionJob, WanGPSession
 
 _NO_YIELDED_RESULT = object()
 _GRADIO_LOG_PATCH_LOCK = threading.Lock()
@@ -227,7 +228,7 @@ class WebUIQueueProbe:
         self._client_ids: list[str] = []
         self._task_index_by_client_id: dict[str, int] = {}
         self._task_id_by_client_id: dict[str, Any] = {}
-        self._outputs_by_client_id: dict[str, str] = {}
+        self._outputs_by_client_id: dict[str, list[str]] = {}
         self._artifacts_by_client_id: dict[str, GeneratedArtifact] = {}
         self._errors_by_client_id: dict[str, GenerationError] = {}
         self._admitted_client_ids: set[str] = set()
@@ -262,9 +263,9 @@ class WebUIQueueProbe:
             if self._all_clients_finished():
                 break
             time.sleep(self._POLL_INTERVAL_SECONDS)
-        generated_files = [self._outputs_by_client_id[client_id] for client_id in self._client_ids if client_id in self._outputs_by_client_id]
+        generated_files = [path for client_id in self._client_ids for path in self._outputs_by_client_id.get(client_id, [])]
         errors = [self._errors_by_client_id[client_id] for client_id in self._client_ids if client_id in self._errors_by_client_id]
-        successful_tasks = len(generated_files)
+        successful_tasks = sum(client_id in self._outputs_by_client_id for client_id in self._client_ids)
         failed_tasks = len(self._client_ids) - successful_tasks
         return GenerationResult(
             success=len(errors) == 0 and failed_tasks == 0,
@@ -396,7 +397,7 @@ class WebUIQueueProbe:
         for client_id in self._client_ids:
             if client_id in self._outputs_by_client_id or client_id in self._errors_by_client_id:
                 continue
-            output_path = self._find_output_for_client(client_id, file_list, file_settings_list, audio_file_list, audio_file_settings_list)
+            output_paths = self._find_outputs_for_client(client_id, file_list, file_settings_list, audio_file_list, audio_file_settings_list)
             pending_artifact = self._session._peek_output_artifact(client_id)
             if pending_artifact is not None and client_id not in queue_client_ids:
                 if not queue_client_ids and self._gen.get("in_progress", False):
@@ -405,14 +406,20 @@ class WebUIQueueProbe:
                         self._logged_missing_output_client_ids.add(client_id)
                     continue
                 artifact = self._session._consume_output_artifact(client_id)
-                resolved_output_path = str(output_path or (artifact.path if artifact is not None else "") or "").strip()
-                if len(resolved_output_path) == 0:
+                artifact_path = str(artifact.path if artifact is not None else "").strip()
+                if artifact_path:
+                    artifact_path = str((Path(artifact_path) if Path(artifact_path).is_absolute() else self._session._root / artifact_path).resolve())
+                resolved_output_paths = list(output_paths)
+                resolved_path_keys = {os.path.normcase(str(Path(path).resolve())) for path in resolved_output_paths}
+                if artifact_path and os.path.normcase(artifact_path) not in resolved_path_keys:
+                    resolved_output_paths.append(artifact_path)
+                if not resolved_output_paths:
                     self._register_error(client_id, f"Generation produced an API artifact for client_id '{client_id}' without an output path.", stage="generation")
                     continue
-                self._outputs_by_client_id[client_id] = resolved_output_path
+                self._outputs_by_client_id[client_id] = resolved_output_paths
                 if artifact is not None:
                     self._artifacts_by_client_id[client_id] = GeneratedArtifact(
-                        path=resolved_output_path,
+                        path=artifact_path or resolved_output_paths[-1],
                         media_type=artifact.media_type,
                         client_id=artifact.client_id,
                         video_tensor_uint8=artifact.video_tensor_uint8,
@@ -421,24 +428,25 @@ class WebUIQueueProbe:
                         audio_tensor=artifact.audio_tensor,
                         audio_sampling_rate=artifact.audio_sampling_rate,
                         fps=artifact.fps,
+                        flashvsr_continue_cache=artifact.flashvsr_continue_cache,
                     )
                 self._missing_output_since.pop(client_id, None)
                 self._logged_missing_output_client_ids.discard(client_id)
-                print(f"WanGP API completed client_id={client_id} via artifact path={resolved_output_path}")
-                payload = {"client_id": client_id, "path": resolved_output_path}
-                self._publish("output", payload, "on_output")
+                print(f"WanGP API completed client_id={client_id} via artifact paths={resolved_output_paths}")
+                for output_path in resolved_output_paths:
+                    self._publish("output", {"client_id": client_id, "path": output_path}, "on_output")
                 continue
-            if output_path is not None and client_id not in queue_client_ids:
+            if output_paths and client_id not in queue_client_ids:
                 if not queue_client_ids and self._gen.get("in_progress", False):
                     if client_id not in self._logged_missing_output_client_ids:
                         print(f"WanGP API delaying gallery completion for client_id={client_id} until main queue settles")
                         self._logged_missing_output_client_ids.add(client_id)
                     continue
-                self._outputs_by_client_id[client_id] = output_path
+                self._outputs_by_client_id[client_id] = output_paths
                 artifact = self._session._consume_output_artifact(client_id)
                 if artifact is not None:
                     self._artifacts_by_client_id[client_id] = GeneratedArtifact(
-                        path=output_path,
+                        path=str(artifact.path or output_paths[-1]),
                         media_type=artifact.media_type,
                         client_id=artifact.client_id,
                         video_tensor_uint8=artifact.video_tensor_uint8,
@@ -447,12 +455,13 @@ class WebUIQueueProbe:
                         audio_tensor=artifact.audio_tensor,
                         audio_sampling_rate=artifact.audio_sampling_rate,
                         fps=artifact.fps,
+                        flashvsr_continue_cache=artifact.flashvsr_continue_cache,
                     )
                 self._missing_output_since.pop(client_id, None)
                 self._logged_missing_output_client_ids.discard(client_id)
-                print(f"WanGP API completed client_id={client_id} via gallery path={output_path}")
-                payload = {"client_id": client_id, "path": output_path}
-                self._publish("output", payload, "on_output")
+                print(f"WanGP API completed client_id={client_id} via gallery paths={output_paths}")
+                for output_path in output_paths:
+                    self._publish("output", {"client_id": client_id, "path": output_path}, "on_output")
                 continue
             if client_id in queue_client_ids:
                 self._missing_output_since.pop(client_id, None)
@@ -543,8 +552,8 @@ class WebUIQueueProbe:
             return
         if self._submitted_at <= 0 or time.time() - self._submitted_at < self._QUEUE_ADMISSION_SUSPEND_NOTICE_SECONDS or self._queue_wait_suspended:
             return
-        print("WanGP API queue suspended while waiting for Video Generator to get browser focus")
-        self._publish("status", "Waiting for WanGP Video Generator to get browser focus...", "on_status")
+        print("WanGP API queue suspended while waiting for Media Generator to get browser focus")
+        self._publish("status", "Waiting for WanGP Media Generator to get browser focus...", "on_status")
         self._queue_wait_suspended = True
 
     def _finalize_cancelled_clients(self, queue_client_ids: list[str]) -> None:
@@ -579,10 +588,8 @@ class WebUIQueueProbe:
             self._cancel_requested_at = time.time()
 
     def _queue_abort_client_id(self, client_id: str) -> None:
-        owner = getattr(self._session, "_gradio_session_proxy", None)
-        enqueue = getattr(owner, "_enqueue_abort_client_id", None)
-        if not callable(enqueue) or not enqueue(self._job, client_id):
-            raise RuntimeError("WanGP WebUI abort trigger is unavailable for the current wrapped Gradio call.")
+        self._wgp.abort_generation(self._session._state, client_id, notify=False)
+        print(f"WanGP API dispatched abort for client_id={client_id}")
 
     def _remove_inline_queue_client_id(self, client_id: str) -> bool:
         inline_queue = self._gen.get("inline_queue")
@@ -644,20 +651,21 @@ class WebUIQueueProbe:
         return str(item.get("client_id", "") or "").strip() == client_id
 
     @staticmethod
-    def _find_output_for_client(
+    def _find_outputs_for_client(
         client_id: str,
         file_list: Sequence[Any],
         file_settings_list: Sequence[Any],
         audio_file_list: Sequence[Any],
         audio_file_settings_list: Sequence[Any],
-    ) -> str | None:
+    ) -> list[str]:
+        outputs = []
         for paths, settings_list in ((file_list, file_settings_list), (audio_file_list, audio_file_settings_list)):
-            for path, settings in zip(reversed(list(paths or [])), reversed(list(settings_list or []))):
+            for path, settings in zip(paths or [], settings_list or []):
                 if not isinstance(settings, dict):
                     continue
                 if str(settings.get("client_id", "") or "").strip() == client_id:
-                    return str(Path(path).resolve())
-        return None
+                    outputs.append(str(Path(path).resolve()))
+        return outputs
 
     def _register_error(self, client_id: str, message: str, *, stage: str) -> None:
         if client_id in self._errors_by_client_id or client_id in self._outputs_by_client_id:
@@ -746,10 +754,67 @@ class GradioWanGPSession:
         self._capture_job_for_current_call(job)
         return job
 
+    def list_model_defs(self, **filters: Any) -> list[dict[str, Any]]:
+        return self._ensure_session().list_model_defs(**filters)
+
+    def get_model_defs(self, **filters: Any) -> list[dict[str, Any]]:
+        return self.list_model_defs(**filters)
+
+    def list_model_metadata(self, **filters: Any) -> list[dict[str, Any]]:
+        return self._ensure_session().list_model_metadata(**filters)
+
+    def get_model_def(self, model_type: str) -> dict[str, Any] | None:
+        return self._ensure_session().get_model_def(model_type)
+
+    def get_model_metadata(self, model_type: str) -> dict[str, Any] | None:
+        return self._ensure_session().get_model_metadata(model_type)
+
+    def get_default_settings(self, model_type: str) -> dict[str, Any]:
+        return self._ensure_session().get_default_settings(model_type)
+
+    def merge_settings_with_defaults(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return self._ensure_session().merge_settings_with_defaults(settings)
+
+    def prepare_settings_for_export(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return self._ensure_session().prepare_settings_for_export(settings)
+
+    def get_exported_default_settings(self, model_type: str) -> dict[str, Any]:
+        return self._ensure_session().get_exported_default_settings(model_type)
+
+    def get_model_settings(self, model_type: str, setting_id: str | None = None) -> dict[str, Any]:
+        return self._ensure_session().get_model_settings(model_type, setting_id)
+
+    def list_loras(self, model_type: str, name: str | None = None) -> dict[str, Any]:
+        return self._ensure_session().list_loras(model_type, name=name)
+
+    def get_model_schema(self, model_type: str) -> dict[str, Any] | None:
+        return self._ensure_session().get_model_schema(model_type)
+
     def submit_task(self, settings: dict[str, Any], callbacks: object | None = None) -> SessionJob:
         session = self._ensure_session()
         self._bind_gradio_context(session)
         job = session.submit_task(settings, callbacks=self._wrap_callbacks_for_current_call(callbacks))
+        self._capture_job_for_current_call(job)
+        return job
+
+    def submit_media_postprocessing(self, media_source, *, callbacks: object | None = None, **kwargs: Any) -> SessionJob:
+        session = self._ensure_session()
+        self._bind_gradio_context(session)
+        job = session.submit_media_postprocessing(media_source, callbacks=self._wrap_callbacks_for_current_call(callbacks), **kwargs)
+        self._capture_job_for_current_call(job)
+        return job
+
+    def submit_audio_remux(self, video_source, *, callbacks: object | None = None, **kwargs: Any) -> SessionJob:
+        session = self._ensure_session()
+        self._bind_gradio_context(session)
+        job = session.submit_audio_remux(video_source, callbacks=self._wrap_callbacks_for_current_call(callbacks), **kwargs)
+        self._capture_job_for_current_call(job)
+        return job
+
+    def submit_audio_postprocessing(self, audio_source, *, callbacks: object | None = None, **kwargs: Any) -> SessionJob:
+        session = self._ensure_session()
+        self._bind_gradio_context(session)
+        job = session.submit_audio_postprocessing(audio_source, callbacks=self._wrap_callbacks_for_current_call(callbacks), **kwargs)
         self._capture_job_for_current_call(job)
         return job
 
@@ -769,6 +834,15 @@ class GradioWanGPSession:
         session = self._ensure_session()
         self._bind_gradio_context(session)
         return session.run_task(settings, callbacks=self._wrap_callbacks_for_current_call(callbacks))
+
+    def run_media_postprocessing(self, media_source, **kwargs: Any) -> GenerationResult:
+        return self.submit_media_postprocessing(media_source, **kwargs).result()
+
+    def run_audio_remux(self, video_source, **kwargs: Any) -> GenerationResult:
+        return self.submit_audio_remux(video_source, **kwargs).result()
+
+    def run_audio_postprocessing(self, audio_source, **kwargs: Any) -> GenerationResult:
+        return self.submit_audio_postprocessing(audio_source, **kwargs).result()
 
     def run_manifest(self, settings_list: list[dict[str, Any]], callbacks: object | None = None) -> GenerationResult:
         session = self._ensure_session()
@@ -820,8 +894,6 @@ class GradioWanGPSession:
         return getattr(self._ensure_session(), name)
 
     def _wrap_button_click(self, original_click, button, *args, **kwargs):
-        import gradio as gr
-
         fn = kwargs.get("fn")
         if fn is None and args:
             fn = args[0]
@@ -869,47 +941,29 @@ class GradioWanGPSession:
             state.set_callback_context(bound_context)
             worker = threading.Thread(target=self._run_wrapped_click_worker, args=(call_id, fn, args, kwargs, bound_state, bound_context), daemon=True, name="wangp-plugin-click")
             worker.start()
-            deadline = time.time() + 0.5
-            while time.time() < deadline:
+            while True:
                 yielded_result = state.pop_yielded_result()
                 if yielded_result is not _NO_YIELDED_RESULT:
                     return [*self._normalize_callback_result(yielded_result, output_count), gr.skip(), gr.skip(), call_id]
                 load_queue_token = state.pop_primary_load_queue_token()
                 if load_queue_token:
                     return [*self._blank_outputs(output_count), load_queue_token, gr.skip(), call_id]
-                if state.job is not None:
+                if state.job is not None and not state.done.is_set():
                     state.job._webui_submission_ready.wait(timeout=0.05)
-                if state.done.wait(timeout=0.05):
-                    if state.error is not None:
-                        self._forget_wrapped_call(call_id)
-                        raise self._as_gradio_error(state.error)
-                    yielded_result = state.pop_yielded_result()
-                    if yielded_result is not _NO_YIELDED_RESULT:
-                        return [*self._normalize_callback_result(yielded_result, output_count), gr.skip(), gr.skip(), call_id]
-                    if not state.has_result:
-                        self._forget_wrapped_call(call_id)
-                        return [*self._blank_outputs(output_count), gr.skip(), gr.skip(), ""]
+                    continue
+                if not state.done.wait(timeout=0.05):
+                    continue
+                if state.error is not None:
                     self._forget_wrapped_call(call_id)
-                    return [*self._normalize_callback_result(state.result, output_count), gr.skip(), gr.skip(), ""]
-            if state.job is not None:
-                if not state.job._webui_submission_ready.wait(timeout=5):
+                    raise self._as_gradio_error(state.error)
+                yielded_result = state.pop_yielded_result()
+                if yielded_result is not _NO_YIELDED_RESULT:
+                    return [*self._normalize_callback_result(yielded_result, output_count), gr.skip(), gr.skip(), call_id]
+                if not state.has_result:
                     self._forget_wrapped_call(call_id)
-                    raise gr.Error("WanGP WebUI submission did not become ready in time.")
-                load_queue_token = state.pop_primary_load_queue_token()
-                if load_queue_token:
-                    return [*self._blank_outputs(output_count), load_queue_token, gr.skip(), call_id]
-            state.done.wait()
-            if state.error is not None:
+                    return [*self._blank_outputs(output_count), gr.skip(), gr.skip(), ""]
                 self._forget_wrapped_call(call_id)
-                raise self._as_gradio_error(state.error)
-            yielded_result = state.pop_yielded_result()
-            if yielded_result is not _NO_YIELDED_RESULT:
-                return [*self._normalize_callback_result(yielded_result, output_count), gr.skip(), gr.skip(), call_id]
-            if not state.has_result:
-                self._forget_wrapped_call(call_id)
-                return [*self._blank_outputs(output_count), gr.skip(), gr.skip(), ""]
-            self._forget_wrapped_call(call_id)
-            return [*self._normalize_callback_result(state.result, output_count), gr.skip(), gr.skip(), ""]
+                return [*self._normalize_callback_result(state.result, output_count), gr.skip(), gr.skip(), ""]
 
         wrapped.__signature__ = inspect.signature(fn)
         return wrapped
@@ -1050,28 +1104,49 @@ class GradioWanGPSession:
             self._wrapped_calls.pop(call_id, None)
 
     def _callback_uses_api_session(self, fn) -> bool:
-        candidates: list[Any] = []
+        candidates: list[Any] = [fn]
+        owner_candidates: list[Any] = [fn]
+        api_attr_names = {"_api", "_wangp_session"}
+        code = getattr(fn, "__code__", None)
+        referenced_names = set(getattr(code, "co_names", ())) | set(getattr(code, "co_freevars", ()))
         try:
             closure_vars = inspect.getclosurevars(fn)
         except Exception:
             closure_vars = None
         if closure_vars is not None:
             candidates.extend(closure_vars.nonlocals.values())
+            owner_candidates.extend(closure_vars.nonlocals.values())
             candidates.extend(closure_vars.globals.values())
         for values in (getattr(fn, "__defaults__", None) or (), (getattr(fn, "__kwdefaults__", None) or {}).values()):
             candidates.extend(values)
+            owner_candidates.extend(values)
         for cell in getattr(fn, "__closure__", ()) or ():
             try:
-                candidates.append(cell.cell_contents)
+                value = cell.cell_contents
             except ValueError:
                 continue
+            candidates.append(value)
+            owner_candidates.append(value)
         for candidate in candidates:
-            if candidate is self or candidate is self._session:
+            owner = candidate.__self__ if inspect.ismethod(candidate) else candidate
+            if owner is self or owner is self._session:
                 return True
-            if isinstance(candidate, (GradioWanGPSession, WanGPSession)):
+            if isinstance(owner, (GradioWanGPSession, WanGPSession)):
                 return True
-            if inspect.ismethod(candidate) and candidate.__self__ in (self, self._session):
-                return True
+        if not referenced_names.intersection(api_attr_names):
+            return False
+        if closure_vars is not None:
+            owner_candidates.extend(closure_vars.globals.values())
+        for candidate in owner_candidates:
+            owner = candidate.__self__ if inspect.ismethod(candidate) else candidate
+            try:
+                attrs = vars(owner)
+            except TypeError:
+                attrs = {}
+            for attr_name in ("_api", "_wangp_session"):
+                session = attrs.get(attr_name)
+                if session is self or session is self._session or isinstance(session, (GradioWanGPSession, WanGPSession)):
+                    return True
         return False
 
     def _wrap_callbacks_for_current_call(self, callbacks: object | None) -> object | None:

@@ -2,43 +2,41 @@ import re
 
 PROMPT_UNIT_PREFIX = "#!PROMPT!:"
 ENHANCED_PROMPT_PREFIX = "!enhanced!\n"
+SPEAKER_OPTIONS_LINE_RE = re.compile(r"^\s*Speaker\s*\d+\s*\{[^{}\n]*\}\s*:", re.IGNORECASE)
+DEFAULT_MULTI_PROMPTS_MODE = "PG"
 
-def normalize_multi_prompts_mode(value):
+def normalize_multi_prompts_mode(value, default="G"):
     if value is None:
-        return "G"
+        return default
     if isinstance(value, str):
         value = value.strip().upper()
     elif isinstance(value, (int, float)):
         value = int(value)
     else:
-        return "G"
+        return default
     value = {0: "G", 1: "W", 2: "FG", "": "FG", "0": "G", "1": "W", "2": "FG", "P": "PG"}.get(value, value)
-    return value if value in {"FG", "G", "PG", "W", "PW"} else "G"
+    return value if value in {"FG", "G", "PG", "W", "PW"} else default
+
+def get_multi_prompts_gen_choices(medium="Video", include_sliding_window=True):
+    choices = [
+        (f"Each New Line Will Add a new {medium} Request to the Generation Queue", "G"),
+        (f"Each new Paragraph separated by an Empty Line Will Add a new {medium} Request to the Generation Queue", "PG"),
+    ]
+    if include_sliding_window:
+        choices += [
+            ("Each Line Will be used for a new Sliding Window of the same Video Generation", "W"),
+            ("Each Paragraph Separated by an Empty line will be used for a new Sliding Window of the same Video Generation", "PW"),
+        ]
+    choices += [("All the Lines are Part of the Same Prompt", "FG")]
+    return choices
 
 def split_prompt_units(prompt_text, multi_prompts_gen_type, single_prompt=False, originals=False):
     multi_prompts_gen_type = multi_prompts_gen_type or ""
     prompt_text = prompt_text.replace("\r\n", "\n").replace("\r", "\n")
     if prompt_text.startswith(ENHANCED_PROMPT_PREFIX):
         prompt_text = prompt_text[len(ENHANCED_PROMPT_PREFIX):]
-    separator = "\n\n" if "P" in multi_prompts_gen_type else "\n"
-    prefixed_prompts, prefixed_originals, current_prompt_lines = [], [], None
-    for raw_line in prompt_text.split("\n"):
-        if raw_line.startswith(PROMPT_UNIT_PREFIX):
-            if current_prompt_lines is not None:
-                prefixed_prompts.append("\n".join(current_prompt_lines).strip())
-            current_prompt_lines = []
-            prefixed_originals.append(raw_line[len(PROMPT_UNIT_PREFIX):].strip())
-        elif current_prompt_lines is not None:
-            current_prompt_lines.append(raw_line)
-    if current_prompt_lines is not None:
-        prefixed_prompts.append("\n".join(current_prompt_lines).strip())
-    if prefixed_prompts:
-        if originals:
-            return [prompt for prompt in prefixed_originals if prompt]
-        prefixed_prompts = [prompt for prompt in prefixed_prompts if prompt]
-        if not single_prompt:
-            return prefixed_prompts
-        prompt_text = prefixed_prompts[0] if multi_prompts_gen_type == "FG" else separator.join(prefixed_prompts)
+    if originals:
+        return split_prompt_original_units(prompt_text, multi_prompts_gen_type, single_prompt=single_prompt)
     prompt_lines = [line.rstrip() for line in prompt_text.split("\n") if not line.strip().startswith("#")]
     prompt_text = "\n".join(prompt_lines).strip()
     if not prompt_text:
@@ -59,17 +57,99 @@ def split_prompt_units(prompt_text, multi_prompts_gen_type, single_prompt=False,
         return prompts
     return [one_line.strip() for one_line in prompt_text.split("\n") if one_line.strip()]
 
+def validate_sliding_window_prompt_boundaries(prompts, multi_prompts_gen_type, image_end=None):
+    if normalize_multi_prompts_mode(multi_prompts_gen_type, "FG") != "PW":
+        return ""
+    prompts = list(prompts or [])
+    command_windows = [prompt for prompt in prompts if str(prompt or "").lstrip().startswith("[/")]
+    end_frame_count = len(image_end) if isinstance(image_end, (list, tuple)) else int(bool(image_end))
+    structured_fields = ("overall_soundscape:", "non_diegetic_music:")
+    structured_extras = all(prompt in command_windows or str(prompt or "").lstrip().startswith(structured_fields) for prompt in prompts)
+    intended_count_confirmed = end_frame_count == len(command_windows) or structured_extras
+    if len(command_windows) < 2 or len(prompts) == len(command_windows) or not intended_count_confirmed:
+        return ""
+    evidence = f" and {end_frame_count} End Images" if end_frame_count == len(command_windows) else ""
+    return (
+        f"The prompt is parsed as {len(prompts)} sliding windows, but {len(command_windows)} explicit [/...] window markers{evidence} indicate {len(command_windows)} intended windows. "
+        "With 'Each Paragraph Separated by an Empty line will be used for a new Sliding Window of the same Video Generation', every blank line starts a new window. "
+        "Keep every line and labeled section belonging to one window adjacent with single newlines, and use exactly one blank line between complete windows."
+    )
+
 def serialize_prompt_units(prompt_text, prompts, multi_prompts_gen_type):
     prompt_text = prompt_text.replace("\r\n", "\n").replace("\r", "\n")
     if prompt_text.startswith(ENHANCED_PROMPT_PREFIX):
         prompt_text = prompt_text[len(ENHANCED_PROMPT_PREFIX):]
     prompt_text = prompt_text.strip()
-    if prompt_text.startswith(PROMPT_UNIT_PREFIX):
-        return prompt_text
     prompts = [prompt.strip() for prompt in prompts if prompt.strip()]
     if not prompts:
         return ""
     return prompts[0] if multi_prompts_gen_type == "FG" else ("\n\n" if "P" in multi_prompts_gen_type else "\n").join(prompts)
+
+def split_prompt_original_units(prompt_text, multi_prompts_gen_type, single_prompt=False):
+    multi_prompts_gen_type = multi_prompts_gen_type or ""
+    prompt_text = prompt_text.replace("\r\n", "\n").replace("\r", "\n")
+    if prompt_text.startswith(ENHANCED_PROMPT_PREFIX):
+        prompt_text = prompt_text[len(ENHANCED_PROMPT_PREFIX):]
+
+    def split_marker(line):
+        return line[len(PROMPT_UNIT_PREFIX):].strip() if line.startswith(PROMPT_UNIT_PREFIX) else None
+
+    if single_prompt or multi_prompts_gen_type == "FG":
+        originals, visible_lines = [], []
+        for raw_line in prompt_text.split("\n"):
+            marker = split_marker(raw_line)
+            if marker is not None:
+                if marker:
+                    originals.append(marker)
+                continue
+            if not raw_line.strip().startswith("#"):
+                visible_lines.append(raw_line.rstrip())
+        visible_prompt = "\n".join(visible_lines).strip()
+        prompt = "\n".join(originals) if originals else visible_prompt
+        return [prompt] if prompt else []
+
+    if "P" in multi_prompts_gen_type:
+        prompts, current_lines, current_original = [], [], None
+
+        def flush_paragraph():
+            nonlocal current_lines, current_original
+            visible_prompt = "\n".join(current_lines).strip()
+            prompt = current_original or visible_prompt
+            if prompt:
+                prompts.append(prompt)
+            current_lines, current_original = [], None
+
+        for raw_line in prompt_text.split("\n"):
+            marker = split_marker(raw_line)
+            if marker is not None:
+                if current_lines or current_original:
+                    flush_paragraph()
+                current_original = marker or current_original
+                continue
+            if not raw_line.strip():
+                flush_paragraph()
+                continue
+            if raw_line.strip().startswith("#"):
+                continue
+            current_lines.append(raw_line.rstrip())
+        flush_paragraph()
+        return prompts
+
+    prompts, pending_original = [], None
+    for raw_line in prompt_text.split("\n"):
+        marker = split_marker(raw_line)
+        if marker is not None:
+            if pending_original:
+                prompts.append(pending_original)
+            pending_original = marker or pending_original
+            continue
+        if not raw_line.strip() or raw_line.strip().startswith("#"):
+            continue
+        prompts.append(pending_original or raw_line.rstrip().strip())
+        pending_original = None
+    if pending_original:
+        prompts.append(pending_original)
+    return prompts
 
 def serialize_prompt_blocks_with_prefix(prompts, original_prompts=None):
     blocks = []
@@ -78,8 +158,21 @@ def serialize_prompt_blocks_with_prefix(prompts, original_prompts=None):
         original_prompts = []
     for idx, prompt in enumerate(prompts, start=1):
         original_prompt = original_prompts[idx - 1] if idx - 1 < len(original_prompts) else f"Prompt {idx}"
-        blocks.append(f"{PROMPT_UNIT_PREFIX} {original_prompt.strip()}\n{prompt}")
+        original_prompt = re.sub(r"[\r\n]+", " ", str(original_prompt or "")).strip()
+        blocks.append(f"{PROMPT_UNIT_PREFIX} {original_prompt}\n{prompt}")
     return "\n\n".join(blocks)
+
+def parse_prompt_history(prompt_text, enhanced_prompt_text, multi_prompts_gen_type):
+    prompt_text = str(prompt_text or "")
+    enhanced_prompt_text = str(enhanced_prompt_text or "")
+    if enhanced_prompt_text:
+        return split_prompt_units(prompt_text, multi_prompts_gen_type, originals=True), split_prompt_units(enhanced_prompt_text, multi_prompts_gen_type)
+    if prompt_text.startswith(PROMPT_UNIT_PREFIX):
+        return split_prompt_units(prompt_text, multi_prompts_gen_type, originals=True), split_prompt_units(prompt_text, multi_prompts_gen_type)
+    return None
+
+def is_speaker_options_line(line):
+    return SPEAKER_OPTIONS_LINE_RE.search(line or "") is not None
 
 def process_template(input_text, keep_comments=False, keep_empty_lines=False):
     """
@@ -193,7 +286,7 @@ def process_template(input_text, keep_comments=False, keep_empty_lines=False):
         
         # Handle template lines
         else:
-            if not line.startswith('#'):
+            if not line.startswith('#') and not is_speaker_options_line(line):
                 # Check for unknown variables in template line
                 var_references = re.findall(r'\{([^}]+)\}', line)
                 for var_ref in var_references:

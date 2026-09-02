@@ -2,7 +2,7 @@
 
 This guide covers manual installation for different GPU generations and operating systems. Alternatively you may use the 1 click install / update scripts (please check the repo readme for instructions).
 
-It is recommended to use Python 3.10.9, PyTorch 2.7.1 with Cuda 12.8 for GTX 10XX and Python 3.11.14, PyTorch 2.10 with Cuda 13.0/13.1 for RTX 30XX - RTX 50XX as both these configs are well-tested and stable.
+It is recommended to use Python 3.10.9, PyTorch 2.7.1 with Cuda 12.8 for GTX 10XX and Python 3.11.14, PyTorch 2.10 with Cuda 13.0/13.1 for RTX 20XX - RTX 50XX as both these configs are well-tested and stable.
 
 It is not recommended to use either PytTorch 2.8.0 as some System RAM memory leaks have been observed when switching models or 2.9.0 which has some Convolution 3D perf issues (VAE VRAM requirements explode).
 
@@ -22,7 +22,7 @@ git clone https://github.com/deepbeepmeep/Wan2GP.git
 cd Wan2GP
 conda create -n wan2gp python=3.11.14
 conda activate wan2gp
-pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
 ```
 
@@ -36,7 +36,7 @@ git clone https://github.com/deepbeepmeep/Wan2GP.git
 cd Wan2GP
 conda create -n wan2gp python=3.10.9
 conda activate wan2gp
-pip install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/test/cu128
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/test/cu128
 pip install -r requirements.txt
 ```
 
@@ -58,30 +58,53 @@ pip install triton-windows
 Triton library should be automatically installed when installing pytorch.
 
 ## Sage Attention
-Sage Attention accelerates a Video / Image Generation up to x2 with very little quality loss. Sage doesnt support GTX 10xx.
+Sage Attention accelerates Video / Image Generation up to x2 with very little quality loss. Sage does not support GTX 10XX in WanGP.
 
-#### Windows Install Sage Attention for RTX 30XX Only
-Only Sage attention 1 is supported for these GPUs 
+Use the version matching your GPU generation:
+
+- **RTX 20XX (Turing):** SageAttention 1.0.6. SageAttention 2 is not supported.
+- **RTX 30XX or newer (Ampere, Ada, and Blackwell):** SageAttention 2.2.0.
+
+#### Windows: Install SageAttention 1 for RTX 20XX
 ```
 pip install sageattention==1.0.6
 ```
-#### Windows Install Sage2 Attention for RTX 40XX-50xx 
+
+#### Windows: Install SageAttention 2 for RTX 30XX-50XX
 ```
 pip install https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post4/sageattention-2.2.0+cu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl
 ```
 
-#### Linux Install Sage Attention for RTX 30XX Only
-Only Sage attention 1 is supported for these GPUs 
+#### Linux: Install SageAttention 1 for RTX 20XX
 ```
 pip install sageattention==1.0.6
 ```
 
-#### Linux Install Sage Attention for RTX 40XX, 50XX Only. Make sure it's Sage 2.2.0
+#### Linux: Install SageAttention 2 for RTX 30XX-50XX
 ```
 python -m pip install "setuptools<=75.8.2" --force-reinstall
 git clone https://github.com/thu-ml/SageAttention
 cd SageAttention 
-pip install -e .
+pip install --no-build-isolation -e .
+```
+
+## Sparge Attention
+Sparge Attention (`spas_sage_attn`) provides the optimized sparse attention kernels used by FlashVSR. Install it after Pytorch and Triton.
+
+#### Windows Install Sparge Attention for Pytorch 2.10 / Python 3.11 / Cuda 13
+```
+pip install https://github.com/woct0rdho/SpargeAttn/releases/download/v0.1.0-windows.post4/spas_sage_attn-0.1.0%2Bcu130torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl
+```
+
+#### Windows Install Sparge Attention for Pytorch 2.7.1 / Python 3.10 / Cuda 12.8
+```
+pip install https://github.com/woct0rdho/SpargeAttn/releases/download/v0.1.0-windows.post3/spas_sage_attn-0.1.0%2Bcu128torch2.7.1.post3-cp39-abi3-win_amd64.whl
+```
+
+#### Linux Install Sparge Attention
+```
+python -m pip install ninja wheel packaging
+python -m pip install --no-build-isolation git+https://github.com/woct0rdho/SpargeAttn.git
 ```
 
 
@@ -108,31 +131,67 @@ pip install flash-attn==2.7.2.post1
 
 ## GGUF llama.cpp CUDA Kernels
 
-These kernels are used to accelerate GGUF models. 
+These kernels are used to accelerate GGUF models. Wheel 1.0.13 provides optimized FP16/BF16 modes, CUDA-graph-safe Stream-K, and quantized KV-cache attention on Windows and Linux.
 
 ### GGUF Kernels Wheels for Python 3.11 / Pytorch 2.10 / Cuda 13
 
 - Windows
    ```
-  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch210cu13py311-cp311-cp311-win_amd64.whl
+  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.13+torch210cu130py311-cp311-cp311-win_amd64.whl
    ```
 
 - Linux
    ```
-  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch210cu13py311-cp311-cp311-linux_x86_64.whl
+  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.13+torch210cu130py311-cp311-cp311-linux_x86_64.whl
    ```
 
 ### GGUF Kernels Wheels for Python 3.10 / Pytorch 2.7.1 / Cuda 12.8
 
 - Windows
    ```
-  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch271cu128py310-cp310-cp310-win_amd64.whl
+  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.13+torch271cu128py310-cp310-cp310-win_amd64.whl
    ```
 
 - Linux
    ```
-  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch271cu128py310-cp310-cp310-linux_x86_64.whl
+  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.13+torch271cu128py310-cp310-cp310-linux_x86_64.whl
    ```
+
+### FP16/BF16 matmul modes
+
+The default automatic policy keeps GGUF weights packed and uses native BF16 MMQ when BF16 is requested. To select a policy explicitly, set `WGP_GGUF_LLAMACPP_CUDA_MATMUL_MODE` before starting WanGP:
+
+- `fast`: use MMQ for small workloads and materialize larger matrices directly as FP16 or BF16 for cuBLAS.
+- `low_vram`: always multiply from packed GGUF weights with MMQ, without materializing a full dense weight matrix.
+
+For example, in Windows Command Prompt:
+
+```
+set WGP_GGUF_LLAMACPP_CUDA_MATMUL_MODE=fast
+python wgp.py
+```
+
+Or in PowerShell:
+
+```
+$env:WGP_GGUF_LLAMACPP_CUDA_MATMUL_MODE = "low_vram"
+python wgp.py
+```
+
+Or on Linux:
+
+```
+export WGP_GGUF_LLAMACPP_CUDA_MATMUL_MODE=low_vram
+python wgp.py
+```
+
+The setting is read when the kernel package loads. If it is changed inside an already-running Python process, call `llamacpp_gguf_cuda.refresh_env()` before the next generation. Set `WGP_GGUF_LLAMACPP_CUDA_BF16_FP16=1` only to restore the legacy behavior that computes automatic BF16 requests through FP16 cuBLAS. To disable the GGUF CUDA package entirely, set `WGP_GGUF_LLAMACPP_CUDA=0` before starting WanGP.
+
+### Stream-K and CUDA graphs (wheel 1.0.13+)
+
+Stream-K is enabled by default and reuses a persistent 16 MiB workspace, so it does not allocate memory while a CUDA graph is being recorded. Set `WGP_GGUF_LLAMACPP_CUDA_STREAM_K=0` to disable Stream-K without disabling the rest of the GGUF kernels. Set `WGP_GGUF_LLAMACPP_CUDA_STREAM_K_BUFFER_MB` to change the workspace size; `0` also disables Stream-K.
+
+These variables are cached when the package loads. After changing either one in a running process, call `llamacpp_gguf_cuda.refresh_env()` before the next generation. Existing CUDA graphs must be captured again to use the new setting.
 
 ## INT4 / FP4 quantized support
 
@@ -177,3 +236,10 @@ These kernels will offer optimized INT4 / FP4 dequantization.
   pip install https://github.com/deepbeepmeep/kernels/releases/download/v1.2.0_Nunchaku/nunchaku-1.2.0+torch2.7-cp310-cp310-linux_x86_64.whl
    ```
 
+
+### Bitsandbytes NF4 Kernels for Python 3.11 / Pytorch 2.10 / Cuda 13
+
+These kernels accelerate bitsandbytes 4-bit / NF4 checkpoints. Install them after Pytorch; pip will pick the matching Windows or Linux wheel automatically.
+```
+pip install bitsandbytes==0.49.2
+```

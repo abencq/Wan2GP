@@ -4,6 +4,8 @@ from importlib import import_module
 _EXPORTS = {
     "load_florence2": ("shared.prompt_enhancer.loader", "load_florence2"),
     "ensure_prompt_enhancer_assets": ("shared.prompt_enhancer.loader", "ensure_prompt_enhancer_assets"),
+    "download_prompt_enhancer_assets": ("shared.prompt_enhancer.loader", "download_prompt_enhancer_assets"),
+    "query_prompt_enhancer_download_defs": ("shared.prompt_enhancer.assets", "query_prompt_enhancer_download_defs"),
     "load_prompt_enhancer_runtime": ("shared.prompt_enhancer.loader", "load_prompt_enhancer_runtime"),
     "unload_prompt_enhancer_models": ("shared.prompt_enhancer.loader", "unload_prompt_enhancer_models"),
     "load_qwen35_prompt_enhancer": ("shared.prompt_enhancer.qwen35_text", "load_qwen35_prompt_enhancer"),
@@ -12,6 +14,7 @@ _EXPORTS = {
     "QWEN35_VARIANT_4B": ("shared.prompt_enhancer.qwen35_vl", "QWEN35_VARIANT_4B"),
     "QWEN35_ABLITERATED_TEXT_REQUIRED_FILES": ("shared.prompt_enhancer.qwen35_vl", "QWEN35_ABLITERATED_TEXT_REQUIRED_FILES"),
     "enhancer_quantization_GGUF": ("shared.prompt_enhancer.qwen35_vl", "enhancer_quantization_GGUF"),
+    "enhancer_quantization_GGUF_Q2": ("shared.prompt_enhancer.qwen35_vl", "enhancer_quantization_GGUF_Q2"),
     "enhancer_quantization_QUANTO_INT8": ("shared.prompt_enhancer.qwen35_vl", "enhancer_quantization_QUANTO_INT8"),
     "enhancer_quantization_SAFETENSORS": ("shared.prompt_enhancer.qwen35_vl", "enhancer_quantization_SAFETENSORS"),
     "QWEN35_TEXT_GGUF_FILENAME": ("shared.prompt_enhancer.qwen35_vl", "QWEN35_TEXT_GGUF_FILENAME"),

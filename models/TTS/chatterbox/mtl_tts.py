@@ -149,7 +149,7 @@ class ChatterboxMultilingualTTS:
         self.s3gen = s3gen
         self.ve = ve
         self.tokenizer = tokenizer
-        self.device = "cuda"
+        self.device = "mps" if str(device) == "mps" else "cuda"
         self.conds = conds
         self.watermarker = None # perth.PerthImplicitWatermarker()
 
@@ -163,15 +163,15 @@ class ChatterboxMultilingualTTS:
         ckpt_dir = Path(ckpt_dir)
         from mmgp import offload
         ve = VoiceEncoder()
-        offload.load_model_data(ve, fl.locate_file(os.path.join(ckpt_folder, "ve.safetensors")), writable_tensors=False)
+        offload.load_model_data(ve, fl.locate_file(os.path.join(ckpt_folder, "ve.safetensors")), writable_tensors=False, default_dtype=None)
         ve.eval()
         # from accelerate import init_empty_weights
         # with init_empty_weights():
         t3 = T3(T3Config.multilingual())
-        offload.load_model_data(t3, fl.locate_file(os.path.join(ckpt_folder, "t3_mtl23ls_v2.safetensors")), writable_tensors=False)
+        offload.load_model_data(t3, fl.locate_file(os.path.join(ckpt_folder, "t3_mtl23ls_v2.safetensors")), writable_tensors=False, default_dtype=None)
         t3.eval()
         s3gen = S3Gen()
-        offload.load_model_data(s3gen, fl.locate_file(os.path.join(ckpt_folder, "s3gen.pt")), writable_tensors=False)
+        offload.load_model_data(s3gen, fl.locate_file(os.path.join(ckpt_folder, "s3gen.pt")), writable_tensors=False, default_dtype=None)
         s3gen.eval()
 
         tokenizer = MTLTokenizer(
@@ -256,8 +256,8 @@ class ChatterboxMultilingualTTS:
                 speaker_emb=_cond.speaker_emb,
                 cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
                 emotion_adv=exaggeration * torch.ones(1, 1, 1),
-            ).to(device="cuda") # self.device
-        self.conds.t3.to(device="cuda")
+            ).to(device=self.device)
+        self.conds.t3.to(device=self.device)
         # Norm and tokenize text
         text = punc_norm(text)
         text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)

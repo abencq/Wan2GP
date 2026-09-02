@@ -48,6 +48,8 @@ from shared.utils.text_encoder_cache import TextEncoderCache
 from shared.utils.self_refiner import PnPHandler, create_self_refiner_handler
 from mmgp import safetensors2
 from shared.utils import files_locator as fl 
+from .scail2 import prepare_scail2_conditioning, test_scail2_replace
+from .shotplan import compile_shotplan_prompt
 
 WAN_USE_FP32_ROPE_FREQS = True
 
@@ -173,6 +175,7 @@ class WanAny2V:
         # sd = safetensors2.torch_load_file(xmodel_filename)
         # model_filename = "c:/temp/wan2.2i2v/low/diffusion_pytorch_model-00001-of-00006.safetensors"
         base_config_file = model_def.get("config_file", f"models/wan/configs/{base_model_type}.json")
+        base_config_file2 = model_def.get("config_file2", base_config_file)
         forcedConfigPath = base_config_file if len(model_filename) > 1 else None
         # forcedConfigPath = base_config_file = f"configs/flf2v_720p.json"
         # model_filename[1] = xmodel_filename
@@ -183,16 +186,20 @@ class WanAny2V:
         module_source2 =  model_def.get("module_source2", None)
         def preprocess_sd(sd):
             return WanModel.preprocess_sd_with_dtype(dtype, sd)
-        kwargs= { "modelClass": WanModel,"do_quantize": quantizeTransformer and not save_quantized, "defaultConfigPath": base_config_file , "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "forcedConfigPath": forcedConfigPath, }
-        kwargs_light= { "modelClass": WanModel,"writable_tensors": False, "preprocess_sd": preprocess_sd , "forcedConfigPath" : base_config_file}
+        def pre_load_callback(model):
+            model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
+        kwargs= { "modelClass": WanModel,"do_quantize": quantizeTransformer and not save_quantized, "defaultConfigPath": base_config_file , "ignore_unused_weights": ignore_unused_weights, "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "pre_load_callback": pre_load_callback, "forcedConfigPath": forcedConfigPath, }
+        kwargs2 = {**kwargs, "defaultConfigPath": base_config_file2, "forcedConfigPath": base_config_file2}
+        kwargs_light= { "modelClass": WanModel,"writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "pre_load_callback": pre_load_callback, "forcedConfigPath" : base_config_file}
+        kwargs_light2 = {**kwargs_light, "forcedConfigPath": base_config_file2}
         if module_source is not None:
             self.model = offload.fast_load_transformers_model(model_filename[:1] + [fl.locate_file(module_source)], **kwargs)
         if module_source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [fl.locate_file(module_source2)], **kwargs)
+            self.model2 = offload.fast_load_transformers_model(model_filename[1:2] + [fl.locate_file(module_source2)], **kwargs2)
         if source is not None:
             self.model = offload.fast_load_transformers_model(fl.locate_file(source),  **kwargs_light)
         if source2 is not None:
-            self.model2 = offload.fast_load_transformers_model(fl.locate_file(source2), **kwargs_light)
+            self.model2 = offload.fast_load_transformers_model(fl.locate_file(source2), **kwargs_light2)
 
         if self.model is not None or self.model2 is not None:
             from wgp import save_model
@@ -205,26 +212,17 @@ class WanAny2V:
                 if 0 in submodel_no_list[2:]:
                     shared_modules= {}
                     self.model = offload.fast_load_transformers_model(model_filename[:1], modules = model_filename[2:], return_shared_modules= shared_modules, **kwargs)
-                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, **kwargs)
+                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, **kwargs2)
                     shared_modules = None
                 else:
                     modules_for_1 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==1 ]
                     modules_for_2 =[ file_name for file_name, submodel_no in zip(model_filename[2:],submodel_no_list[2:] ) if submodel_no ==2 ]
                     self.model = offload.fast_load_transformers_model(model_filename[:1], modules = modules_for_1, **kwargs)
-                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = modules_for_2, **kwargs)
+                    self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = modules_for_2, **kwargs2)
 
             else:
                 self.model = offload.fast_load_transformers_model(model_filename,  **kwargs)
         
-
-        if self.model is not None:
-            self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
-            offload.change_dtype(self.model, dtype, True)
-            self.model.eval().requires_grad_(False)
-        if self.model2 is not None:
-            self.model2.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
-            offload.change_dtype(self.model2, dtype, True)
-            self.model2.eval().requires_grad_(False)
 
         if module_source is not None:
             save_model(self.model, model_type, dtype, None, is_module=True, filter=list(torch_load_file(module_source)), module_source_no=1)
@@ -239,8 +237,8 @@ class WanAny2V:
             from wgp import save_quantized_model
             if self.model is not None:
                 save_quantized_model(self.model, model_type, model_filename[0], dtype, base_config_file)
-            if self.model2 is not None:
-                save_quantized_model(self.model2, model_type, model_filename[1], dtype, base_config_file, submodel_no=2)
+            if self.model2 is not None and model_def.get("save_quantized_submodel2", True):
+                save_quantized_model(self.model2, model_type, model_filename[1], dtype, base_config_file2, submodel_no=2)
         self.sample_neg_prompt = config.sample_neg_prompt
 
         self.use_fp32_rope_freqs = bool(model_def.get("wan_rope_freqs_fp32", WAN_USE_FP32_ROPE_FREQS))
@@ -368,11 +366,10 @@ class WanAny2V:
         context = torch.cat([context, context.new_zeros(self.model.text_len -context.size(0), context.size(1)) ]).unsqueeze(0) 
         clear_caches()
         get_cache("lynx_ref_buffer").update({ 0: {}, 1: {} })
-        _loras_active_adapters = None
-        if not enable_loras:
-            if hasattr(self.model, "_loras_active_adapters"):
-                _loras_active_adapters = self.model._loras_active_adapters
-                self.model._loras_active_adapters = []
+        loras_active_adapters = loras_scaling = None
+        if not enable_loras and getattr(self.model, "_loras_scaling", None) is not None:
+            loras_active_adapters, loras_scaling = self.model._loras_active_adapters, self.model._loras_scaling
+            offload.activate_loras(self.model, loras_active_adapters, [0.0] * len(loras_active_adapters))
         ref_buffer = self.model(
             pipeline =self,
             x = [vae_feat, vae_feat_uncond] if any_guidance else [vae_feat],
@@ -381,8 +378,8 @@ class WanAny2V:
             t=torch.stack([torch.tensor(0, dtype=torch.float)]).to(self.device),
             lynx_feature_extractor = True,
         )
-        if _loras_active_adapters is not None:
-            self.model._loras_active_adapters = _loras_active_adapters
+        if loras_scaling is not None:
+            offload.activate_loras(self.model, loras_active_adapters, [loras_scaling[adapter] for adapter in loras_active_adapters])
 
         clear_caches()
         return ref_buffer[0], (ref_buffer[1] if any_guidance else None)
@@ -416,6 +413,7 @@ class WanAny2V:
 
     def generate(self,
         input_prompt,
+        alt_prompt="",
         input_frames= None,
         input_frames2= None,
         input_masks = None,
@@ -466,6 +464,8 @@ class WanAny2V:
         return_latent_slice = None,
         overlap_noise = 0,
         overlap_size = 0,
+        sub_parallel_window_size=0,
+        sub_parallel_window_overlap=0,
         conditioning_latents_size = 0,
         keep_frames_parsed = [],
         model_type = None,
@@ -495,11 +495,14 @@ class WanAny2V:
         self_refiner_f_uncertainty = 0.0,
         self_refiner_certain_percentage = 0.999,
         custom_settings=None,
+        save_masks=False,
+        vae_upsampler=None,
+        set_progress_status=None,
+        fps=16,
         **bbargs
                 ):
         
         model_def = self.model_def
-
         if sample_solver =="euler":
             sample_scheduler = EulerScheduler(
                 num_train_timesteps=self.num_timesteps,
@@ -551,12 +554,25 @@ class WanAny2V:
             return None
         # Text Encoder
         kiwi_edit = model_type in ["kiwi_edit"]
+        animate2 = model_def.get("animate2", False)
+        animate2_kv_cache = custom_settings.get("animate2_kv_cache", "Disabled") if animate2 and isinstance(custom_settings, dict) else "Disabled"
+        if animate2_kv_cache == "Enabled": animate2_kv_cache = "GPU"
+        bernini = model_def.get("bernini_class", False)
+        shotplan = model_def.get("shotplan", False)
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
         text_len = self.model.text_len
+        bernini_omega_v = context_scale[0] if bernini and context_scale is not None and len(context_scale) > 0 else 1.0
+        bernini_omega_i = alt_guide_scale
         any_guidance_at_all = guide_scale > 1 or guide2_scale > 1 and guide_phases >=2 or guide3_scale > 1 and guide_phases >=3
+        if bernini:
+            any_guidance_at_all = any_guidance_at_all or "I" in video_prompt_type and bernini_omega_i != 1 or "V" in video_prompt_type and "I" in video_prompt_type and bernini_omega_v != 1
         context_null = context = None
         if input_video is not None: height, width = input_video.shape[-2:]
+
+        if shotplan:
+            shotplan_prompt = compile_shotplan_prompt(input_prompt, frame_num, fps)
+            input_prompt = shotplan_prompt.prompt
 
         if kiwi_edit:
             from .kiwi.embedders import build_kiwi_conditions
@@ -575,6 +591,10 @@ class WanAny2V:
             if NAG_scale > 1 or any_guidance_at_all:      
                 context_null = self.text_encoder_cache.encode(encode_fn, [n_prompt], device=self.device)[0].to(self.dtype)
                 context_null = torch.cat([context_null, context_null.new_zeros(text_len -context_null.size(0), context_null.size(1)) ]).unsqueeze(0)
+            if animate2:
+                ref_prompt = alt_prompt.strip() or model_def["animate2_ref_prompt"]
+                animate2_ref_context = self.text_encoder_cache.encode(encode_fn, [ref_prompt], device=self.device)[0].to(self.dtype)
+                animate2_ref_context = torch.cat([animate2_ref_context, animate2_ref_context.new_zeros(text_len - animate2_ref_context.size(0), animate2_ref_context.size(1))]).unsqueeze(0)
 
         # NAG_prompt =  "static, low resolution, blurry"
         # context_NAG = self.text_encoder([NAG_prompt], self.device)[0]
@@ -607,6 +627,7 @@ class WanAny2V:
         steadydancer = model_type in ["steadydancer"]
         wanmove = model_type in ["wanmove"]
         scail = model_type in ["scail"] 
+        scail2 = model_def.get("scail2", False) or model_type in ["scail2_14B", "scail2_1.3B"]
         vista4d = model_type in ["vista4d"]
         svi_pro = model_def.get("svi2pro", False)
         svi_mode = 2 if svi_pro  else 0 
@@ -616,10 +637,10 @@ class WanAny2V:
         trim_frames = 0
         post_decode_pre_trim = 0
         last_latent_preview = False
-        extended_overlapped_latents = clip_image_start = clip_image_end = image_mask_latents = latent_slice = freqs = post_freqs = None
+        extended_overlapped_latents = clip_image_start = clip_image_end = animate2_clip_image_ref = image_mask_latents = latent_slice = freqs = post_freqs = None
         use_extended_overlapped_latents = True
         # SCAIL uses a fixed ref latent frame that should not be noised.
-        no_noise_latents_injection = infinitetalk or scail
+        no_noise_latents_injection = infinitetalk or scail or scail2
         timestep_injection = False
         ps_t, ps_h, ps_w = self.model.patch_size
 
@@ -627,7 +648,7 @@ class WanAny2V:
         extended_input_dim = 0
         ref_images_before = False            
         # image2video 
-        if model_def.get("i2v_class", False) and not (animate or scail):
+        if model_def.get("i2v_class", False) and not (animate or animate2 or scail or scail2):
             any_end_frame = False
             if infinitetalk:
                 new_shot = "0" in video_prompt_type
@@ -833,6 +854,29 @@ class WanAny2V:
             ref_images_count = 1
             lat_frames = int((input_frames.shape[1] - 1) // self.vae_stride[0]) + 1
 
+        # Animate 2
+        if animate2:
+            input_frames = input_frames[:, :frame_num].to(device=self.device, dtype=self.VAE_dtype)
+            if not input_ref_images:
+                input_ref_images = [image_start if image_start is not None else convert_image_to_tensor(pre_video_frame)]
+            image_ref = input_ref_images[0].to(device=self.device, dtype=self.VAE_dtype)
+            image_ref = image_ref.unsqueeze(1) if image_ref.ndim == 3 else image_ref
+            color_reference_frame = image_ref.clone()
+            clip_image_start = image_ref[:, 0]
+            animate2_clip_image_ref = input_frames[:, 0]
+            driving_latents = self.vae.encode([input_frames], VAE_tile_size)[0]
+            lat_frames, lat_h, lat_w = driving_latents.shape[1:]
+            identity_latents = self.vae.encode([image_ref], VAE_tile_size)[0]
+            output_pixels = torch.zeros_like(input_frames)
+            if prefix_frames_count > 0: output_pixels[:, :prefix_frames_count] = input_video[:, :prefix_frames_count].to(output_pixels)
+            output_latents = self.vae.encode([output_pixels], VAE_tile_size)[0]
+            y = torch.cat([torch.cat([self.get_i2v_mask(lat_h, lat_w, 1, lat_t=1, device=self.device), self.get_i2v_mask(lat_h, lat_w, prefix_frames_count, lat_t=lat_frames, device=self.device)], dim=1), torch.cat([identity_latents, output_latents], dim=1)])
+            grid_h, grid_w = lat_h // ps_h, lat_w // ps_w
+            animate2_ref_freqs = get_nd_rotary_pos_embed((1, 0, grid_w), (1 + lat_frames, grid_h, 2 * grid_w), (lat_frames, grid_h, grid_w), L_test=lat_frames, enable_riflex=False)
+            kwargs.update({"y": y, "animate2_ref_x": driving_latents.unsqueeze(0), "animate2_ref_y": torch.cat([self.get_i2v_mask(lat_h, lat_w, frame_num, lat_t=lat_frames, device=self.device), driving_latents]).unsqueeze(0), "animate2_ref_context": animate2_ref_context, "animate2_ref_freqs": animate2_ref_freqs, "animate2_log_scale": model_def["animate2_log_scale"], "animate2_kv_cache": animate2_kv_cache})
+            ref_images_before, ref_images_count = True, 1
+            identity_latents = output_latents = output_pixels = None
+
         # SCAIL - 3D pose-guided character animation
         if scail:
             pose_pixels = input_frames
@@ -884,6 +928,19 @@ class WanAny2V:
             ref_images_count = 1
             lat_frames = lat_t
 
+        # SCAIL-2 - reference-driven character animation with mask-token conditioning
+        if scail2:
+            scail2_conditioning = prepare_scail2_conditioning(self, input_frames=input_frames, input_masks=input_masks, input_ref_images=input_ref_images, input_ref_masks=input_ref_masks, input_video=input_video, pre_video_frame=pre_video_frame, prefix_frames_count=prefix_frames_count, overlapped_latents=overlapped_latents, height=height, width=width, VAE_tile_size=VAE_tile_size, enable_RIFLEx=enable_RIFLEx, video_prompt_type=video_prompt_type, custom_settings=custom_settings, model_def=model_def, ps_t=ps_t, ps_h=ps_h, ps_w=ps_w, save_masks=save_masks)
+            kwargs.update(scail2_conditioning["kwargs"])
+            freqs = scail2_conditioning["freqs"]
+            clip_image_start = scail2_conditioning["clip_image_start"]
+            extended_overlapped_latents = scail2_conditioning["extended_overlapped_latents"]
+            if scail2_conditioning["color_reference_frame"] is not None:
+                color_reference_frame = scail2_conditioning["color_reference_frame"]
+            ref_images_before = False
+            ref_images_count = 0
+            lat_frames = scail2_conditioning["lat_frames"]
+
         # Clip image
         if hasattr(self, "clip") and clip_image_start is not None:                                   
             clip_image_size = self.clip.model.image_size
@@ -895,6 +952,10 @@ class WanAny2V:
                 clip_context = self.clip.visual([clip_image_start[:, None, :, :]])
             clip_image_start = clip_image_end = None
             kwargs.update({'clip_fea': clip_context})
+            if animate2:
+                animate2_clip_image_ref = resize_lanczos(animate2_clip_image_ref, clip_image_size, clip_image_size)
+                kwargs["animate2_ref_clip_fea"] = self.clip.visual([animate2_clip_image_ref[:, None, :, :]])
+                animate2_clip_image_ref = None
             if steadydancer:
                 kwargs['steadydancer_clip_fea_c'] = self.clip.visual([input_frames[:, :1]])
 
@@ -920,6 +981,24 @@ class WanAny2V:
             from .vista4d.preprocess import prepare_vista4d_condition
             kwargs.update(prepare_vista4d_condition(self, input_frames, input_custom, frame_num, height, width, VAE_tile_size, fps=bbargs.get("fps", model_def.get("fps", 16)), custom_settings=custom_settings, model_mode=model_mode))
             freqs = get_vista4d_rotary_pos_embed((lat_frames, height // self.vae_stride[1], width // self.vae_stride[2]))
+
+        bernini_sources_by_key = {"": []}
+        if bernini:
+            bernini_video_latents, bernini_image_latents = [], []
+            if input_frames is not None and "V" in video_prompt_type:
+                height, width = input_frames.shape[-2:]
+                color_reference_frame = input_frames[:, :1].clone()
+                video_latents = self.vae.encode([input_frames.to(self.device)], VAE_tile_size)[0].unsqueeze(0)
+                bernini_video_latents = [video_latents]
+                if prefix_frames_count > 0:
+                    overlapped_latents_frames_num = int(1 + (prefix_frames_count - 1) // self.vae_stride[0])
+                    extended_overlapped_latents = video_latents[:, :, :overlapped_latents_frames_num].clone()
+            if input_ref_images is not None and "I" in video_prompt_type:
+                bernini_image_latents = [self.vae.encode([u.to(self.device)], VAE_tile_size)[0].unsqueeze(0) for u in input_ref_images]
+            bernini_v_sources = [(source_latent, source_id + 1) for source_id, source_latent in enumerate(bernini_video_latents)]
+            bernini_i_sources = [(source_latent, source_id + 1) for source_id, source_latent in enumerate(bernini_image_latents)]
+            bernini_vi_sources = bernini_v_sources + [(source_latent, len(bernini_v_sources) + source_id + 1) for source_id, source_latent in enumerate(bernini_image_latents)]
+            bernini_sources_by_key.update({"V": bernini_v_sources, "I": bernini_i_sources, "VI": bernini_vi_sources})
 
         # Video 2 Video
         if "G" in video_prompt_type and input_frames != None:
@@ -1006,7 +1085,7 @@ class WanAny2V:
                 if True:
                     with init_empty_weights():
                         arc_resampler = Resampler( depth=4, dim=1280, dim_head=64, embedding_dim=512, ff_mult=4, heads=20, num_queries=16, output_dim=2048 if lynx_lite else 5120 )
-                    offload.load_model_data(arc_resampler, fl.locate_file("wan2.1_lynx_lite_arc_resampler.safetensors" if lynx_lite else "wan2.1_lynx_full_arc_resampler.safetensors"), writable_tensors=False)
+                    offload.load_model_data(arc_resampler, fl.locate_file("wan2.1_lynx_lite_arc_resampler.safetensors" if lynx_lite else "wan2.1_lynx_full_arc_resampler.safetensors"), writable_tensors=False, default_dtype=None)
                     arc_resampler.to(self.device)
                     arcface_embed = face_arc_embeds[None,None,:].to(device=self.device, dtype=torch.float) 
                     ip_hidden_states = arc_resampler(arcface_embed).to(self.dtype)
@@ -1080,6 +1159,10 @@ class WanAny2V:
             extended_latents, freqs = self._build_mocha_latents( input_frames, input_masks,  input_ref_images[:2], frame_num, lat_frames, lat_h, lat_w, VAE_tile_size )
             extended_input_dim = 2
 
+        # shotplan
+        if shotplan:
+            kwargs["shotplan_cut_frames"] = shotplan_prompt.cut_frames
+
         target_shape = (self.vae.model.z_dim, lat_frames + ref_images_count, lat_h, lat_w)
 
         if multitalk:
@@ -1113,8 +1196,205 @@ class WanAny2V:
 
         kwargs["freqs"] = freqs
 
+        def _build_sub_parallel_windows(total, size, overlap):
+            if size <= 0 or size >= total:
+                return None
+            overlap = min(max(0, overlap), size - 1)
+            windows, step, start = [], size - overlap, 0
+            while True:
+                end = start + size
+                if end >= total:
+                    start = max(0, total - size)
+                    if len(windows) == 0 or windows[-1][0] != start:
+                        windows.append((start, total))
+                    break
+                windows.append((start, end))
+                start += step
+            return windows
+
+        sub_parallel_window_size = max(0, int(sub_parallel_window_size or 0))
+        sub_parallel_window_overlap = max(0, int(sub_parallel_window_overlap or 0))
+        sub_parallel_window_latents = min(lat_frames, max(1, int((sub_parallel_window_size - 1) // self.vae_stride[0]) + 1)) if sub_parallel_window_size > 0 else 0
+        sub_parallel_overlap_latents = max(0, int((sub_parallel_window_overlap - 1) // self.vae_stride[0]) + 1) if sub_parallel_window_overlap > 0 else 0
+        if sub_parallel_window_latents > 0:
+            sub_parallel_overlap_latents = min(sub_parallel_overlap_latents, sub_parallel_window_latents - 1)
+        sub_parallel_windows = _build_sub_parallel_windows(lat_frames, sub_parallel_window_latents, sub_parallel_overlap_latents)
+        sub_parallel_prefix_latents = ref_images_count if ref_images_before and ref_images_count > 0 else 0
+        sub_parallel_history_latents = extended_overlapped_latents.shape[2] if scail2 and extended_overlapped_latents is not None else 0
+
+        def _sub_parallel_select(tensor, dim, indices):
+            return tensor.index_select(dim, indices.to(device=tensor.device))
+
+        def _sub_parallel_narrow(tensor, dim, start, end):
+            return tensor.narrow(dim, start, end - start)
+
+        def _sub_parallel_output_indices(start, end, device):
+            return torch.arange(start, end, device=device, dtype=torch.long)
+
+        def _sub_parallel_model_indices(start, end, device):
+            indices = torch.arange(sub_parallel_prefix_latents + start, sub_parallel_prefix_latents + end, device=device, dtype=torch.long)
+            if sub_parallel_prefix_latents > 0:
+                indices = torch.cat([torch.arange(sub_parallel_prefix_latents, device=device, dtype=torch.long), indices])
+            return indices
+
+        def _sub_parallel_slice_time(tensor, dim, start, end, include_prefix=False, history_latents=0):
+            if not torch.is_tensor(tensor) or tensor.ndim <= dim:
+                return tensor
+            if include_prefix and tensor.shape[dim] == target_shape[1]:
+                if sub_parallel_prefix_latents > 0:
+                    sliced = torch.cat([tensor.narrow(dim, 0, sub_parallel_prefix_latents), _sub_parallel_narrow(tensor, dim, sub_parallel_prefix_latents + start, sub_parallel_prefix_latents + end)], dim=dim)
+                else:
+                    sliced = _sub_parallel_narrow(tensor, dim, start, end)
+            elif tensor.shape[dim] == lat_frames:
+                sliced = _sub_parallel_narrow(tensor, dim, start, end)
+            else:
+                sliced = tensor
+            if history_latents > 0 and sliced is not tensor:
+                history = tensor.narrow(dim, 0, history_latents).to(device=sliced.device, dtype=sliced.dtype)
+                sliced = torch.cat([history, sliced], dim=dim)
+            return sliced
+
+        def _sub_parallel_token_indices(frames, tokens_per_frame, offset=0):
+            token_offsets = torch.arange(tokens_per_frame, device=frames.device, dtype=torch.long)
+            return (frames[:, None] * tokens_per_frame + token_offsets).reshape(-1) + offset
+
+        def _sub_parallel_scail2_freqs(start, end, history_latents=0):
+            ref_latent_count = kwargs["scail2_ref_latents"].shape[2]
+            main_len = history_latents + end - start
+            pose_len = main_len
+            main_grid_h, main_grid_w = target_shape[2] // ps_h, target_shape[3] // ps_w
+            if test_scail2_replace(video_prompt_type):
+                ref_freqs_cos, ref_freqs_sin = get_nd_rotary_pos_embed((0, 120, 0), (ref_latent_count, 120 + main_grid_h, main_grid_w), (ref_latent_count, main_grid_h, main_grid_w), L_test=main_len, enable_riflex=False)
+                video_freqs_cos, video_freqs_sin = get_nd_rotary_pos_embed((ref_latent_count - 1, 0, 0), (ref_latent_count - 1 + main_len, main_grid_h, main_grid_w), (main_len, main_grid_h, main_grid_w), L_test=main_len, enable_riflex=False)
+                main_freqs_cos, main_freqs_sin = torch.cat([ref_freqs_cos, video_freqs_cos]), torch.cat([ref_freqs_sin, video_freqs_sin])
+                pose_freqs_cos, pose_freqs_sin = get_nd_rotary_pos_embed((ref_latent_count - 1, 0, 120), (ref_latent_count - 1 + pose_len, main_grid_h, 120 + main_grid_w), (pose_len, main_grid_h, main_grid_w), L_test=main_len, enable_riflex=False)
+            else:
+                main_freqs_cos, main_freqs_sin = get_nd_rotary_pos_embed((0, 0, 0), (ref_latent_count + main_len, main_grid_h, main_grid_w), (ref_latent_count + main_len, main_grid_h, main_grid_w), L_test=main_len, enable_riflex=False)
+                pose_freqs_cos, pose_freqs_sin = get_nd_rotary_pos_embed((ref_latent_count, 0, 120), (ref_latent_count + pose_len, main_grid_h, 120 + main_grid_w), (pose_len, main_grid_h, main_grid_w), L_test=main_len, enable_riflex=False)
+            head_dim = pose_freqs_cos.shape[1]
+            pose_freqs_cos = F.avg_pool2d(pose_freqs_cos.view(pose_len, main_grid_h, main_grid_w, head_dim).permute(0, 3, 1, 2), kernel_size=2, stride=2).permute(0, 2, 3, 1).reshape(-1, head_dim)
+            pose_freqs_sin = F.avg_pool2d(pose_freqs_sin.view(pose_len, main_grid_h, main_grid_w, head_dim).permute(0, 3, 1, 2), kernel_size=2, stride=2).permute(0, 2, 3, 1).reshape(-1, head_dim)
+            return torch.cat([main_freqs_cos, pose_freqs_cos]), torch.cat([main_freqs_sin, pose_freqs_sin])
+
+        def _sub_parallel_slice_freqs(freqs, start, end, history_latents=0):
+            if not isinstance(freqs, tuple):
+                return freqs
+            if scail2:
+                return _sub_parallel_scail2_freqs(start, end, history_latents)
+            cos, sin = freqs
+            main_tokens = (target_shape[2] // ps_h) * (target_shape[3] // ps_w)
+            if vista4d:
+                main_count = lat_frames * main_tokens
+                frames = _sub_parallel_output_indices(start, end, cos.device)
+                indices = torch.cat([_sub_parallel_token_indices(frames, main_tokens, main_count * group) for group in range(3)])
+            else:
+                main_count = target_shape[1] * main_tokens
+                indices = [_sub_parallel_token_indices(_sub_parallel_model_indices(start, end, cos.device), main_tokens)]
+                pose_tokens = (target_shape[2] // ps_h // 2) * (target_shape[3] // ps_w // 2)
+                if scail and cos.shape[0] > main_count and pose_tokens > 0:
+                    indices.append(_sub_parallel_token_indices(_sub_parallel_output_indices(start, end, cos.device), pose_tokens, main_count))
+                elif cos.shape[0] > main_count:
+                    indices.append(torch.arange(main_count, cos.shape[0], device=cos.device, dtype=torch.long))
+                indices = torch.cat(indices)
+            return _sub_parallel_select(cos, 0, indices), _sub_parallel_select(sin, 0, indices)
+
+        def _sub_parallel_kwargs(start, end, history_latents=0):
+            sub_kwargs = {"freqs": _sub_parallel_slice_freqs(kwargs["freqs"], start, end, history_latents)}
+            if "t" in kwargs:
+                sub_kwargs["t"] = _sub_parallel_slice_time(kwargs["t"], 0, start, end, True, history_latents)
+            if "y" in kwargs:
+                sub_kwargs["y"] = _sub_parallel_slice_time(kwargs["y"], 1, start, end, True, history_latents)
+            for key in ("pose_latents", "scail_pose_latents"):
+                if key in kwargs:
+                    sub_kwargs[key] = _sub_parallel_slice_time(kwargs[key], 2, start, end, history_latents=history_latents)
+            for key in ("scail2_pose_latents", "scail2_driving_masks"):
+                if key in kwargs:
+                    sub_kwargs[key] = _sub_parallel_slice_time(kwargs[key], 2, start, end, history_latents=history_latents)
+            if "scail2_ref_masks" in kwargs:
+                ref_latent_count = kwargs["scail2_ref_latents"].shape[2]
+                sub_kwargs["scail2_ref_masks"] = kwargs["scail2_ref_masks"][:, :, :ref_latent_count + history_latents + end - start]
+            if "vace_context" in kwargs:
+                sub_kwargs["vace_context"] = [_sub_parallel_slice_time(u, 1, start, end, True) for u in kwargs["vace_context"]]
+            for key in ("kiwi_source_condition", "kiwi_ref_condition"):
+                if key in kwargs:
+                    sub_kwargs[key] = _sub_parallel_slice_time(kwargs[key], 2, start, end, True)
+            if "vista" in kwargs:
+                sub_kwargs["vista"] = {key: _sub_parallel_slice_time(value, 2, start, end) if torch.is_tensor(value) and value.ndim == 5 else value for key, value in kwargs["vista"].items()}
+            return sub_kwargs
+
+        def _sub_parallel_weight(start, end, dtype, device):
+            weight = torch.ones(end - start, dtype=dtype, device=device)
+            ramp = min(sub_parallel_overlap_latents, end - start)
+            if ramp > 0 and start > 0:
+                weight[:ramp] = torch.linspace(1e-6, 1, ramp, dtype=dtype, device=device)
+            if ramp > 0 and end < lat_frames:
+                weight[-ramp:] = torch.linspace(1, 1e-6, ramp, dtype=dtype, device=device)
+            return weight.view(1, 1, -1, 1, 1)
+
+        def _sub_parallel_denoise(latents, denoise_fn):
+            nonlocal extended_latents, y_cond, y_uncond, conditions, conditions_null
+            noise_pred = torch.zeros_like(latents)
+            weight_sum = torch.zeros(1, 1, latents.shape[2], 1, 1, dtype=latents.dtype, device=latents.device)
+            for start, end in sub_parallel_windows:
+                anchor_latents = 1 if start > 0 else 0
+                context_start = start - anchor_latents
+                history_latents = sub_parallel_history_latents if context_start > 0 else 0
+                latent_window = latents[:, :, sub_parallel_prefix_latents + context_start:sub_parallel_prefix_latents + end]
+                if history_latents > 0:
+                    latent_window = torch.cat([latents[:, :, :history_latents], latent_window], dim=2)
+                if sub_parallel_prefix_latents > 0:
+                    latent_window = torch.cat([latents[:, :, :sub_parallel_prefix_latents], latent_window], dim=2)
+                saved_kwargs, saved_extended_latents = dict(kwargs), extended_latents if extended_input_dim > 0 else None
+                if wanmove:
+                    saved_y_cond, saved_y_uncond = y_cond, y_uncond
+                if steadydancer:
+                    saved_conditions, saved_conditions_null = conditions, conditions_null
+                try:
+                    kwargs.update(_sub_parallel_kwargs(context_start, end, history_latents))
+                    if extended_input_dim > 0:
+                        extended_latents = _sub_parallel_slice_time(extended_latents, 2, context_start, end, True)
+                    if wanmove:
+                        y_cond, y_uncond = _sub_parallel_slice_time(y_cond, 1, context_start, end), _sub_parallel_slice_time(y_uncond, 1, context_start, end)
+                    if steadydancer:
+                        conditions = [_sub_parallel_slice_time(u, 2, context_start, end) for u in conditions]
+                        conditions_null = [_sub_parallel_slice_time(u, 2, context_start, end) for u in conditions_null]
+                    pred = denoise_fn(latent_window)
+                finally:
+                    kwargs.clear()
+                    kwargs.update(saved_kwargs)
+                    if extended_input_dim > 0:
+                        extended_latents = saved_extended_latents
+                    if wanmove:
+                        y_cond, y_uncond = saved_y_cond, saved_y_uncond
+                    if steadydancer:
+                        conditions, conditions_null = saved_conditions, saved_conditions_null
+                if pred is None:
+                    return None
+                pred_start = sub_parallel_prefix_latents if sub_parallel_prefix_latents > 0 and pred.shape[2] == sub_parallel_prefix_latents + history_latents + end - context_start else 0
+                if pred_start > 0:
+                    noise_pred[:, :, :sub_parallel_prefix_latents] += pred[:, :, :sub_parallel_prefix_latents]
+                    weight_sum[:, :, :sub_parallel_prefix_latents] += 1
+                weight = _sub_parallel_weight(start, end, pred.dtype, pred.device)
+                pred_start += history_latents + anchor_latents
+                pred_slice = pred[:, :, pred_start:pred_start + end - start]
+                pred_slice.mul_(weight)
+                noise_pred[:, :, sub_parallel_prefix_latents + start:sub_parallel_prefix_latents + end] += pred_slice
+                weight_sum[:, :, sub_parallel_prefix_latents + start:sub_parallel_prefix_latents + end] += weight
+                pred = pred_slice = latent_window = weight = None
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            noise_pred.div_(weight_sum.clamp_min_(1e-6))
+            return noise_pred
+
 
         # Steps Skipping
+        sub_parallel_cache = sub_parallel_cache2 = None
+        if sub_parallel_windows is not None:
+            sub_parallel_cache = self.model.cache
+            self.model.cache = None
+            if self.model2 is not None:
+                sub_parallel_cache2 = self.model2.cache
+                self.model2.cache = None
         skip_steps_cache = self.model.cache
         if skip_steps_cache != None:
             cache_type = skip_steps_cache.cache_type
@@ -1139,7 +1419,7 @@ class WanAny2V:
 
         offload.shared_state["_radial"] =  offload.shared_state["_attention"]=="radial"
         radial = offload.shared_state.get("_radial", False)        
-        if radial:
+        if radial and not animate2:
             radial_cache = get_cache("radial")
             from shared.radial_attention.attention import fill_radial_cache
             fill_radial_cache(radial_cache, len(self.model.blocks), *target_shape[1:])
@@ -1166,6 +1446,16 @@ class WanAny2V:
         callback(-1, None, True, override_num_inference_steps = updated_num_steps, denoising_extra = denoising_extra)
 
         def clear():
+            if sub_parallel_windows is not None:
+                if sub_parallel_cache is not None:
+                    sub_parallel_cache.previous_residual = None
+                    sub_parallel_cache.previous_modulated_input = None
+                self.model.cache = sub_parallel_cache
+                if self.model2 is not None:
+                    if sub_parallel_cache2 is not None:
+                        sub_parallel_cache2.previous_residual = None
+                        sub_parallel_cache2.previous_modulated_input = None
+                    self.model2.cache = sub_parallel_cache2
             clear_caches()
             gc.collect()
             torch.cuda.empty_cache()
@@ -1262,6 +1552,11 @@ class WanAny2V:
                         # "face_pixel_values": [face_pixel_values, None]
                         "face_pixel_values": [face_pixel_values, face_pixel_values] # seems to look better this way
                     }
+                elif animate2:
+                    gen_args = {
+                        "x": [latent_model_input, latent_model_input],
+                        "context": [context, context_null],
+                    }
                 elif wanmove:
                     gen_args = {
                         "x" : [latent_model_input, latent_model_input],
@@ -1309,13 +1604,33 @@ class WanAny2V:
                         gen_args = {"x": [latent_model_input], "context": context}
                     else:
                         gen_args = {"x": [latent_model_input, latent_model_input], "context": context + context_null}
+                elif bernini:
+                    omega_v, omega_i, omega_ti = bernini_omega_v, bernini_omega_i, guide_scale
+                    if bernini_sources_by_key["V"] and bernini_sources_by_key["I"]:
+                        branch_defs = [(1 - omega_v, "", context_null), (omega_v - omega_i, "V", context_null), (omega_i - omega_ti, "VI", context_null), (omega_ti, "VI", context)]
+                    elif bernini_sources_by_key["V"]:
+                        branch_defs = [(1 - omega_ti, "V", context_null), (omega_ti, "V", context)]
+                    elif bernini_sources_by_key["I"]:
+                        branch_defs = [(1 - omega_i, "", context_null), (omega_i - omega_ti, "I", context_null), (omega_ti, "I", context)]
+                    else:
+                        branch_defs = [(1 - omega_ti, "", context_null), (omega_ti, "", context)]
+                    branch_defs = [branch_def for branch_def in branch_defs if branch_def[0] != 0]
+                    bernini_coeffs = [branch_def[0] for branch_def in branch_defs]
+                    gen_args = {
+                        "x": [latent_model_input] * len(branch_defs),
+                        "context": [branch_def[2] for branch_def in branch_defs],
+                        "bernini_sources": [bernini_sources_by_key[branch_def[1]] for branch_def in branch_defs],
+                    }
+                    any_guidance = len(gen_args["x"]) > 1
                 else:
                     gen_args = {
                         "x" : [latent_model_input, latent_model_input],
                         "context": [context, context_null]
                     }
 
-                if joint_pass and any_guidance:
+                latent_model_input = None
+                run_joint_pass = joint_pass or animate2 and any_guidance
+                if run_joint_pass and any_guidance:
                     ret_values = trans( **gen_args , **kwargs)
                     if self._interrupt:
                         return clear()               
@@ -1324,11 +1639,17 @@ class WanAny2V:
                     ret_values = [None] * size
                     for x_id in range(size):
                         sub_gen_args = {k : [v[x_id]] for k, v in gen_args.items() }
+                        gen_args["x"][x_id] = None
                         ret_values[x_id] = trans( **sub_gen_args, x_id= x_id , **kwargs)[0]
                         if self._interrupt:
                             return clear()         
                     sub_gen_args = None
-                if not any_guidance:
+                gen_args = None
+                if bernini:
+                    noise_pred = ret_values[0] if bernini_coeffs[0] == 1 else ret_values[0] * bernini_coeffs[0]
+                    for pred, coeff in zip(ret_values[1:], bernini_coeffs[1:]):
+                        noise_pred = noise_pred + pred if coeff == 1 else noise_pred + pred * coeff
+                elif not any_guidance:
                     noise_pred = ret_values[0]       
                 elif phantom:
                     guide_scale_img= 5.0
@@ -1402,13 +1723,15 @@ class WanAny2V:
                 ret_values = noise_pred_uncond = noise_pred_cond = noise_pred_text = neg  = None
                 return noise_pred
 
-            noise_pred = denoise_with_cfg_fn(latents) 
+            denoise_fn = partial(_sub_parallel_denoise, denoise_fn=denoise_with_cfg_fn) if sub_parallel_windows is not None else denoise_with_cfg_fn
+            noise_pred = denoise_fn(latents)
             if noise_pred is None: return clear()
             if self_refiner_handler:
-                latents, sample_scheduler = self_refiner_handler.step(i, latents, noise_pred, t, timesteps, target_shape, seed_g, sample_scheduler, scheduler_kwargs, denoise_with_cfg_fn)
+                latents, sample_scheduler = self_refiner_handler.step(i, latents, noise_pred, t, timesteps, target_shape, seed_g, sample_scheduler, scheduler_kwargs, denoise_fn)
                 if latents is None: return clear()
             else:
                 latents = sample_scheduler.step( noise_pred[:, :, :target_shape[1]], t, latents, **scheduler_kwargs)[0]
+            noise_pred = denoise_fn = None
 
 
             if image_mask_latents is not None and i< masked_steps:
@@ -1444,36 +1767,45 @@ class WanAny2V:
 
         if chrono_edit:
             if frame_num == 5 :
-                videos = self.vae.decode(x0, VAE_tile_size)
+                videos = self.vae.decode_to_cpu_uint8(x0, VAE_tile_size)
             else:
-                videos_edit = self.vae.decode([x[:, [0,-1]] for x in x0 ], VAE_tile_size)
-                videos = self.vae.decode([x[:, :-1] for x in x0 ], VAE_tile_size)
+                videos_edit = self.vae.decode_to_cpu_uint8([x[:, [0,-1]] for x in x0 ], VAE_tile_size)
+                videos = self.vae.decode_to_cpu_uint8([x[:, :-1] for x in x0 ], VAE_tile_size)
                 videos = [ torch.cat([video, video_edit[:, 1:]], dim=1) for video, video_edit in zip(videos, videos_edit)]
             if image_outputs:
                 return torch.cat([video[:,-1:] for video in videos], dim=1) if len(videos) > 1 else videos[0][:,-1:]
             else:
                 return videos[0]
-        if image_outputs :
+        if image_outputs:
             x0 = [x[:,:1] for x in x0 ]
 
-        videos = self.vae.decode(x0, VAE_tile_size)
         any_vae2= self.vae2 is not None
+        needs_color_correction = color_correction_strength > 0 and (window_start_frame_no + prefix_frames_count) > 1
+        videos = self.vae.decode_to_cpu_uint8(x0, VAE_tile_size)
         if any_vae2:
-            videos2 = self.vae2.decode(x0, VAE_tile_size)
+            videos2 = self.vae2.decode_to_cpu_uint8(x0, VAE_tile_size)
 
         if image_outputs:
             videos = torch.cat([video[:,:1] for video in videos], dim=1) if len(videos) > 1 else videos[0][:,:1]
             if any_vae2: videos2 = torch.cat([video[:,:1] for video in videos2], dim=1) if len(videos2) > 1 else videos2[0][:,:1]
+            if vae_upsampler is not None:
+                if callable(set_progress_status):
+                    set_progress_status(f"{getattr(vae_upsampler, 'progress_label', 'VAE Spatial Upsampling')} in progress")
+                lq_image_ref = [videos.transpose(0, 1).contiguous()]
+                lq_latent_ref = [torch.stack([latent[:, 0] for latent in x0])]
+                videos = vae_upsampler.decode_inputs(lq_image_ref, lq_latent_ref, prompt=input_prompt, seed=seed, abort_callback=lambda: self._interrupt, progress_callback=lambda *_args: None).transpose(0, 1).contiguous()
         else:
             videos = videos[0] # return only first video
             if any_vae2: videos2 = videos2[0] # return only first video
-        if color_correction_strength > 0 and (window_start_frame_no + prefix_frames_count) >1:
+        if needs_color_correction:
+            videos = videos.float().div_(127.5).sub_(1.0) if videos.dtype == torch.uint8 else videos
             if vace and False:
                 # videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), input_frames[0].unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "progressive_blend").squeeze(0)
                 videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), input_frames[0].unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "reference").squeeze(0)
                 # videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), videos.unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "reference").squeeze(0)
             elif color_reference_frame is not None:
                 videos = match_and_blend_colors(videos.unsqueeze(0), color_reference_frame.unsqueeze(0), color_correction_strength).squeeze(0)
+            videos = videos.clamp_(-1, 1).add_(1.0).mul_(127.5).round_().clamp_(0, 255).to(torch.uint8)
 
         ret = { "x" : videos, "latent_slice" : latent_slice}
         if post_decode_pre_trim > 0:
@@ -1482,10 +1814,14 @@ class WanAny2V:
         if alpha_class:
             BGRA_frames = None
             from .alpha.utils import render_video, from_BRGA_numpy_to_RGBA_torch
-            videos, BGRA_frames = render_video(videos[None], videos2[None])            
+            videos_for_alpha = videos.float().div_(127.5).sub_(1.0) if videos.dtype == torch.uint8 else videos
+            videos2_for_alpha = videos2.float().div_(127.5).sub_(1.0) if videos2.dtype == torch.uint8 else videos2
+            videos, BGRA_frames = render_video(videos_for_alpha[None], videos2_for_alpha[None])
             if image_outputs: 
                 videos = from_BRGA_numpy_to_RGBA_torch(BGRA_frames) 
                 BGRA_frames = None
+            if videos.dtype != torch.uint8:
+                videos = videos.clamp_(-1, 1).add_(1.0).mul_(127.5).round_().clamp_(0, 255).to(torch.uint8)
             if BGRA_frames is not None: ret["BGRA_frames"] =  BGRA_frames
         return ret
 
@@ -1494,10 +1830,10 @@ class WanAny2V:
             if "#" in video_prompt_type and "1" in video_prompt_type:
                 preloadURLs = get_model_recursive_prop(model_type,  "preload_URLs")
                 if len(preloadURLs) > 0: 
-                    return [fl.locate_file(os.path.basename(preloadURLs[0]))] , [1]
+                    return [os.path.abspath(fl.locate_file(os.path.basename(preloadURLs[0])))] , [1]
         elif base_model_type == "vace_ditto_14B":
             preloadURLs = get_model_recursive_prop(model_type,  "preload_URLs")
             model_mode = int(model_mode)
             if len(preloadURLs) > model_mode: 
-                return [fl.locate_file(os.path.basename(preloadURLs[model_mode]))] , [1]
+                return [os.path.abspath(fl.locate_file(os.path.basename(preloadURLs[model_mode])))] , [1]
         return [], []

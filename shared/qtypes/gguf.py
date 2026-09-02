@@ -82,6 +82,16 @@ _GGUF_TYPED_TENSOR_DTYPES = {
     None if gguf is None else gguf.GGMLQuantizationType.I32: np.int32,
     None if gguf is None else gguf.GGMLQuantizationType.I64: np.int64,
 }
+_GGUF_TYPED_TENSOR_TORCH_DTYPES = {
+    None if gguf is None else gguf.GGMLQuantizationType.F16: torch.float16,
+    None if gguf is None else gguf.GGMLQuantizationType.BF16: torch.bfloat16,
+    None if gguf is None else gguf.GGMLQuantizationType.F32: torch.float32,
+    None if gguf is None else gguf.GGMLQuantizationType.F64: torch.float64,
+    None if gguf is None else gguf.GGMLQuantizationType.I8: torch.int8,
+    None if gguf is None else gguf.GGMLQuantizationType.I16: torch.int16,
+    None if gguf is None else gguf.GGMLQuantizationType.I32: torch.int32,
+    None if gguf is None else gguf.GGMLQuantizationType.I64: torch.int64,
+}
 
 
 @dataclass(frozen=True)
@@ -199,6 +209,17 @@ def _gguf_cuda_module():
     if not _gguf_cuda_kernels_enabled():
         return None
     return _GGUF_CUDA_MODULE
+
+
+def get_gguf_compute_dtype():
+    module = _gguf_cuda_module()
+    if module is None:
+        return torch.bfloat16
+    try:
+        version = tuple(int(part) for part in module.__version__.split("+", 1)[0].split(".")[:3])
+    except (AttributeError, TypeError, ValueError):
+        return torch.float16
+    return torch.bfloat16 if version >= (1, 0, 7) else torch.float16
 
 
 def set_gguf_cuda_kernels_enabled(enabled=None):
@@ -471,8 +492,14 @@ def get_file_metadata(file_path):
     if cached is not None:
         state_dict, metadata = cached
         return OrderedDict(state_dict), dict(metadata)
-    metadata = _get_lightweight_gguf_metadata(file_path)
-    result = (OrderedDict(), metadata)
+    from mmgp.safetensors2 import tensor_stub
+    parsed = _gguf_get_index(file_path)
+    orig_shapes = dict(parsed.orig_shapes)
+    state_dict = OrderedDict((tensor.name, tensor_stub(_GGUF_TYPED_TENSOR_TORCH_DTYPES.get(tensor.tensor_type, torch.uint8),
+                                                       orig_shapes.get(tensor.name, tuple(reversed(tensor.raw_shape)))))
+                             for tensor in parsed.tensor_infos)
+    metadata = {"config": parsed.config} if parsed.config is not None else {}
+    result = (state_dict, metadata)
     _GGUF_METADATA_CACHE[cache_key] = (OrderedDict(result[0]), dict(result[1]))
     return OrderedDict(result[0]), dict(result[1])
 
@@ -559,7 +586,7 @@ def load_gguf_state_dict(
             from mmgp import safetensors2
             safetensors2.verboseLevel = verboseLevel
             tracker = safetensors2.MmapTracker(file_path)
-            tracker.register(mmap_data, 0, 0, int(mmap-_data.nbytes))
+            tracker.register(mmap_data, 0, 0, int(mmap_data.nbytes))
         except Exception:
             tracker = None
     tensor_names = [tensor.name for tensor in parsed.tensor_infos]
@@ -671,6 +698,27 @@ class GGUFSourceTensor(torch.Tensor):
         detached.tensor_type = getattr(self, "tensor_type", None)
         detached.tensor_shape = getattr(self, "tensor_shape", detached.shape)
         return detached
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.split:
+            src = args[0]
+            dim = args[2] if len(args) > 2 else kwargs.get("dim", 0)
+            with torch._C.DisableTorchFunctionSubclass():
+                chunks = func(*args, **kwargs)
+            tensor_type = getattr(src, "tensor_type", None)
+            tensor_shape = getattr(src, "tensor_shape", None)
+            if tensor_type is None or tensor_shape is None:
+                return chunks
+            out = []
+            for chunk in chunks:
+                new_shape = list(tensor_shape)
+                if dim < len(new_shape) and src.shape[dim] == tensor_shape[dim]:
+                    new_shape[dim] = chunk.shape[dim]
+                out.append(GGUFSourceTensor.wrap(chunk, tensor_type=tensor_type, tensor_shape=tuple(new_shape)))
+            return tuple(out)
+        return super().__torch_function__(func, types, args, kwargs)
 
     def get_quantized_subtensors(self):
         return [("data", self)]
@@ -1222,6 +1270,43 @@ class GGUFWeightTensor(QTensor):
         raw = self._data if self._data.device == device else self._data.to(device)
         return _gguf_dequantize_tensor(raw, self._tensor_type, self._tensor_shape, dtype=dtype)
 
+    def embedding(self, input, dtype=None):
+        if dtype is None:
+            dtype = self.dtype
+        if len(self._tensor_shape) != 2:
+            return None
+
+        num_embeddings, embedding_dim = self._tensor_shape
+        raw = self._data.reshape(num_embeddings, -1)
+        flat_input = input.reshape(-1)
+        if flat_input.numel() == 0:
+            return torch.empty((*input.shape, embedding_dim), dtype=dtype, device=input.device)
+
+        # GGUF blocks are row-aligned, so gather each requested packed row before dequantizing it.
+        source_input = flat_input if flat_input.device == raw.device else flat_input.to(raw.device)
+        unique_input, inverse = torch.unique(source_input, sorted=False, return_inverse=True)
+        unique_count = unique_input.shape[0]
+        raw_rows = raw.index_select(0, unique_input)
+        del unique_input, source_input
+
+        if raw_rows.device != input.device:
+            raw_rows = raw_rows.to(input.device)
+        dense_rows = _gguf_dequantize_tensor(
+            raw_rows,
+            self._tensor_type,
+            (unique_count, embedding_dim),
+            dtype=dtype,
+        )
+        del raw_rows
+        if dense_rows.device != input.device:
+            dense_rows = dense_rows.to(input.device)
+
+        if inverse.device != input.device:
+            inverse = inverse.to(input.device)
+        output = dense_rows.index_select(0, inverse)
+        del dense_rows, inverse
+        return output.reshape(*input.shape, embedding_dim)
+
     def linear(self, input, bias=None):
         if torch.is_tensor(input):
             target_dtype = _resolve_default_dtype(self._gguf_default_dtype, fallback=input.dtype)
@@ -1240,15 +1325,22 @@ class GGUFWeightTensor(QTensor):
         return torch.nn.functional.linear(input, weight, bias)
 
     def get_quantized_subtensors(self):
-        return [("data", self._data)]
+        raw = GGUFSourceTensor.wrap(self._data, tensor_type=self._tensor_type, tensor_shape=self._tensor_shape)
+        return [("raw_tensor", raw)]
 
     def set_quantized_subtensors(self, sub_tensors):
         if isinstance(sub_tensors, dict):
             sub_map = sub_tensors
         else:
             sub_map = {name: tensor for name, tensor in sub_tensors}
-        data = sub_map.get("data", None)
+        data = sub_map.get("raw_tensor", sub_map.get("data", None))
         if data is not None:
+            tensor_type = getattr(data, "tensor_type", None)
+            if tensor_type is not None:
+                self._tensor_type = tensor_type
+            tensor_shape = getattr(data, "tensor_shape", None)
+            if tensor_shape is not None:
+                self._tensor_shape = torch.Size(tensor_shape)
             old_data = self._data
             if torch.is_tensor(old_data):
                 try:
@@ -1353,6 +1445,37 @@ class GGUFWeightTensor(QTensor):
                 tensor_shape=getattr(t, "_tensor_shape", None),
             )
         return _gguf_qfallback(op, *args, **(kwargs or {}))
+
+
+class GGUFFirstRowsLinear(torch.nn.Module):
+    """Zero-copy linear view over a contiguous prefix of GGUF weight rows."""
+
+    def __init__(self, source: torch.nn.Module, row_count: int):
+        super().__init__()
+        self.register_parameter("weight", source.weight)
+        self.row_count = int(row_count)
+        object.__setattr__(self, "_cached_raw", None)
+        object.__setattr__(self, "_cached_weight", None)
+
+    def clear_cache(self) -> None:
+        object.__setattr__(self, "_cached_raw", None)
+        object.__setattr__(self, "_cached_weight", None)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        source_weight = self.weight
+        if not isinstance(source_weight, GGUFWeightTensor):
+            raise TypeError(f"GGUFFirstRowsLinear requires GGUFWeightTensor, got {type(source_weight).__name__}.")
+        full_rows, in_features = map(int, source_weight._tensor_shape)
+        if not 0 < self.row_count <= full_rows or source_weight._data.numel() % full_rows:
+            raise RuntimeError(f"Cannot make a {self.row_count}-row view of GGUF weight {tuple(source_weight._tensor_shape)}.")
+        source_raw = source_weight._data
+        if self._cached_raw is not source_raw:
+            row_bytes = source_raw.numel() // full_rows
+            raw = source_raw[:self.row_count * row_bytes]
+            weight = GGUFWeightTensor.create(raw, (self.row_count, in_features), (in_features, 1), source_weight.dtype, tensor_type=source_weight._tensor_type, tensor_shape=(self.row_count, in_features))
+            object.__setattr__(self, "_cached_raw", source_raw)
+            object.__setattr__(self, "_cached_weight", weight)
+        return self._cached_weight.linear(input)
 
 
 class QLinearGGUF(QModuleMixin, torch.nn.Linear):
@@ -1640,7 +1763,7 @@ class QConv1dGGUF(QModuleMixin, torch.nn.Conv1d):
 
 
 @register_qmodule(torch.nn.Embedding)
-class QEmbeddingGGUF(BaseQEmbedding):
+class QEmbedding(BaseQEmbedding):
     def __init__(
         self,
         num_embeddings,
@@ -1674,6 +1797,15 @@ class QEmbeddingGGUF(BaseQEmbedding):
         )
         self._gguf_default_dtype = dtype
 
+    @classmethod
+    def from_module(cls, module, weights=None, activations=None, optimizer=None):
+        qmodule = super().from_module(module, weights, activations, optimizer)
+        if "embed_scale" in module._buffers:
+            qmodule.register_buffer("embed_scale", module._buffers["embed_scale"], persistent="embed_scale" not in module._non_persistent_buffers_set)
+        elif hasattr(module, "embed_scale"):
+            qmodule.embed_scale = module.embed_scale
+        return qmodule
+
     def set_default_dtype(self, dtype):
         self._gguf_default_dtype = dtype
 
@@ -1683,6 +1815,12 @@ class QEmbeddingGGUF(BaseQEmbedding):
             return self.weight
         return super().qweight
 
+    def _apply_embed_scale(self, output):
+        embed_scale = getattr(self, "embed_scale", None)
+        if torch.is_tensor(embed_scale):
+            embed_scale = embed_scale.to(device=output.device, dtype=output.dtype)
+        return output if embed_scale is None else output * embed_scale
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         qweight = self.qweight
         if isinstance(qweight, GGUFWeightTensor):
@@ -1691,9 +1829,12 @@ class QEmbeddingGGUF(BaseQEmbedding):
                 if _may_try_llamacpp_cuda_embedding(qweight, input):
                     fast_out = _try_llamacpp_cuda_embedding(qweight, input, target_dtype)
                     if fast_out is not None:
-                        return fast_out
+                        return self._apply_embed_scale(fast_out)
+                output = qweight.embedding(input, dtype=target_dtype)
+                if output is not None:
+                    return self._apply_embed_scale(output)
             weight = qweight.dequantize(dtype=target_dtype, device=input.device)
-            return torch.nn.functional.embedding(
+            output = torch.nn.functional.embedding(
                 input,
                 weight,
                 self.padding_idx,
@@ -1702,6 +1843,7 @@ class QEmbeddingGGUF(BaseQEmbedding):
                 self.scale_grad_by_freq,
                 self.sparse,
             )
+            return self._apply_embed_scale(output)
         return super().forward(input)
 
     def _load_from_state_dict(

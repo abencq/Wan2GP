@@ -69,8 +69,8 @@ class OviFusionEngine:
         self.target_dtype = torch.bfloat16 # dtype, wont work with torch.float16
         model, video_config, audio_config = init_fusion_score_model_ovi()
         # offload.load_model_data(model, "c:/temp/model_960x960.safetensors")
-        offload.load_model_data(model.video_model, model_filename[0], writable_tensors=False)
-        offload.load_model_data(model.audio_model, model_filename[1], writable_tensors=False)
+        offload.load_model_data(model.video_model, model_filename[0], writable_tensors=False, default_dtype=None)
+        offload.load_model_data(model.audio_model, model_filename[1], writable_tensors=False, default_dtype=None)
         offload.change_dtype(model, dtype, True)
         model = model.eval()
         # model.set_rope_params()
@@ -321,10 +321,8 @@ class OviFusionEngine:
             generated_audio = self.audio_vae.wrapped_decode(audio_latents_for_vae)
             generated_audio = generated_audio.squeeze().cpu().float().numpy()
             
-            # Decode video  
-            video_latents_for_vae = video_noise.unsqueeze(0)  # 1, c, f, h, w
-            generated_video = self.vae.decode(video_latents_for_vae, VAE_tile_size)[0]
-            generated_video = generated_video.cpu().float()  # c, f, h, w
+            # Decode video
+            generated_video = self.vae.decode_to_cpu_uint8([video_noise], VAE_tile_size, target_frames=frame_num, target_height=height, target_width=width)[0]
 
         # self.last_audio = audio
         output = {"x": generated_video, "audio": generated_audio}

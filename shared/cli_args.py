@@ -37,6 +37,7 @@ def parse_wgp_args(family_handlers: Sequence[str], config_filename: str, default
     add("--lock-config", action="store_true", help="Prevent modifying the configuration from the web interface")
     add("--lock-model", action="store_true", help="Prevent switch models")
     add("--save-quantized", action="store_true", help="Save a quantized version of the current model")
+    add("--convrot", action="store_true", help="Save INT8 ConvRot instead of Quanto INT8 (requires --save-quantized)")
     add("--test", action="store_true", help="Load the model and exit generation immediately")
     add("--preload", type=str, default="0", help="Megabytes of the diffusion model to preload in VRAM")
     add("--multiple-images", action="store_true", help="Allow inputting multiple images with image to video")
@@ -49,6 +50,7 @@ def parse_wgp_args(family_handlers: Sequence[str], config_filename: str, default
     add("--profile", type=str, default=-1, help="Profile No")
     add("--verbose", type=str, default=1, help="Verbose level")
     add("--debug-deepy", type=str, default=None, help="Enable Deepy verbose debug logging and write it to the given folder")
+    add("--llm-io", type=str, default="", metavar="FOLDER", help="Write a plain-text transcript of all local and remote LLM input/output to FOLDER")
     add("--steps", type=int, default=0, help="default denoising steps")
     add("--frames", type=int, default=0, help="default number of frames")
     add("--seed", type=int, default=-1, help="default generation seed")
@@ -74,6 +76,12 @@ def parse_wgp_args(family_handlers: Sequence[str], config_filename: str, default
     add("--vae-config", type=str, default="", help="vae config mode")
     add("--process", type=str, default="", help="Process a saved queue (.zip) or settings file (.json) without launching the web UI")
     add("--ask-deepy", action="store_true", help="Start an interactive Deepy console session without launching the web UI")
+    add("--mcp", action="store_true", help="Start WanGP as an MCP server without launching the web UI")
+    add("--mcp-transport", type=str, default="stdio", help="MCP transport: stdio, sse, or streamable-http")
+    add("--mcp-host", type=str, default="", help="Optional MCP host for non-stdio transports")
+    add("--mcp-port", type=int, default=None, help="Optional MCP port for non-stdio transports")
+    add("--mcp-console-output", action="store_true", help="Mirror WanGP stdout/stderr while serving MCP requests")
+    add("--mcp-allow-read-file-system", action="store_true", help="Allow MCP agents to reference arbitrary server filesystem paths; disabled by default")
     add("--dry-run", action="store_true", help="Validate file without generating (use with --process)")
     add("--output-dir", type=str, default="", help="Override output directory for CLI processing (use with --process)")
     add("--refresh-catalog", action="store_true", help="Refresh local plugin metadata for installed external plugins")
@@ -81,6 +89,10 @@ def parse_wgp_args(family_handlers: Sequence[str], config_filename: str, default
     add("--merge-catalog", action="store_true", help="Merge plugins_local.json into plugins.json and remove plugins_local.json")
 
     args = parser.parse_args(argv)
+    if args.llm_io:
+        from shared.llm_io import configure_llm_io
+
+        configure_llm_io(args.llm_io)
     if args.ask_deepy and not _arg_provided(argv, "--verbose"):
         args.verbose = "0"
     return args

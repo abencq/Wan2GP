@@ -1,18 +1,12 @@
 
 from mmgp import offload
-import inspect
-from typing import Any, Callable, Dict, List, Optional, Union
 
-import numpy as np
 import torch, json, os
 import math
 
-from diffusers.image_processor import VaeImageProcessor
 from .transformer_qwenimage import QwenImageTransformer2DModel
 
-from diffusers.utils import logging, replace_example_docstring
-from diffusers.utils.torch_utils import randn_tensor
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, AutoTokenizer, Qwen2VLProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, Qwen2VLProcessor
 from .autoencoder_kl_qwenimage import AutoencoderKLQwenImage
 from diffusers import FlowMatchEulerDiscreteScheduler
 from .pipeline_qwenimage import QwenImagePipeline
@@ -87,9 +81,9 @@ class model_factory():
         source =  model_def.get("source", None)
 
         if source is not None:
-            offload.load_model_data(transformer, source, fused_split_map=_QWEN_FUSED_SPLIT_MAP, writable_tensors=False)
+            offload.load_model_data(transformer, source, fused_split_map=_QWEN_FUSED_SPLIT_MAP, writable_tensors=False, default_dtype=torch.bfloat16)
         else:
-            offload.load_model_data(transformer, transformer_filename, fused_split_map=_QWEN_FUSED_SPLIT_MAP, writable_tensors=False)
+            offload.load_model_data(transformer, transformer_filename, fused_split_map=_QWEN_FUSED_SPLIT_MAP, writable_tensors=False, default_dtype=torch.bfloat16)
         # transformer = offload.fast_load_transformers_model("transformer_quanto.safetensors", writable_tensors= True , modelClass=QwenImageTransformer2DModel, defaultConfigPath="transformer_config.json")
 
         if not source is None:
@@ -100,46 +94,36 @@ class model_factory():
             from wgp import save_quantized_model
             save_quantized_model(transformer, model_type, model_filename[0], dtype, base_config_file)
 
-        text_encoder = offload.fast_load_transformers_model(text_encoder_filename,  writable_tensors= True , modelClass=Qwen2_5_VLForConditionalGeneration,  defaultConfigPath= fl.locate_file(os.path.join("Qwen2.5-VL-7B-Instruct", "config.json")) )
+        text_encoder = offload.fast_load_transformers_model(text_encoder_filename,  writable_tensors= True , modelClass=Qwen2_5_VLForConditionalGeneration,  defaultConfigPath= os.path.join(tokenizer_path, "config.json") )
         # text_encoder = offload.fast_load_transformers_model(text_encoder_filename, do_quantize=True,  writable_tensors= True , modelClass=Qwen2_5_VLForConditionalGeneration, defaultConfigPath="text_encoder_config.json", verboseLevel=2)
         # text_encoder.to(torch.float16)
         # offload.save_model(text_encoder, "text_encoder_quanto_fp16.safetensors", do_quantize= True)
-        use_Wan_VAE = False
         if base_model_type == "qwen_image_layered_20B":
             VAE_upsampling = None
             VAE_upsampler_factor = 1
+            preprocess_vae_sd = None
+            vae_checkpoint = "qwen_image_layered_vae_bf16.safetensors"
+            vae_config_file = "models/qwen/configs/qwen_image_layered_vae_config.json"
+            vae_override = model_def.get("vae_URL", None) or model_def.get("vae_URLs", None)
+            if isinstance(vae_override, list):
+                vae_override = vae_override[0] if len(vae_override) > 0 else None
+            if isinstance(vae_override, dict):
+                vae_override = vae_override.get("URLs", None)
+            if vae_override:
+                vae_checkpoint = vae_override
         else:
             VAE_upsampler_factor = 2 if VAE_upsampling is not None else 1
-
-        if use_Wan_VAE:
-            vae_checkpoint = "Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors" if VAE_upsampler_factor == 2 else "Wan2.1_VAE.safetensors"
-            from ..wan.modules.vae import WanVAE
-            vae = WanVAE( vae_pth=fl.locate_file(vae_checkpoint), dtype= VAE_dtype, upsampler_factor = VAE_upsampler_factor, device="cpu")
-            vae.device = "cuda" #self.device # need to set to cuda so that vae buffers are properly moved (although the rest will stay in the CPU)
-        else:
-            if base_model_type == "qwen_image_layered_20B":
-                convert_state_dict = None
-                vae_checkpoint = "qwen_image_layered_vae_bf16.safetensors"
-                vae_config_file = "models/qwen/configs/qwen_image_layered_vae_config.json"
-                vae_override = model_def.get("vae_URL", None) or model_def.get("vae_URLs", None)
-                if isinstance(vae_override, list):
-                    vae_override = vae_override[0] if len(vae_override) > 0 else None
-                if isinstance(vae_override, dict):
-                    vae_override = vae_override.get("URLs", None)
-                if vae_override:
-                    vae_checkpoint = vae_override
-            elif VAE_upsampler_factor ==2 :
+            if VAE_upsampler_factor == 2:
                 from .convert_diffusers_qwen_vae import convert_state_dict
+                preprocess_vae_sd = convert_state_dict
                 vae_checkpoint = "Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors"
-                vae_config_file = "qwen_vae_config.json"
             else:
-                convert_state_dict = None
+                preprocess_vae_sd = None
                 vae_checkpoint = "qwen_vae.safetensors"
-                vae_config_file = "qwen_vae_config.json"
-            vae = offload.fast_load_transformers_model( fl.locate_file(vae_checkpoint), writable_tensors= True , modelClass=AutoencoderKLQwenImage, defaultConfigPath= fl.locate_file(vae_config_file), configKwargs={"upsampler_factor": VAE_upsampler_factor}, preprocess_sd=convert_state_dict)
+            vae_config_file = "qwen_vae_config.json"
+        vae = offload.fast_load_transformers_model(fl.locate_file(vae_checkpoint), writable_tensors=False, modelClass=AutoencoderKLQwenImage, defaultConfigPath=fl.locate_file(vae_config_file), configKwargs={"upsampler_factor": VAE_upsampler_factor}, preprocess_sd=preprocess_vae_sd)
         vae.upsampling_set = VAE_upsampling
         self.pipeline = QwenImagePipeline(vae, text_encoder, tokenizer, transformer, processor)
-        self.pipeline.use_Wan_VAE = use_Wan_VAE
         self.vae=vae
         self.text_encoder=text_encoder
         self.tokenizer=tokenizer
@@ -170,6 +154,8 @@ class model_factory():
         masking_strength = 1.,
         model_mode = 0,
         outpainting_dims = None,
+        vae_upsampler=None,
+        set_progress_status=None,
         **bbargs
     ):
         # Generate with different aspect ratios
@@ -261,6 +247,11 @@ class model_factory():
 
         num_images_per_prompt = 1 if qwen_layered else batch_size
         layers = batch_size if qwen_layered else 1
+        def _vae_upsampler_progress(_phase, current_step=None, total_steps=None):
+            if callable(set_progress_status):
+                label = getattr(vae_upsampler, "progress_label", "VAE Spatial Upsampling")
+                set_progress_status(f"{label} in progress" if current_step is None or total_steps is None else f"{label} in progress ({int(current_step) + 1}/{int(total_steps)})")
+
         image = self.pipeline(
             prompt=input_prompt,
             negative_prompt=n_prompt,
@@ -284,6 +275,9 @@ class model_factory():
             outpainting_dims = outpainting_dims,
             qwen_edit_plus = qwen_edit_plus,
             VAE_tile_size = tile_size,
+            vae_upsampler=vae_upsampler,
+            vae_upsampler_seed=seed,
+            vae_upsampler_progress_callback=_vae_upsampler_progress,
         )      
         if image is None: return None
         return image.transpose(0, 1)
@@ -292,6 +286,6 @@ class model_factory():
         if image_mode !=2 or model_mode != 1: return [], []
         preloadURLs = get_model_recursive_prop(model_type,  "preload_URLs")
         if len(preloadURLs) == 0: return [], []
-        return [ fl.locate_file(os.path.basename(preloadURLs[0]))] , [1]
+        return [ os.path.abspath(fl.locate_file(os.path.basename(preloadURLs[0])))] , [1]
 
 

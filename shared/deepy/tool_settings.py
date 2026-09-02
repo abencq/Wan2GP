@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import copy
+import fnmatch
 import json
 import math
-import os
 import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from shared.utils.settings_bundle import SETTINGS_BUNDLE_ATTACHMENT_KEYS, WAN_GP_SETTINGS_SUFFIXES, is_wangp_settings_filename, load_first_settings_from_queue_zip
 from shared.utils.loras_mutipliers import merge_loras_settings
 from shared.deepy.config import (
     DEEPY_DEFAULT_EDIT_IMAGE,
     DEEPY_DEFAULT_GEN_IMAGE,
+    DEEPY_DEFAULT_GEN_SONG,
     DEEPY_DEFAULT_GEN_SPEECH_FROM_DESCRIPTION,
     DEEPY_DEFAULT_GEN_SPEECH_FROM_SAMPLE,
     DEEPY_DEFAULT_GEN_VIDEO,
     DEEPY_DEFAULT_GEN_VIDEO_WITH_SPEECH,
+    DEEPY_TEMPLATE_CONFIG_MIGRATIONS,
     DEEPY_TOOL_EDIT_IMAGE_KEY,
     DEEPY_TOOL_GEN_IMAGE_KEY,
+    DEEPY_TOOL_GEN_SONG_KEY,
     DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY,
     DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY,
     DEEPY_TOOL_GEN_VIDEO_KEY,
@@ -26,6 +30,7 @@ from shared.deepy.config import (
     get_deepy_config_value,
     normalize_deepy_tool_edit_image,
     normalize_deepy_tool_gen_image,
+    normalize_deepy_tool_gen_song,
     normalize_deepy_tool_gen_speech_from_description,
     normalize_deepy_tool_gen_speech_from_sample,
     normalize_deepy_tool_gen_video,
@@ -37,19 +42,22 @@ _DEEPY_DIR = Path(__file__).resolve().parent
 SETTINGS_DIR = _DEEPY_DIR / "settings"
 DEFAULT_IMAGE_EDITOR_VARIANT = DEEPY_DEFAULT_EDIT_IMAGE
 DEFAULT_VIDEO_WITH_SPEECH_VARIANT = DEEPY_DEFAULT_GEN_VIDEO_WITH_SPEECH
+DEFAULT_SONG_VARIANT = DEEPY_DEFAULT_GEN_SONG
 DEFAULT_SPEECH_FROM_DESCRIPTION_VARIANT = DEEPY_DEFAULT_GEN_SPEECH_FROM_DESCRIPTION
 DEFAULT_SPEECH_FROM_SAMPLE_VARIANT = DEEPY_DEFAULT_GEN_SPEECH_FROM_SAMPLE
 TOOL_DISPLAY_NAMES = {
     "gen_image": "Image Generator",
     "edit_image": "Image Editor",
-    "gen_video": "Video Generator",
+    "gen_video": "Media Generator",
     "gen_video_with_speech": "Video With Speech",
+    "gen_song": "Song Generator",
     "gen_speech_from_description": "Speech From Description",
     "gen_speech_from_sample": "Speech From Sample",
 }
 _TOOL_TEMPLATE_VALIDATION_ERRORS = {
     "gen_video": "The settings should generate a video",
     "gen_video_with_speech": "The settings should generate a Video and accept an Audio Prompt",
+    "gen_song": "The settings should generate music",
     "gen_image": "The settings of the model must generate an Image",
     "edit_image": "The settings of the model must generate an Image and accept an Image Ref",
     "gen_speech_from_description": "The model should generate only an audio output",
@@ -64,6 +72,7 @@ _TOOL_CONFIG_SPECS = {
         "default": DEEPY_DEFAULT_GEN_VIDEO_WITH_SPEECH,
         "normalize": normalize_deepy_tool_gen_video_with_speech,
     },
+    "gen_song": {"key": DEEPY_TOOL_GEN_SONG_KEY, "default": DEEPY_DEFAULT_GEN_SONG, "normalize": normalize_deepy_tool_gen_song},
     "gen_speech_from_description": {
         "key": DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY,
         "default": DEEPY_DEFAULT_GEN_SPEECH_FROM_DESCRIPTION,
@@ -84,7 +93,8 @@ _PRESET_SOURCE_PRIORITY = {
 _LEGACY_VARIANT_ALIASES = {
     "edit_image": {"Qwen_Edit": DEEPY_DEFAULT_EDIT_IMAGE},
     "gen_image": {"Z_Image_Turbo": DEEPY_DEFAULT_GEN_IMAGE},
-    "gen_video": {"ltx2_22B_distilled": DEEPY_DEFAULT_GEN_VIDEO},
+    "gen_video": {"ltx2_22B_distilled": DEEPY_DEFAULT_GEN_VIDEO, "LTX-2 2.3 Distilled": DEEPY_DEFAULT_GEN_VIDEO, **DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_GEN_VIDEO_KEY]},
+    "gen_video_with_speech": {"LTX-2.3 Distilled With Sound": "LTX-2.3 Distilled 1.0 With Sound", **DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY]},
 }
 _LIVE_FILE_PRESET_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 GENERATION_TOOL_IDS = tuple(_TOOL_CONFIG_SPECS.keys())
@@ -111,7 +121,7 @@ def _get_configured_tool_variant(tool_name: str) -> str:
 
 def _looks_like_linked_variant(value: Any) -> bool:
     text = str(value or "").strip().strip('"').replace("\\", "/")
-    if len(text) == 0 or not text.lower().endswith(".json"):
+    if len(text) == 0 or not is_wangp_settings_filename(text):
         return False
     if text.startswith("/") or text.startswith("./") or text.startswith("../"):
         return False
@@ -168,7 +178,7 @@ def _resolve_linked_variant_path(value: Any) -> Path | None:
     except Exception:
         return None
     candidate = (lora_dir / filename).resolve()
-    if candidate.is_file() and candidate.suffix.lower() == ".json":
+    if candidate.is_file() and candidate.suffix.lower() in WAN_GP_SETTINGS_SUFFIXES:
         return candidate
     return None
 
@@ -300,7 +310,7 @@ def get_tool_variant_model_def(tool_name: str, variant: Any) -> dict[str, Any] |
 
 def resolve_wangp_settings_file(state: Any, selected_value: Any) -> Path | None:
     value = str(selected_value or "").strip()
-    if len(value) == 0 or "/" in value or "\\" in value or not value.lower().endswith(".json"):
+    if len(value) == 0 or "/" in value or "\\" in value or not is_wangp_settings_filename(value):
         return None
     get_state_model_type = _get_main_callable("get_state_model_type")
     get_lora_dir = _get_main_callable("get_lora_dir")
@@ -312,14 +322,20 @@ def resolve_wangp_settings_file(state: Any, selected_value: Any) -> Path | None:
     except Exception:
         return None
     source_path = (lora_dir / Path(value).name).resolve()
-    if source_path.is_file() and source_path.suffix.lower() == ".json":
+    if source_path.is_file() and source_path.suffix.lower() in WAN_GP_SETTINGS_SUFFIXES:
         return source_path
     return None
 
 
 def _load_wangp_settings_payload(source_path: Path) -> dict[str, Any]:
-    with Path(source_path).resolve().open("r", encoding="utf-8") as reader:
-        payload = json.load(reader)
+    source_path = Path(source_path).resolve()
+    if source_path.suffix.lower() == ".zip":
+        payload, source_task_count = load_first_settings_from_queue_zip(source_path, SETTINGS_BUNDLE_ATTACHMENT_KEYS)
+        if source_task_count > 1:
+            print(f"[Deepy] Settings bundle {source_path.name} contains {source_task_count} tasks; only the first task was extracted.")
+    else:
+        with source_path.open("r", encoding="utf-8") as reader:
+            payload = json.load(reader)
     if not isinstance(payload, dict):
         raise TypeError(f"WanGP settings file '{Path(source_path).name}' must contain a JSON object.")
     return payload
@@ -395,20 +411,18 @@ def _resolve_tool_lora_dir(tool_name: str, variant: str) -> tuple[str, Path]:
 def _list_tool_lora_entries(tool_name: str, variant: str) -> list[tuple[str, str]]:
     lookup_name = str(tool_name or "").strip()
     if lookup_name not in GENERATION_TOOL_IDS:
-        raise ValueError(f"LoRAs are only available for the 6 generation tools: {', '.join(GENERATION_TOOL_IDS)}.")
+        raise ValueError(f"LoRAs are only available for the configured generation tools: {', '.join(GENERATION_TOOL_IDS)}.")
     _model_type, lora_dir = _resolve_tool_lora_dir(lookup_name, variant)
     if not lora_dir.is_dir():
         return []
     url_cache = _read_loras_url_cache()
     discovered: dict[str, tuple[str, str]] = {}
-    for pattern in ("*.safetensors", "*.sft"):
-        for path in sorted(lora_dir.glob(pattern)):
-            if not path.is_file():
-                continue
-            filename = path.name
-            cache_key = _normalize_lora_cache_path(lora_dir / filename)
-            original_entry = url_cache.get(cache_key, filename)
-            discovered.setdefault(_basename_lora_key(filename), (filename, original_entry))
+    paths = sorted((path for path in lora_dir.rglob("*") if path.is_file() and path.suffix.casefold() in (".safetensors", ".sft")), key=lambda path: path.relative_to(lora_dir).as_posix().casefold())
+    for path in paths:
+        identifier = path.relative_to(lora_dir).as_posix()
+        cache_key = _normalize_lora_cache_path(lora_dir / identifier)
+        original_entry = url_cache.get(cache_key, identifier)
+        discovered.setdefault(_normalize_lora_cache_path(identifier), (identifier, original_entry))
     return sorted(discovered.values(), key=lambda item: item[0].casefold())
 
 
@@ -446,12 +460,13 @@ def validate_wangp_settings_payload_for_tool(tool_name: str, payload: dict[str, 
         return None
     image_mode = _int_setting(payload, "image_mode")
     accepts_audio_prompt = "A" in str(payload.get("audio_prompt_type", "") or "")
-    has_image_refs = _sequence_setting_has_value(payload, "image_refs")
+    has_image_refs = "I" in payload.get("video_prompt_type", "")
     model_def = _get_model_def_from_settings_payload(payload)
     audio_only = bool(model_def.get("audio_only", False)) if isinstance(model_def, dict) else False
     checks = {
         "gen_video": image_mode == 0,
         "gen_video_with_speech": image_mode == 0 and accepts_audio_prompt,
+        "gen_song": audio_only and isinstance(model_def, dict) and str(model_def.get("group", "") or "").strip() == "music",
         "gen_image": image_mode == 1,
         "edit_image": image_mode == 1 and has_image_refs,
         "gen_speech_from_description": audio_only,
@@ -466,7 +481,7 @@ def validate_wangp_settings_for_tool(tool_name: str, source_path: Path) -> str |
 
 def build_linked_tool_variant(state: Any, source_path: Path) -> str:
     source_file = Path(source_path).resolve()
-    if not source_file.is_file() or source_file.suffix.lower() != ".json":
+    if not source_file.is_file() or source_file.suffix.lower() not in WAN_GP_SETTINGS_SUFFIXES:
         raise FileNotFoundError(f"Deepy source settings file not found: {source_file}")
     payload = _load_wangp_settings_payload(source_file)
     model_type = str(payload.get("model_type", "")).strip()
@@ -533,6 +548,11 @@ def get_default_image_editor_variant() -> str:
 def get_default_video_with_speech_variant() -> str:
     configured = _get_configured_tool_variant("gen_video_with_speech")
     return resolve_tool_variant("gen_video_with_speech", configured, default_variant=DEEPY_DEFAULT_GEN_VIDEO_WITH_SPEECH)
+
+
+def get_default_song_variant() -> str:
+    configured = _get_configured_tool_variant("gen_song")
+    return resolve_tool_variant("gen_song", configured, default_variant=DEEPY_DEFAULT_GEN_SONG)
 
 
 def get_default_speech_from_description_variant() -> str:
@@ -612,8 +632,10 @@ def refresh_tool_presets() -> None:
     _LIVE_FILE_PRESET_CACHE.clear()
 
 
-def list_tool_loras(tool_name: str, variant: str) -> list[str]:
-    return [filename for filename, _original_entry in _list_tool_lora_entries(tool_name, variant)]
+def list_tool_loras(tool_name: str, variant: str, name: str | None = None) -> list[str]:
+    identifiers = [filename for filename, _original_entry in _list_tool_lora_entries(tool_name, variant)]
+    pattern = str(name or "").strip().casefold()
+    return identifiers if len(pattern) == 0 else [identifier for identifier in identifiers if fnmatch.fnmatchcase(identifier.casefold(), pattern)]
 
 
 def normalize_tool_loras(tool_name: str, variant: str, loras: Any) -> tuple[list[str], str]:
@@ -622,7 +644,7 @@ def normalize_tool_loras(tool_name: str, variant: str, loras: Any) -> tuple[list
     if not isinstance(loras, list):
         raise TypeError("loras must be an array of objects.")
     available_loras = _list_tool_lora_entries(tool_name, variant)
-    available_by_key = {_basename_lora_key(filename): (filename, original_entry) for filename, original_entry in available_loras}
+    available_by_key = {_normalize_lora_cache_path(filename): (filename, original_entry) for filename, original_entry in available_loras}
     normalized_loras = []
     multiplier_tokens = []
     seen_keys: set[str] = set()
@@ -635,15 +657,15 @@ def normalize_tool_loras(tool_name: str, variant: str, loras: Any) -> tuple[list
             raw_multiplier = item.get("multiplier", 1)
         else:
             raise TypeError(f"LoRA entry #{index} must be an object with a name.")
-        raw_name = Path(str(raw_name or "").strip().replace("\\", "/")).name
+        raw_name = str(raw_name or "").strip().replace("\\", "/")
         if len(raw_name) == 0:
-            raise ValueError(f"LoRA entry #{index} is missing a filename.")
-        lora_key = _basename_lora_key(raw_name)
+            raise ValueError(f"LoRA entry #{index} is missing an identifier.")
+        lora_key = _normalize_lora_cache_path(raw_name)
         if lora_key in seen_keys:
             raise ValueError(f"LoRA '{raw_name}' was provided more than once.")
         resolved_entry = available_by_key.get(lora_key, None)
         if resolved_entry is None:
-            raise ValueError(f"Unknown LoRA filename '{raw_name}' for tool '{tool_name}'. Call get_loras first.")
+            raise ValueError(f"Unknown LoRA identifier '{raw_name}' for tool '{tool_name}'. Call get_loras first.")
         _resolved_name, original_entry = resolved_entry
         normalized_loras.append(original_entry)
         multiplier_tokens.append(_format_lora_multiplier(raw_multiplier))
@@ -756,6 +778,7 @@ __all__ = [
     "find_tool_variant",
     "get_default_image_editor_variant",
     "get_default_image_generator_variant",
+    "get_default_song_variant",
     "get_default_speech_from_description_variant",
     "get_default_speech_from_sample_variant",
     "get_default_video_generator_variant",

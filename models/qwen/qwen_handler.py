@@ -23,6 +23,8 @@ class family_handler():
         extra_model_def["text_encoder_folder"] = text_encoder_folder
 
         extra_model_def["vae_upsampler"] = [1,2]
+        extra_model_def["vae_upsamplers"] = {"qwen_vae_pid(1.5)": [1, 2]}
+        extra_model_def["excluded_spatial_upsamplers"] = ["qwen_pid(1.5)"]
 
         if base_model_type in ["qwen_image_layered_20B"]:
             extra_model_def["batch_size_label"] = "Number of Layers"
@@ -33,6 +35,8 @@ class family_handler():
                 "visible": False,
             }
             extra_model_def["vae_upsampler"] = [1]
+            extra_model_def["vae_upsamplers"] = {}
+            extra_model_def["excluded_spatial_upsamplers"] = []
             extra_model_def["sample_solvers"] = [("Default", "default")]
 
         if base_model_type in ["qwen_image_20B"]:
@@ -40,6 +44,7 @@ class family_handler():
             extra_model_def["inpaint_video_prompt_type"] = "VA"
             extra_model_def["image_video_prompt_type"] = ""            
             extra_model_def["video_guide_outpainting"] = [2]
+            extra_model_def["outpainting_quantize_margins"]= 16
             extra_model_def["model_modes"] = {
                         "choices": [
                             ("LanPaint (2 steps): ~2x slower, easy task", 2),
@@ -55,7 +60,8 @@ class family_handler():
         if base_model_type in ["qwen_image_edit_20B", "qwen_image_edit_plus_20B", "qwen_image_edit_plus2_20B"]:
             extra_model_def["inpaint_support"] = True
             if base_model_type in ["qwen_image_edit_plus_20B", "qwen_image_edit_plus2_20B"]:
-                extra_model_def["inpaint_video_prompt_type"]= "VAGI"            
+                extra_model_def["inpaint_video_prompt_type"]= "VAG"            
+                extra_model_def["inpaint_with_image_ref"]= True            
             extra_model_def["image_ref_inpaint"]=  base_model_type in ["qwen_image_edit_plus_20B", "qwen_image_edit_plus2_20B"]
             extra_model_def["image_ref_choices"] = {
             "choices": [
@@ -116,7 +122,7 @@ class family_handler():
 
     @staticmethod
     def query_family_infos():
-        return {"qwen":(110, "Qwen")}
+        return {"qwen":(1110, "Qwen")}
 
     @staticmethod
     def register_lora_cli_args(parser, lora_root):
@@ -135,18 +141,19 @@ class family_handler():
     def query_model_files(computeList, base_model_type, model_def=None):
         vae_files = ["qwen_vae.safetensors", "qwen_vae_config.json"]
         if base_model_type in ["qwen_image_layered_20B"]:
-            vae_files.append("qwen_image_layered_vae_bf16.safetensors")
+            vae_files = ["qwen_image_layered_vae_bf16.safetensors"]
         download_def = [{  
             "repoId" : "DeepBeepMeep/Qwen_image", 
             "sourceFolderList" :  ["", "Qwen2.5-VL-7B-Instruct"],
             "fileList" : [ vae_files, ["merges.txt", "tokenizer_config.json", "config.json", "vocab.json", "video_preprocessor_config.json", "preprocessor_config.json", "chat_template.json"]  ]
             }]
 
-        download_def  += [{
-            "repoId" : "DeepBeepMeep/Wan2.1", 
-            "sourceFolderList" :  [""  ],
-            "fileList" : [ ["Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors"]  ]   
-        }]
+        if base_model_type not in ["qwen_image_layered_20B"]:
+            download_def += [{
+                "repoId" : "DeepBeepMeep/Wan2.1", 
+                "sourceFolderList" :  [""  ],
+                "fileList" : [ ["Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors"]  ]   
+            }]
         return download_def
 
     @staticmethod
@@ -169,8 +176,7 @@ class family_handler():
             VAE_upsampling = VAE_upsampling,
         )
 
-        from ..wan.modules.vae import WanVAE
-        pipe = {"tokenizer" : pipe_processor.tokenizer, "transformer" : pipe_processor.transformer, "text_encoder" : pipe_processor.text_encoder, "vae" : pipe_processor.vae.model if isinstance(pipe_processor.vae, WanVAE) else pipe_processor.vae }
+        pipe = {"tokenizer" : pipe_processor.tokenizer, "transformer" : pipe_processor.transformer, "text_encoder" : pipe_processor.text_encoder, "vae" : pipe_processor.vae}
 
         return pipe_processor, pipe
 
