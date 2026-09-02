@@ -4,17 +4,20 @@ This system allows you to extend and customize the Wan2GP user interface and fun
 
 ## Table of Contents
 1.  [Plugin Structure](#plugin-structure)
+    *   [Reference Plugins and Specialized APIs](#reference-plugins-and-specialized-apis)
 2.  [Getting Started: Creating a Plugin](#getting-started-creating-a-plugin)
 3.  [Plugin Distribution and Installation](#plugin-distribution-and-installation)
 4.  [Plugin API Reference](#plugin-api-reference)
     *   [The `WAN2GPPlugin` Class](#the-wan2gpplugin-class)
     *   [Core Methods](#core-methods)
+    *   [Deepy Tool Registration](#deepy-tool-registration)
 5.  [Examples](#examples)
     *   [Example 1: Creating a New Tab](#example-1-creating-a-new-tab)
     *   [Example 2: Injecting UI Elements](#example-2-injecting-ui-elements)
     *   [Example 3: Advanced UI Injection and Interaction](#example-3-advanced-ui-injection-and-interaction)
     *   [Example 4: Accessing Global Functions and Variables](#example-4-accessing-global-functions-and-variables)
     *   [Example 5: Using Helper Modules (Relative Imports)](#example-5-using-helper-modules-relative-imports)
+    *   [Example 6: Extending Deepy Prime and Deepy Zero](#example-6-extending-deepy-prime-and-deepy-zero)
 6.  [Finding Component IDs](#finding-component-ids)
 
 ## Plugin Structure
@@ -31,6 +34,40 @@ A valid plugin folder must contain at a minimum:
 *   `__init__.py`: An empty file that tells Python to treat the directory as a package.
 *   `plugin.py`: The main file containing your class that inherits from `WAN2GPPlugin`.
 
+Community plugin folder names should use the `wan2gp-` prefix, for example `wan2gp-stable-diffusion-1-4`.
+
+Plugins may also include `plugin_info.json` for Plugin Manager metadata. Its optional `type` property can be a string or a list of strings. Missing `type` values default to `"app"`. Supported values are:
+*   `"app"`: an application plugin, usually with its own tab.
+*   `"extension"`: a feature plugin that does not add its own tab.
+*   `"processor"`: a processing plugin, such as a spatial upsampler today or future preprocessors/audio postprocessors.
+*   `"model"`: a plugin that provides model integrations.
+
+Model plugins declare their model integration in `plugin_info.json`. They may omit `plugin.py` when they only provide handlers and metadata. Use:
+*   `model_handlers`: a string or list of model handler module paths. Paths beginning with `.` or `./` are relative to the plugin package root; absolute import paths are also supported. Each module must expose a `family_handler` object, matching WanGP's built-in model handlers.
+*   `defaults`: the root folder containing model definition JSON files, equivalent to WanGP's built-in `defaults/`. Paths beginning with `.` are relative to the plugin root.
+*   `profiles`: the root folder containing built-in profile JSON folders, equivalent to WanGP's built-in `profiles/`. Paths beginning with `.` are relative to the plugin root.
+
+Example:
+```json
+{
+  "name": "My Model Pack",
+  "type": "model",
+  "model_handlers": [".models.my_family_handler"],
+  "defaults": "./defaults",
+  "profiles": "./profiles"
+}
+```
+
+### Reference Plugins and Specialized APIs
+
+Reference plugins:
+*   [Stable Diffusion 1.4 Model Plugin](https://github.com/deepbeepmeep/wan2gp-stable-diffusion-1-4): compact model plugin template that adds Stable Diffusion 1.4 using MMGP-managed UNet, text encoder, and VAE components.
+*   [Pixel Upsampler Template](https://github.com/deepbeepmeep/wan2gp-pixel-upsampler): compact spatial upsampler template that duplicates pixels and documents the upsampler handler contract.
+
+Specialized plugin APIs:
+*   Spatial upsamplers are documented in [Spatial Upsampler Plugin API](SPATIAL_UPSAMPLERS.md). Use this guide for post-processing upsamplers, VAE upsampler capability declarations, plugin-discovered `spatial_upsampler_handlers`, and extension offload object registration.
+*   Temporal upsamplers are documented in [Temporal Upsampler Plugin API](TEMPORAL_UPSAMPLERS.md). Use this guide for frame interpolation handlers, plugin-discovered `temporal_upsampler_handlers`, and temporal upsampler config sections.
+*   Audio processors are documented in [Audio Processor Plugin API](AUDIO_PROCESSORS.md). Use this guide for soundtrack, voice replacement, standalone audio edit handlers, plugin-discovered `audio_processors`, and audio processor config sections.
 
 A complete plugin folder typically looks like this:
 
@@ -137,11 +174,89 @@ If you used `add_tab`, these methods will be called automatically when your tab 
 #### `on_model_change(self, state, model_type)`
 This optional callback runs when the main model selection changes in the Gradio UI. `state["model_type"]` has already been updated, so plugins can use it to refresh per-model caches, reset plugin state, or synchronize custom UI logic.
 
+#### Switching the Main Model
+Plugins can reuse WanGP's normal model-switch flow by requesting the hidden target component and the public helper:
+
+```python
+def setup_ui(self):
+    self.request_component("model_choice_target")
+    self.request_component("main_tabs")
+    self.request_global("switch_to_model")
+```
+
+`switch_to_model(model_type, open_media_tab=False)` returns two values: the model switch target update and a main-tab update. Wire them to `[self.model_choice_target, self.main_tabs]`. Keep `open_media_tab=False` to stay in the plugin, or pass `True` to open the Media Generator tab.
+
 #### `set_global(self, variable_name, new_value)`
 Allows your plugin to safely modify a global variable in the main `wgp.py` application.
 
 #### `register_data_hook(self, hook_name, callback)`
 Allows you to intercept and modify data at key points. For example, the `before_metadata_save` hook lets you add custom data to the metadata before it's saved to a file.
+
+### Deepy Tool Registration
+
+An enabled plugin can expose ordinary Python callables to either Deepy runtime. Register tools in `setup_ui`; a plugin does not need to create a tab. The plugin manager publishes the declarations after `setup_ui` completes, and only tools belonging to enabled plugins are visible. Plugin and tool changes require a WanGP restart, and already-open Deepy sessions do not refresh their tool catalog.
+
+#### Deepy Prime MCP tools
+
+```python
+self.register_deepy_prime_tool(
+    function,
+    *,
+    name=None,
+    display_name=None,
+    description=None,
+    pause_runtime=True,
+    pause_reason="tool",
+    requires_file_system=False,
+)
+```
+
+This registers `function` on Deepy Prime's in-process MCP server. FastMCP builds the input schema from the callable's type annotations, defaults, and docstring. Both synchronous and asynchronous functions are supported.
+
+Arguments:
+
+*   `function`: A callable using named parameters. Positional-only parameters, `*args`, and `**kwargs` are rejected.
+*   `name`: Optional MCP tool name. It defaults to `function.__name__` and must match `[A-Za-z_][A-Za-z0-9_]*`.
+*   `display_name`: Optional short label shown in the Deepy chat UI. It defaults to the title-cased tool name.
+*   `description`: Optional model-facing description. It defaults to the function docstring.
+*   `pause_runtime`: When `True`, WanGP pauses/releases Deepy's local model runtime before calling the tool so the plugin can use its resources. Set it to `False` for lightweight CPU-only work.
+*   `pause_reason`: Internal pause category reported to Deepy's runtime. Plugins normally leave this as `"tool"`.
+*   `requires_file_system`: When `True`, the tool is omitted unless Deepy's filesystem-reading option is enabled. This controls discovery only; the plugin remains responsible for validating paths and access inside the callable.
+
+The helper returns the original callable. A Prime tool name cannot replace a built-in MCP tool or one registered by another enabled plugin.
+
+#### Deepy Zero native tools
+
+```python
+self.register_deepy_zero_tool(
+    function,
+    *,
+    name=None,
+    display_name=None,
+    description=None,
+    parameters=None,
+    pause_runtime=True,
+    pause_reason="tool",
+    requires_file_system=False,
+)
+```
+
+This registers a synchronous callable in Deepy Zero's native tool list. `name`, `display_name`, `description`, `pause_runtime`, `pause_reason`, and `requires_file_system` have the same meanings as for Prime. Zero functions must be synchronous.
+
+`parameters` is an optional dictionary keyed by exact Python parameter name. Each value may contain:
+
+*   `description`: Model-facing explanation of the argument.
+*   `type`: Optional JSON-schema type override. Without it, Zero infers `string`, `integer`, `number`, `boolean`, `array`, or `object` from the Python annotation.
+*   `required`: Optional Boolean override. Without it, parameters without a Python default are required and parameters with a default are optional.
+*   Any additional JSON-schema properties that should be advertised to the model, such as `enum`, `minimum`, `maximum`, `items`, or `maxItems`.
+
+Unknown parameter names are rejected during plugin setup. A Zero tool name cannot replace a built-in Zero tool or one registered by another enabled plugin.
+
+#### Shared callable contract
+
+The same bound method may be registered once for Prime and once for Zero, even with the same name; the two namespaces are independent. At invocation time WanGP passes tool arguments as keyword arguments. Prime's MCP layer validates its generated schema. Zero checks required values, while other schema constraints guide the model; a Zero callable must still validate semantic limits and untrusted input. Return a JSON-serializable value such as a dictionary, list, string, number, Boolean, or `None`. Unhandled exceptions are reported to Deepy as tool failures.
+
+Registration happens before requested WanGP globals and Gradio components are injected, but the bound method runs later and may use attributes requested with `request_global`. Tool functions run in Deepy's backend worker rather than a Gradio event callback, so they should not mutate Gradio components directly.
 
 ## Examples
 
@@ -384,6 +499,49 @@ class HelperPlugin(WAN2GPPlugin):
             
             btn.click(fn=format_greeting, inputs=[name_input], outputs=[output])
         return demo
+```
+
+### Example 6: Extending Deepy Prime and Deepy Zero
+
+This extension exposes one implementation to both Deepy runtimes. Prime receives a normal MCP function; Zero receives its classic native equivalent.
+
+```python
+# in plugins/preset_lookup/plugin.py
+from shared.utils.plugins import WAN2GPPlugin
+
+
+class PresetLookupPlugin(WAN2GPPlugin):
+    def __init__(self):
+        super().__init__()
+        self.name = "Preset Lookup"
+        self.description = "Lets Deepy search this plugin's presets."
+
+    def setup_ui(self):
+        self.register_deepy_prime_tool(
+            self.search_presets,
+            name="preset_lookup",
+            display_name="Search Plugin Presets",
+            pause_runtime=False,
+        )
+        self.register_deepy_zero_tool(
+            self.search_presets,
+            name="preset_lookup",
+            display_name="Search Plugin Presets",
+            parameters={
+                "query": {"description": "Words to match in preset names and descriptions."},
+                "limit": {"description": "Maximum results to return.", "minimum": 1, "maximum": 20},
+            },
+            pause_runtime=False,
+        )
+
+    def search_presets(self, query: str, limit: int = 5) -> dict:
+        """Search the plugin preset catalog and return the best matches."""
+        matches = self._search_catalog(query)[:limit]
+        return {"status": "done", "matches": matches}
+
+    def _search_catalog(self, query: str) -> list[dict]:
+        # Replace with the plugin's real lookup implementation.
+        return [{"name": "Example", "description": query}]
 ```
 
 ## Finding Component IDs

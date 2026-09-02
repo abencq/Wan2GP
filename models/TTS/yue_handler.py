@@ -1,5 +1,7 @@
 import os
 
+from shared.mps import mps_device
+
 
 YUE_STAGE1_COT_REPO = "m-a-p/YuE-s1-7B-anneal-en-cot"
 YUE_STAGE1_ICL_REPO = "m-a-p/YuE-s1-7B-anneal-en-icl"
@@ -135,7 +137,7 @@ class family_handler:
 
     @staticmethod
     def query_family_infos():
-        return {"tts": (200, "TTS")}
+        return {"tts": (2200, "TTS")}
 
     @staticmethod
     def register_lora_cli_args(parser, lora_root):
@@ -187,6 +189,7 @@ class family_handler:
         pipeline = YuePipeline(
             stage1_weights_path=stage1_weights,
             stage2_weights_path=stage2_weights,
+            device=mps_device(),
             use_audio_prompt=bool(model_def.get("yue_audio_prompt", False)),
             max_new_tokens=model_def.get("yue_max_new_tokens", 200),
             run_n_segments=model_def.get("yue_run_n_segments", 1),

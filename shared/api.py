@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import fnmatch
 import importlib
 import io
 import json
+import math
 import numpy as np
 import os
 import queue
@@ -14,12 +16,14 @@ import re
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from PIL import Image
 
+from shared.utils.frame_scheduler import normalize_output_frame_count
 from shared.utils.process_locks import set_main_generation_running
 from shared.utils.virtual_media import get_virtual_media_vsource, parse_virtual_media_path, replace_virtual_media_source
 
@@ -30,6 +34,118 @@ _BANNER_PRINTED = False
 _STATUS_STEP_PREFIX_RE = re.compile(r"^(?:prompt|sample|sliding window|window|chunk|task|step|phase|pass)\s+\d+\s*/\s*\d+\s*(?:,\s*)?", re.IGNORECASE)
 _STATUS_INDEX_RE = re.compile(r"^\[\s*\d+\s*/\s*\d+\s*\]\s*")
 _STATUS_TIME_ONLY_RE = re.compile(r"^[\d:.]+\s*[smh]?$", re.IGNORECASE)
+_SECONDS_FRAME_COUNT_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*s\s*$", re.IGNORECASE)
+
+
+def _has_media_setting(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(_has_media_setting(item) for item in value)
+    return True
+
+
+def _declared_choice_values(definition: Any) -> list[str]:
+    if not isinstance(definition, dict):
+        return []
+    values = []
+    for choice in definition.get("choices", ()) or ():
+        value = choice[1] if isinstance(choice, (list, tuple)) and len(choice) > 1 else choice
+        value = str(value or "")
+        if value not in values:
+            values.append(value)
+    for value in definition.get("selection", ()) or ():
+        value = str(value or "")
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def _add_unique_flags(existing: Any, flags: str) -> str:
+    value = str(existing or "")
+    for flag in str(flags or ""):
+        if flag not in value:
+            value += flag
+    return value
+
+
+def apply_media_flag_defaults(settings: dict[str, Any], model_def: dict[str, Any]) -> dict[str, str]:
+    inferred = {}
+    image_prompt_type = str(settings.get("image_prompt_type", "") or "")
+    allowed_image_flags = str(model_def.get("image_prompt_types_allowed", "") or "")
+    if not any(flag in image_prompt_type for flag in "SVL"):
+        if _has_media_setting(settings.get("video_source")) and "V" in allowed_image_flags:
+            image_prompt_type = _add_unique_flags(image_prompt_type, "V")
+        elif _has_media_setting(settings.get("image_start")) and "S" in allowed_image_flags:
+            image_prompt_type = _add_unique_flags(image_prompt_type, "S")
+    if _has_media_setting(settings.get("image_end")) and "E" in allowed_image_flags:
+        image_prompt_type = _add_unique_flags(image_prompt_type, "E")
+    if image_prompt_type != str(settings.get("image_prompt_type", "") or ""):
+        settings["image_prompt_type"] = image_prompt_type
+        inferred["image_prompt_type"] = image_prompt_type
+
+    video_prompt_type = str(settings.get("video_prompt_type", "") or "")
+    if _has_media_setting(settings.get("image_refs")) and "I" not in video_prompt_type:
+        reference_mode = next((value for value in _declared_choice_values(model_def.get("image_ref_choices")) if "I" in value), "")
+        if reference_mode:
+            video_prompt_type = _add_unique_flags(video_prompt_type, reference_mode)
+            settings["video_prompt_type"] = video_prompt_type
+            inferred["video_prompt_type"] = video_prompt_type
+
+    audio_prompt_type = str(settings.get("audio_prompt_type", "") or "")
+    has_audio_guide = _has_media_setting(settings.get("audio_guide"))
+    has_audio_guide2 = _has_media_setting(settings.get("audio_guide2"))
+    if has_audio_guide or has_audio_guide2:
+        required_flag = "B" if has_audio_guide2 else "A"
+        audio_mode = next((value for value in _declared_choice_values(model_def.get("audio_prompt_type_sources")) if required_flag in value), "")
+        if audio_mode and required_flag not in audio_prompt_type:
+            audio_prompt_type = _add_unique_flags(audio_prompt_type, audio_mode)
+            settings["audio_prompt_type"] = audio_prompt_type
+            inferred["audio_prompt_type"] = audio_prompt_type
+    return inferred
+
+
+def _model_frames_maximum(runtime_module: Any, model_type: str, model_def: dict[str, Any]) -> int:
+    handler_defaults = {}
+    runtime_module.get_model_handler(model_type).update_default_settings(model_def["architecture"], model_def, handler_defaults)
+    sliding_window_size = handler_defaults.get("sliding_window_size")
+    if sliding_window_size is not None:
+        return sliding_window_size
+    sliding_window_size = model_def.get("sliding_window_defaults", {}).get("window_default")
+    if sliding_window_size is not None:
+        return sliding_window_size
+    return normalize_output_frame_count(97, model_def.get("frames_minimum", 5), model_def.get("frames_steps", 4), model_def.get("frames_offset", 1))
+
+
+def apply_video_length_duration(settings: dict[str, Any], model_def: dict[str, Any]) -> dict[str, Any] | None:
+    raw_value = settings.get("video_length")
+    if not isinstance(raw_value, str) or not raw_value.strip().lower().endswith("s"):
+        return None
+    match = _SECONDS_FRAME_COUNT_RE.fullmatch(raw_value)
+    if match is None:
+        raise ValueError("video_length seconds must use a positive value such as '10s' or '5.5s'")
+    seconds = float(match.group(1))
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("video_length seconds must be greater than zero")
+    force_fps = settings.get("force_fps")
+    fps = None
+    if isinstance(force_fps, (int, float)) and not isinstance(force_fps, bool):
+        fps = float(force_fps)
+    elif isinstance(force_fps, str) and force_fps.strip():
+        try:
+            fps = float(force_fps)
+        except ValueError:
+            pass
+    if fps is None:
+        fps = float(model_def.get("fps", 16))
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError("A positive numeric force_fps or model fps is required when video_length uses seconds")
+    requested_frames = int(round(seconds * fps))
+    frames = normalize_output_frame_count(requested_frames, model_def.get("frames_minimum", 5), model_def.get("frames_steps", 4), model_def.get("frames_offset", 1))
+    settings["video_length"] = frames
+    return {"input": raw_value, "seconds": seconds, "fps": fps, "frames": frames}
 
 
 def extract_status_phase_label(text: str | None) -> str:
@@ -39,7 +155,7 @@ def extract_status_phase_label(text: str | None) -> str:
     parts = [part.strip() for part in raw_text.split("|") if len(part.strip()) > 0] or [raw_text]
     stripped_wrapper = False
     for part in parts:
-        phase_text = part.rsplit(" - ", 1)[-1].strip()
+        phase_text = part
         while True:
             cleaned = _STATUS_INDEX_RE.sub("", phase_text)
             cleaned = _STATUS_STEP_PREFIX_RE.sub("", cleaned)
@@ -98,6 +214,7 @@ class GeneratedArtifact:
     audio_tensor: Any = None
     audio_sampling_rate: int | None = None
     fps: float | None = None
+    flashvsr_continue_cache: Any = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any], *, default_client_id: str = "") -> "GeneratedArtifact | None":
@@ -113,6 +230,7 @@ class GeneratedArtifact:
             audio_tensor=payload.get("audio_tensor"),
             audio_sampling_rate=payload.get("audio_sampling_rate"),
             fps=payload.get("fps"),
+            flashvsr_continue_cache=payload.get("flashvsr_continue_cache"),
         )
 
 
@@ -162,13 +280,17 @@ def _coerce_api_video_tensor_uint8(output_video_frames: Any) -> Any:
     except Exception:
         torch = None
     if torch is not None and torch.is_tensor(output_video_frames):
-        return output_video_frames if output_video_frames.dtype == torch.uint8 else None
+        if output_video_frames.dtype == torch.uint8:
+            return output_video_frames
+        return output_video_frames.detach().cpu().float().clamp(-1, 1).add(1.0).mul(127.5).round().to(torch.uint8)
     if isinstance(output_video_frames, list) and len(output_video_frames) == 1 and torch is not None and torch.is_tensor(output_video_frames[0]):
-        return output_video_frames[0] if output_video_frames[0].dtype == torch.uint8 else None
+        return _coerce_api_video_tensor_uint8(output_video_frames[0])
     if isinstance(output_video_frames, list) and torch is not None:
         tensors = [item for item in output_video_frames if torch.is_tensor(item)]
         if len(tensors) == len(output_video_frames) and tensors and all(item.dtype == torch.uint8 and item.ndim == 4 for item in tensors):
             return torch.cat(tensors, dim=1)
+        if len(tensors) == len(output_video_frames) and tensors and all(item.dtype != torch.uint8 and item.ndim == 4 for item in tensors):
+            return torch.cat([_coerce_api_video_tensor_uint8(item) for item in tensors], dim=1)
     return None
 
 
@@ -192,7 +314,7 @@ def _coerce_api_audio_tensor(output_audio_data: Any) -> Any:
     return None if output_audio_data is None else np.asarray(output_audio_data, dtype=np.float32)
 
 
-def build_api_output_artifact_payload(client_id: str, video_path: Any, media_type: str, output_video_frames: Any, output_audio_data: Any, output_audio_sampling_rate: Any, output_fps: Any, *, hdr: bool = False) -> dict[str, Any] | None:
+def build_api_output_artifact_payload(client_id: str, video_path: Any, media_type: str, output_video_frames: Any, output_audio_data: Any, output_audio_sampling_rate: Any, output_fps: Any, *, hdr: bool = False, flashvsr_continue_cache: Any = None) -> dict[str, Any] | None:
     client_id = str(client_id or "").strip()
     if len(client_id) == 0:
         return None
@@ -207,11 +329,12 @@ def build_api_output_artifact_payload(client_id: str, video_path: Any, media_typ
         "audio_tensor": _coerce_api_audio_tensor(output_audio_data),
         "audio_sampling_rate": int(output_audio_sampling_rate) if output_audio_sampling_rate else None,
         "fps": float(output_fps) if output_fps else None,
+        "flashvsr_continue_cache": flashvsr_continue_cache,
     }
 
 
-def store_api_output_artifact(gen: dict[str, Any], client_id: str, video_path: Any, media_type: str, output_video_frames: Any, output_audio_data: Any, output_audio_sampling_rate: Any, output_fps: Any, *, hdr: bool = False) -> bool:
-    payload = build_api_output_artifact_payload(client_id, video_path, media_type, output_video_frames, output_audio_data, output_audio_sampling_rate, output_fps, hdr=hdr)
+def store_api_output_artifact(gen: dict[str, Any], client_id: str, video_path: Any, media_type: str, output_video_frames: Any, output_audio_data: Any, output_audio_sampling_rate: Any, output_fps: Any, *, hdr: bool = False, flashvsr_continue_cache: Any = None) -> bool:
+    payload = build_api_output_artifact_payload(client_id, video_path, media_type, output_video_frames, output_audio_data, output_audio_sampling_rate, output_fps, hdr=hdr, flashvsr_continue_cache=flashvsr_continue_cache)
     if payload is None:
         return False
     gen.setdefault("api_output_artifacts", {})[payload["client_id"]] = payload
@@ -234,6 +357,15 @@ class SessionStream:
             return
         self._closed.set()
         self._queue.put(self._sentinel)
+
+    def clear(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        if self._closed.is_set():
+            self._queue.put(self._sentinel)
 
     def get(self, timeout: float | None = None) -> SessionEvent | None:
         try:
@@ -331,6 +463,7 @@ class SessionJob:
         self._done = threading.Event()
         self._cancel_requested = threading.Event()
         self._webui_submission_ready = threading.Event()
+        self._webui_submission_or_done = threading.Event()
         self._thread: threading.Thread | None = None
         self._result: GenerationResult | None = None
         self._webui_manifest: list[dict[str, Any]] = []
@@ -347,14 +480,23 @@ class SessionJob:
     def _set_result(self, result: GenerationResult) -> None:
         self._result = result
         self._done.set()
+        self._webui_submission_or_done.set()
 
     def _set_webui_bridge(self, *, manifest: Sequence[dict[str, Any]], client_ids: Sequence[str], load_queue_token: str) -> None:
         self._webui_manifest = copy.deepcopy(list(manifest))
         self._webui_client_ids = tuple(str(client_id or "").strip() for client_id in client_ids if str(client_id or "").strip())
         self._webui_load_queue_token = str(load_queue_token or "").strip()
 
+    def release_input_payload(self) -> None:
+        self._webui_manifest = []
+
+    def release_output_payload(self) -> None:
+        self._result = None
+        self.events.clear()
+
     def _mark_webui_submission_ready(self) -> None:
         self._webui_submission_ready.set()
+        self._webui_submission_or_done.set()
 
     def _bind_webui_owner_call(self, call_id: str) -> None:
         self._webui_owner_call_id = str(call_id or "").strip()
@@ -378,6 +520,10 @@ class SessionJob:
             failed_tasks=0,
             artifacts=(),
         )
+
+    def wait_for_webui_submission_or_completion(self, timeout: float | None = None) -> bool:
+        self._webui_submission_or_done.wait(timeout=timeout)
+        return self._webui_submission_ready.is_set()
 
     def join(self, timeout: float | None = None) -> GenerationResult:
         return self.result(timeout=timeout)
@@ -445,6 +591,197 @@ class WanGPSession:
         self._ensure_runtime()
         return self
 
+    def list_model_defs(self, *, family: str | Sequence[str] | None = None, base_model_type: str | Sequence[str] | None = None, finetune: bool | str | None = None, model_type: str | Sequence[str] | None = None, main_output: str | Sequence[str] | None = None, inputs: str | Sequence[str] | None = None, name: str | Sequence[str] | None = None, query: str | None = None, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            records = _strip_model_def_callables(runtime.module.list_model_defs(family=family, base_model_type=base_model_type, finetune=finetune, model_type=model_type, main_output=main_output, inputs=inputs))
+        name_patterns = [str(value).strip().casefold() for value in (name if isinstance(name, (list, tuple, set)) else [name]) if value is not None and str(value).strip()]
+        query_text = str(query or "").strip().casefold()
+        if name_patterns:
+            records = [record for record in records if any(fnmatch.fnmatchcase(str(record.get("name", "") or "").casefold(), pattern) for pattern in name_patterns)]
+        if query_text:
+            records = [
+                record for record in records
+                if query_text in " ".join(
+                    str(value or "").casefold()
+                    for value in (
+                        record.get("model_type"), record.get("name"), record.get("description"),
+                        record.get("metadata", {}).get("family"), record.get("metadata", {}).get("family_label"), record.get("metadata", {}).get("base_model_type"),
+                    )
+                )
+            ]
+        offset = max(0, int(offset or 0))
+        if limit is None:
+            return records[offset:]
+        limit = max(1, min(int(limit), 500))
+        return records[offset:offset + limit]
+
+    def get_model_defs(self, **filters: Any) -> list[dict[str, Any]]:
+        return self.list_model_defs(**filters)
+
+    def list_model_metadata(self, include_availability: bool = False, **filters: Any) -> list[dict[str, Any]]:
+        metadata_records = []
+        for model_def in self.list_model_defs(**filters):
+            metadata = copy.deepcopy(model_def.get("metadata", {}))
+            metadata.setdefault("model_type", str(model_def.get("model_type") or ""))
+            metadata["name"] = model_def.get("name", metadata.get("model_type", ""))
+            metadata_records.append(metadata)
+        if include_availability:
+            self._add_availability_to_metadata(metadata_records)
+        return metadata_records
+
+    def get_model_def(self, model_type: str) -> dict[str, Any] | None:
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            model_def = runtime.module.get_model_def(model_type)
+        if model_def is None:
+            return None
+        model_def = copy.deepcopy(model_def)
+        model_def["model_type"] = str(model_type)
+        return _strip_model_def_callables(model_def)
+
+    def get_model_metadata(self, model_type: str, include_availability: bool = False) -> dict[str, Any] | None:
+        model_def = self.get_model_def(model_type)
+        if model_def is None:
+            return None
+        metadata = copy.deepcopy(model_def.get("metadata", {}))
+        metadata.setdefault("model_type", str(model_type))
+        metadata["name"] = model_def.get("name", metadata.get("model_type", ""))
+        if include_availability:
+            metadata["availability"] = self.get_model_availability(model_type)
+        return metadata
+
+    def get_default_settings(self, model_type: str) -> dict[str, Any]:
+        if self.get_model_def(model_type) is None:
+            raise ValueError(f"Unknown model_type: {model_type}")
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            settings = copy.deepcopy(runtime.module.get_factory_settings(model_type))
+        settings["model_type"] = str(model_type)
+        return settings
+
+    def get_model_settings(self, model_type: str, setting_id: str | None = None) -> dict[str, Any]:
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            model_def = runtime.module.get_model_def(model_type)
+            if model_def is None:
+                raise ValueError(f"Unknown model_type: {model_type}")
+            entries = []
+            kinds = {"accelerator_profiles": ("accelerator_profile", "accelerator profile"), "preset_settings": ("preset", "preset")}
+            for group_id, _, paths in runtime.module._get_builtin_lset_groups(model_type):
+                prefix, setting_type = kinds[group_id]
+                entries += [{"id": f"{prefix}:{str(path).replace(chr(92), '/')}", "type": setting_type, "_path": runtime.module._builtin_lset_file_path(path)} for path in paths]
+            lora_dir = Path(runtime.module.get_lora_dir(model_type))
+            entries += [{"id": f"user_settings:{path.name}", "type": "user settings", "_path": str(path)} for path in sorted((*lora_dir.glob("*.json"), *lora_dir.glob("*.zip")), key=lambda path: path.name.casefold())]
+            if setting_id is None:
+                return {"model_type": str(model_type), "settings": [{key: value for key, value in entry.items() if key != "_path"} for entry in entries]}
+            entry = next((entry for entry in entries if entry["id"] == setting_id), None)
+            if entry is None:
+                raise ValueError(f"Unknown setting_id for {model_type}: {setting_id}")
+            path = Path(entry["_path"])
+            if path.suffix.lower() == ".zip":
+                with zipfile.ZipFile(path) as archive:
+                    manifest = json.loads(archive.read("queue.json").decode("utf-8"))
+                if not isinstance(manifest, list) or not manifest or not isinstance(manifest[0], dict):
+                    raise ValueError(f"Invalid settings bundle: {path.name}")
+                content = manifest[0].get("params", manifest[0])
+            else:
+                content = json.loads(path.read_text(encoding="utf-8"))
+            return {"model_type": str(model_type), "id": entry["id"], "type": entry["type"], "content": content}
+
+    def merge_settings_with_defaults(self, settings: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(settings, dict):
+            raise TypeError("settings must be a dictionary")
+        model_type = str(settings.get("model_type", "") or "").strip()
+        if not model_type:
+            raise ValueError("settings must include model_type")
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            if runtime.module.get_model_def(model_type) is None:
+                raise ValueError(f"Unknown model_type: {model_type}")
+            merged = copy.deepcopy(runtime.module.get_factory_settings(model_type))
+            merged.update(copy.deepcopy(settings))
+            runtime.module.clean_settings(model_type, merged)
+            merged["settings_version"] = runtime.module.settings_version
+        merged["model_type"] = model_type
+        return merged
+
+    def prepare_settings_for_export(self, settings: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(settings, dict):
+            raise TypeError("settings must be a dictionary")
+        model_type = str(settings.get("model_type", "") or "").strip()
+        if not model_type:
+            raise ValueError("settings must include model_type")
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            if runtime.module.get_model_def(model_type) is None:
+                raise ValueError(f"Unknown model_type: {model_type}")
+            prepared = copy.deepcopy(settings)
+            prepared["state"] = self._state
+            return runtime.module.prepare_inputs_dict("metadata", prepared, model_type)
+
+    def get_exported_default_settings(self, model_type: str) -> dict[str, Any]:
+        return self.prepare_settings_for_export(self.get_default_settings(model_type))
+
+    def list_loras(self, model_type: str, name: str | Sequence[str] | None = None) -> dict[str, Any]:
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            model_def = runtime.module.get_model_def(model_type)
+            if model_def is None:
+                raise ValueError(f"Unknown model_type: {model_type}")
+            if model_def.get("no_lora", False):
+                return {"model_type": str(model_type), "supported": False, "loras": [], "count": 0}
+            lora_dir = runtime.module.get_lora_dir(model_type)
+            loras = runtime.module.setup_loras(model_type, None, lora_dir, "", None)[0]
+        name_patterns = [str(value).strip().casefold() for value in (name if isinstance(name, (list, tuple, set)) else [name]) if value is not None and str(value).strip()]
+        if name_patterns:
+            loras = [lora for lora in loras if any(fnmatch.fnmatchcase(str(lora).casefold(), pattern) for pattern in name_patterns)]
+        return {"model_type": str(model_type), "supported": True, "loras": list(loras), "count": len(loras)}
+
+    def get_model_availability(self, model_type: str) -> dict[str, Any]:
+        if self.get_model_def(model_type) is None:
+            raise ValueError(f"Unknown model_type: {model_type}")
+        return self._get_model_availability_records([model_type])[0]
+
+    def _get_model_availability_records(self, model_types: Sequence[str]) -> list[dict[str, Any]]:
+        runtime = self._ensure_runtime()
+        with _pushd(runtime.root):
+            dropdown_deps = runtime.module._get_dropdown_deps()
+            return [
+                _model_availability_to_dict(model_type, runtime.module.model_dropdowns.get_model_download_status(dropdown_deps, model_type))
+                for model_type in model_types
+            ]
+
+    def list_model_availability(self, **filters: Any) -> list[dict[str, Any]]:
+        return self._get_model_availability_records([record["model_type"] for record in self.list_model_metadata(**filters)])
+
+    def _add_availability_to_metadata(self, metadata_records: list[dict[str, Any]]) -> None:
+        availability_records = self._get_model_availability_records([record["model_type"] for record in metadata_records])
+        availability_by_type = {record["model_type"]: record for record in availability_records}
+        for record in metadata_records:
+            record["availability"] = availability_by_type[record["model_type"]]
+
+    def get_model_schema(self, model_type: str) -> dict[str, Any] | None:
+        model_def = self.get_model_def(model_type)
+        if model_def is None:
+            return None
+        metadata = copy.deepcopy(model_def.get("metadata", {}))
+        metadata.pop("setting_values", None)
+        metadata.update({
+            "name": str(model_def.get("name", model_type) or model_type),
+            "model_type": str(model_type),
+            "description": str(model_def.get("description", "") or ""),
+            "fps": model_def.get("fps", None),
+            "frames_minimum": model_def.get("frames_minimum", None),
+            "frames_steps": model_def.get("frames_steps", None),
+            "infos": str(model_def.get("infos", "") or ""),
+            "prompt_infos": str(model_def.get("prompt_infos", "") or ""),
+            "sliding_window": bool(model_def.get("sliding_window", False)),
+        })
+        if "video" in metadata.get("outputs", []):
+            metadata["frames_maximum"] = _model_frames_maximum(self._ensure_runtime().module, model_type, model_def)
+        return {"metadata": metadata}
+
     def submit(self, source: str | os.PathLike[str] | dict[str, Any] | list[dict[str, Any]], callbacks: object | None = None) -> SessionJob:
         tasks = self._normalize_source(source, caller_base_path=self._get_caller_base_path())
         return self._submit_tasks(tasks, callbacks=callbacks)
@@ -453,6 +790,18 @@ class WanGPSession:
         caller_base_path = self._get_caller_base_path()
         task = self._normalize_task(settings, task_index=1)
         return self._submit_tasks([self._absolutize_task_paths(task, caller_base_path)], callbacks=callbacks)
+
+    def submit_media_postprocessing(self, media_source: str | os.PathLike[str], *, temporal_upsampling: str = "", spatial_upsampling: str = "", spatial_upsampler_prompt: str = "", spatial_upsampler_reference_images: list[str] | None = None, spatial_upsampler_face_count: int = 1, film_grain_intensity: float = 0, film_grain_saturation: float = 0.5, seed: int = -1, api_options: dict[str, Any] | None = None, return_media: bool = False, callbacks: object | None = None, **settings_overrides: Any) -> SessionJob:
+        settings = build_media_postprocessing_settings(media_source, temporal_upsampling=temporal_upsampling, spatial_upsampling=spatial_upsampling, spatial_upsampler_prompt=spatial_upsampler_prompt, spatial_upsampler_reference_images=spatial_upsampler_reference_images, spatial_upsampler_face_count=spatial_upsampler_face_count, film_grain_intensity=film_grain_intensity, film_grain_saturation=film_grain_saturation, seed=seed, api_options=api_options, return_media=return_media, **settings_overrides)
+        return self.submit_task(settings, callbacks=callbacks)
+
+    def submit_audio_remux(self, video_source: str | os.PathLike[str], *, postprocess_audio: str, audio_source: str | os.PathLike[str] | None = None, postprocess_audio_prompt: str = "", postprocess_audio_neg_prompt: str = "", seed: int = -1, repeat_generation: int = 1, replace_voice_sample: str | os.PathLike[str] | None = None, replace_voice_sample2: str | os.PathLike[str] | None = None, api_options: dict[str, Any] | None = None, return_media: bool = False, callbacks: object | None = None, **settings_overrides: Any) -> SessionJob:
+        settings = build_audio_remux_settings(video_source, postprocess_audio=postprocess_audio, audio_source=audio_source, postprocess_audio_prompt=postprocess_audio_prompt, postprocess_audio_neg_prompt=postprocess_audio_neg_prompt, seed=seed, repeat_generation=repeat_generation, replace_voice_sample=replace_voice_sample, replace_voice_sample2=replace_voice_sample2, api_options=api_options, return_media=return_media, **settings_overrides)
+        return self.submit_task(settings, callbacks=callbacks)
+
+    def submit_audio_postprocessing(self, audio_source: str | os.PathLike[str], *, postprocess_audio: str, replace_voice_sample: str | os.PathLike[str] | None = None, replace_voice_sample2: str | os.PathLike[str] | None = None, api_options: dict[str, Any] | None = None, return_media: bool = False, callbacks: object | None = None, **settings_overrides: Any) -> SessionJob:
+        settings = build_audio_postprocessing_settings(audio_source, postprocess_audio=postprocess_audio, replace_voice_sample=replace_voice_sample, replace_voice_sample2=replace_voice_sample2, api_options=api_options, return_media=return_media, **settings_overrides)
+        return self.submit_task(settings, callbacks=callbacks)
 
     def submit_manifest(self, settings_list: list[dict[str, Any]], callbacks: object | None = None) -> SessionJob:
         caller_base_path = self._get_caller_base_path()
@@ -471,6 +820,15 @@ class WanGPSession:
     def run_manifest(self, settings_list: list[dict[str, Any]], callbacks: object | None = None) -> GenerationResult:
         return self.submit_manifest(settings_list, callbacks=callbacks).result()
 
+    def run_media_postprocessing(self, media_source: str | os.PathLike[str], **kwargs: Any) -> GenerationResult:
+        return self.submit_media_postprocessing(media_source, **kwargs).result()
+
+    def run_audio_remux(self, video_source: str | os.PathLike[str], **kwargs: Any) -> GenerationResult:
+        return self.submit_audio_remux(video_source, **kwargs).result()
+
+    def run_audio_postprocessing(self, audio_source: str | os.PathLike[str], **kwargs: Any) -> GenerationResult:
+        return self.submit_audio_postprocessing(audio_source, **kwargs).result()
+
     def close(self) -> None:
         if self._use_webui_queue:
             return
@@ -484,9 +842,16 @@ class WanGPSession:
         if job is not None:
             job.cancel()
 
+    @property
+    def active_job(self) -> SessionJob | None:
+        with self._job_lock:
+            return self._active_job
+
     @staticmethod
     def _create_headless_state() -> dict[str, Any]:
         return {
+            "model_type": "",
+            "edit_model_type": "",
             "gen": {
                 "queue": [],
                 "in_progress": False,
@@ -807,9 +1172,19 @@ class WanGPSession:
             api_options = settings.pop("_api", None)
             if isinstance(api_options, dict):
                 normalized["plugin_data"]["api"] = copy.deepcopy(api_options)
-            runtime_settings_version = getattr(self._ensure_runtime().module, "settings_version", None)
+            runtime = self._ensure_runtime()
+            runtime_settings_version = getattr(runtime.module, "settings_version", None)
             if runtime_settings_version is not None:
                 settings.setdefault("settings_version", runtime_settings_version)
+            model_type = str(settings.get("model_type", "") or "").strip()
+            model_def = runtime.module.get_model_def(model_type) if model_type else None
+            if isinstance(model_def, dict):
+                duration_conversion = apply_video_length_duration(settings, model_def)
+                if duration_conversion is not None:
+                    print(f"WanGP API converted video_length={duration_conversion['input']!r} to {duration_conversion['frames']} frames at {duration_conversion['fps']:g} fps for {model_type}")
+                inferred_flags = apply_media_flag_defaults(settings, model_def)
+                if inferred_flags:
+                    print(f"WanGP API inferred media flags for {model_type}: {inferred_flags}")
             self._normalize_settings_values(settings)
             normalized.setdefault("prompt", settings.get("prompt", ""))
             normalized.setdefault("length", settings.get("video_length"))
@@ -819,6 +1194,12 @@ class WanGPSession:
 
     @staticmethod
     def _normalize_settings_values(settings: dict[str, Any]) -> None:
+        video_length = settings.get("video_length")
+        if isinstance(video_length, str):
+            try:
+                settings["video_length"] = int(video_length.strip())
+            except ValueError as exc:
+                raise ValueError("video_length must be an integer frame count or a duration such as '10s'") from exc
         force_fps = settings.get("force_fps")
         if isinstance(force_fps, (int, float)) and not isinstance(force_fps, bool):
             if isinstance(force_fps, float) and not force_fps.is_integer():
@@ -960,7 +1341,7 @@ class WanGPSession:
                 config_path=self._config_path,
                 cli_args=self._cli_args,
             )
-            _print_banner_once(module, enabled=not self._use_webui_queue)
+            _print_banner_once(module, enabled=not self._use_webui_queue and self._console_output)
             return _RUNTIME
 
     @staticmethod
@@ -986,7 +1367,7 @@ class WanGPSession:
 
     @staticmethod
     def _phase_supports_progress(phase: str | None) -> bool:
-        return str(phase or "") in {"inference", "inference_stage_1", "inference_stage_2", "inference_stage_3"}
+        return str(phase or "") in {"encoding_text", "inference", "inference_stage_1", "inference_stage_2", "inference_stage_3", "decoding"}
 
     @staticmethod
     def _estimate_progress(phase: str, current_step: int | None, total_steps: int | None) -> int:
@@ -1026,6 +1407,110 @@ class WanGPSession:
         if phase == "cancelled":
             return 0
         return min(90, 20 + int(ratio * 65))
+
+
+def build_media_postprocessing_settings(media_source: str | os.PathLike[str], *, temporal_upsampling: str = "", spatial_upsampling: str = "", spatial_upsampler_prompt: str = "", spatial_upsampler_reference_images: list[str] | None = None, spatial_upsampler_face_count: int = 1, film_grain_intensity: float = 0, film_grain_saturation: float = 0.5, seed: int = -1, api_options: dict[str, Any] | None = None, return_media: bool = False, **settings_overrides: Any) -> dict[str, Any]:
+    settings = {
+        "mode": "edit_postprocessing",
+        "prompt": "Media postprocessing",
+        "image_mode": 0,
+        "video_source": os.fspath(media_source),
+        "temporal_upsampling": temporal_upsampling or "",
+        "spatial_upsampling": spatial_upsampling or "",
+        "spatial_upsampler_prompt": spatial_upsampler_prompt,
+        "spatial_upsampler_reference_images": list(spatial_upsampler_reference_images or []),
+        "spatial_upsampler_face_count": spatial_upsampler_face_count,
+        "film_grain_intensity": film_grain_intensity,
+        "film_grain_saturation": film_grain_saturation,
+        "postprocess_audio": "",
+        "repeat_generation": 1,
+        "batch_size": 1,
+        "seed": int(seed),
+    }
+    _apply_edit_settings_overrides(settings, settings_overrides, api_options, return_media)
+    return settings
+
+
+def build_audio_remux_settings(video_source: str | os.PathLike[str], *, postprocess_audio: str, audio_source: str | os.PathLike[str] | None = None, postprocess_audio_prompt: str = "", postprocess_audio_neg_prompt: str = "", seed: int = -1, repeat_generation: int = 1, replace_voice_sample: str | os.PathLike[str] | None = None, replace_voice_sample2: str | os.PathLike[str] | None = None, api_options: dict[str, Any] | None = None, return_media: bool = False, **settings_overrides: Any) -> dict[str, Any]:
+    settings = {
+        "mode": "edit_remux",
+        "prompt": "Audio remuxing",
+        "image_mode": 0,
+        "video_source": os.fspath(video_source),
+        "postprocess_audio": postprocess_audio or "",
+        "postprocess_audio_prompt": postprocess_audio_prompt or "",
+        "postprocess_audio_neg_prompt": postprocess_audio_neg_prompt or "",
+        "seed": int(seed),
+        "repeat_generation": int(repeat_generation),
+        "audio_source": None if audio_source is None else os.fspath(audio_source),
+        "replace_voice_sample": None if replace_voice_sample is None else os.fspath(replace_voice_sample),
+        "replace_voice_sample2": None if replace_voice_sample2 is None else os.fspath(replace_voice_sample2),
+        "temporal_upsampling": "",
+        "spatial_upsampling": "",
+        "film_grain_intensity": 0,
+        "film_grain_saturation": 0.5,
+        "batch_size": 1,
+    }
+    _apply_edit_settings_overrides(settings, settings_overrides, api_options, return_media)
+    return settings
+
+
+def build_audio_postprocessing_settings(audio_source: str | os.PathLike[str], *, postprocess_audio: str, replace_voice_sample: str | os.PathLike[str] | None = None, replace_voice_sample2: str | os.PathLike[str] | None = None, api_options: dict[str, Any] | None = None, return_media: bool = False, **settings_overrides: Any) -> dict[str, Any]:
+    settings = {
+        "mode": "edit_audio",
+        "prompt": "Audio postprocessing",
+        "image_mode": 0,
+        "audio_source": os.fspath(audio_source),
+        "postprocess_audio": postprocess_audio or "",
+        "replace_voice_sample": None if replace_voice_sample is None else os.fspath(replace_voice_sample),
+        "replace_voice_sample2": None if replace_voice_sample2 is None else os.fspath(replace_voice_sample2),
+        "repeat_generation": 1,
+        "batch_size": 1,
+    }
+    _apply_edit_settings_overrides(settings, settings_overrides, api_options, return_media)
+    return settings
+
+
+def _apply_edit_settings_overrides(settings: dict[str, Any], settings_overrides: dict[str, Any], api_options: dict[str, Any] | None, return_media: bool) -> None:
+    override_api_options = settings_overrides.pop("_api", None)
+    settings.update(settings_overrides)
+    settings.pop("model_type", None)
+    settings.pop("base_model_type", None)
+    options = copy.deepcopy(api_options if api_options is not None else override_api_options)
+    if not isinstance(options, dict):
+        options = {}
+    if return_media:
+        options["return_media"] = True
+    if options:
+        settings["_api"] = options
+
+
+def _strip_model_def_callables(value: Any) -> Any:
+    if callable(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _strip_model_def_callables(item) for key, item in value.items() if not callable(item)}
+    if isinstance(value, (list, tuple)):
+        return [_strip_model_def_callables(item) for item in value if not callable(item)]
+    return value
+
+
+def _model_availability_to_dict(model_type: str, status: int) -> dict[str, Any]:
+    from shared import model_dropdowns
+
+    if status == model_dropdowns.MODEL_FILE_STATUS_EXPECTED:
+        label, indicator = "available", "blue_square"
+    elif status == model_dropdowns.MODEL_FILE_STATUS_PARTIAL:
+        label, indicator = "partial", "yellow_square"
+    else:
+        label, indicator = "missing", "black_square"
+    return {
+        "model_type": str(model_type),
+        "status": label,
+        "status_code": int(status),
+        "indicator": indicator,
+        "available": status == 2,
+    }
 
 
 def init(

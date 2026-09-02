@@ -2,6 +2,7 @@ import os
 
 import torch
 
+from shared.mps import mps_device_or
 from shared.utils import files_locator as fl
 
 from .prompt_enhancers import HEARTMULA_LYRIC_PROMPT
@@ -11,6 +12,7 @@ HEARTMULA_VERSION = "3B"
 
 def _get_heartmula_model_def():
     return {
+        "group": "music",
         "audio_only": True,
         "image_outputs": False,
         "sliding_window": False,
@@ -81,7 +83,7 @@ class family_handler:
 
     @staticmethod
     def query_family_infos():
-        return {"tts": (200, "TTS")}
+        return {"music": (2195, "Music"), "tts": (2200, "TTS")}
 
     @staticmethod
     def register_lora_cli_args(parser, lora_root):
@@ -140,7 +142,7 @@ class family_handler:
                 heartmula_weights_path = weights_candidate
         pipeline = HeartMuLaPipeline(
             ckpt_root=ckpt_root,
-            device=torch.device("cpu"),
+            device=mps_device_or(torch.device("cpu")),
             version=HEARTMULA_VERSION,
             VAE_dtype=VAE_dtype,
             heartmula_weights_path=heartmula_weights_path,

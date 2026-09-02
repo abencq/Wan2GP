@@ -1,5 +1,5 @@
 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/
-mmgp==3.7.6
+mmgp==3.7.14
 # Core AI stack
 diffusers==0.36.0
 transformers==4.54.0 #4.53.1
@@ -9,7 +9,11 @@ tqdm
 imageio
 imageio-ffmpeg
 einops
+rotary-embedding-torch>=0.5.3
 sentencepiece
+tiktoken
+fugashi>=1.2.0
+unidic-lite>=1.0.0
 open_clip_torch>=2.29.0
 numpy==2.1.2
 num2words==0.5.14
@@ -28,7 +32,12 @@ speechbrain==1.0.3
 openai-whisper==20250625
 audio-separator==0.36.1
 pyannote.audio==3.3.2
-torchcodec
+sherpa-onnx==1.13.2
+torchcodec==0.10.0
+einshape==1.0
+jax
+# Flax/Linen micro-subset is vendored under postprocessing/prismaudio/vendor/flax
+# for PrismAudio VideoPrism; keeping it out of pip avoids orbax-checkpoint.
 
 # UI & interaction
 gradio==5.29.0
@@ -38,16 +47,20 @@ s3tokenizer
 conformer==0.3.2
 spacy_pkuseg
 spacy
-gradio_rangeslider
+    gradio_rangeslider
 
 # Vision & segmentation
 opencv-python>=4.12.0.88
+ultralytics
+scipy
 pycocotools
 segment-anything
-rembg[gpu]==2.0.65
-onnxruntime-gpu==1.22.0; python_version < "3.11"
-onnxruntime-gpu==1.25.0.dev20260210001; python_version >= "3.11"
-decord
+rembg[gpu]==2.0.65; platform_system != "Darwin"
+rembg==2.0.65; platform_system == "Darwin"
+onnxruntime-gpu==1.22.0; python_version < "3.11" and platform_system != "Darwin"
+onnxruntime-gpu==1.25.0.dev20260210001; python_version >= "3.11" and platform_system != "Darwin"
+onnxruntime>=1.22.0; platform_system == "Darwin"
+decord; sys_platform != "darwin"
 timm
 iopath>=0.1.10
 insightface @ https://github.com/deepbeepmeep/insightface/releases/download/insightface/insightface-0.7.3-cp310-cp310-win_amd64.whl ; sys_platform == "win32" and python_version == "3.10"
@@ -68,6 +81,7 @@ omegaconf
 hydra-core
 easydict
 pydantic==2.10.6
+mcp==1.10.1
 
 # Math & modeling
 torchdiffeq>=0.2.5
@@ -83,6 +97,8 @@ ftfy
 piexif
 nvidia-ml-py 
 misaki
+phonemizer-fork
+espeakng-loader
 gitdb==4.0.12 
 gitpython==3.1.45
 stringzilla==4.0.14
@@ -90,7 +106,9 @@ xxhash
 munch
 wetext==0.1.2
 markdown
+apprise==1.12.0
+keyring==25.7.0
 # Optional / commented out
 # transformers==4.46.3  # for llamallava pre-patch
 # rembg==2.0.65         # non-GPU fallback
-# huggingface_hub[hf_xet]  # slows down everything
+huggingface_hub[hf_xet]

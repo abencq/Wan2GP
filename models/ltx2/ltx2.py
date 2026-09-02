@@ -4,6 +4,7 @@ import math
 import os
 import re
 import types
+from contextlib import nullcontext
 from typing import Callable, Iterator
 
 import torch
@@ -28,30 +29,109 @@ from .ltx_core.model.transformer import (
 )
 from .ltx_core.model.upsampler import LatentUpsamplerConfigurator
 from .ltx_core.model.video_vae import VideoDecoderConfigurator, VideoEncoderConfigurator
+from .ltx_core.model.video_vae.diffusion_video_decoder import DiffusionVideoDecoder
 from .ltx_core.text_encoders.gemma import (
+    AUDIO_EMBEDDINGS_CONNECTOR_KEY_OPS,
     GemmaTextEmbeddingsConnectorModelConfigurator,
+    GemmaTextEmbeddingsConnectorModel,
     TEXT_EMBEDDING_PROJECTION_KEY_OPS,
     TEXT_EMBEDDINGS_CONNECTOR_KEY_OPS,
+    VIDEO_EMBEDDINGS_CONNECTOR_KEY_OPS,
     build_gemma_text_encoder,
 )
+from .ltx_core.text_encoders.gemma.embeddings_connector import AudioEmbeddings1DConnectorConfigurator, Embeddings1DConnectorConfigurator
 from .ltx_core.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorProjLinear
 from .ltx_core.model.video_vae import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
 from .ltx_core.types import AudioLatentShape, VideoPixelShape
+from .inpainting import (
+    _apply_ltx2_mask_blend,
+    _apply_ltx2_inpaint_preprocess_dilation,
+    _build_outpainting_mask_cthw,
+    _get_outpainting_inner_rect,
+    _ltx2_inpainting_enabled,
+    _merge_ltx2_masks,
+    _normalize_outpainting_dims,
+    _pad_ltx2_masked_control_video_tail,
+)
 from .lora_utils import is_ic_lora_filename, phase2_ic_lora_name
+from .ltx2_runtime import (
+    LTX2_INPAINTING_LAPLACIAN_BLEND,
+    LTX2_INPAINTING_LAPLACIAN_MASK_LOW_RES_DILATION,
+    LTX2_INPAINTING_PREPROCESS_MASK_DILATION,
+    LTX2_INPAINTING_SANITIZE_LAPLACIAN_SOURCE,
+    LTX2_OUTPAINTING_LAPLACIAN_BLEND,
+    LTX2_OUTPAINTING_LAPLACIAN_MASK_LOW_RES_DILATION,
+    LTX2_OUTPAINTING_METHOD,
+    LTX2_PAD_MASKED_CONTROL_VIDEO_TAIL,
+)
 from .ltx_pipelines.distilled import DistilledPipeline
 from .ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
-from .ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE, DEFAULT_NEGATIVE_PROMPT
+from .ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE, DEFAULT_NEGATIVE_PROMPT, DISTILLED_SIGMA_VALUES
 
 
 _GEMMA_FOLDER = "gemma-3-12b-it-qat-q4_0-unquantized"
 _SPATIAL_UPSCALER_FILENAME = "ltx-2-spatial-upscaler-x2-1.0.safetensors"
-LTX2_USE_FP32_ROPE_FREQS = True #False
+LTX2_USE_FP32_ROPE_FREQS = True
 LTX2_ID_LORA_GUIDANCE_SCALE = 3.0
 LTX2_ID_LORA_AUDIO_CFG_SCALE = 7.0
 LTX2_ID_LORA_MAX_REFERENCE_SECONDS = 121.0 / 25.0
 LTX2_OUTPAINT_GAMMA = 2.0
 LTX2_HDR_TRANSFORM = "logc3"
 LTX2_DISABLE_STAGE2_WITH_CONTROL_VIDEO = True
+LTX2_ENABLE_EMBEDDING_LORAS = False
+LTX2_VAE_TEMPORAL_TILING_FPS = 24.0
+LTX2_UPSCALE_SIGMAS = tuple(DISTILLED_SIGMA_VALUES)
+LTX2_UPSCALE_MAX_FRAMES = 481
+LTX2_EMBEDDING_LORA_PREFIXES = (
+    "text_embedding_projection.",
+    "feature_extractor_linear.",
+    "text_embeddings_connector.",
+    "embeddings_connector.",
+    "video_embeddings_connector.",
+    "audio_embeddings_connector.",
+)
+LTX2_COMFY_LORA_UNDERSCORED_NAMES = (
+    "av_ca_audio_scale_shift_adaln_single",
+    "av_ca_video_scale_shift_adaln_single",
+    "av_ca_a2v_gate_adaln_single",
+    "av_ca_v2a_gate_adaln_single",
+    "audio_prompt_adaln_single",
+    "audio_patchify_proj",
+    "audio_to_video_attn",
+    "prompt_adaln_single",
+    "video_to_audio_attn",
+    "audio_adaln_single",
+    "transformer_blocks",
+    "timestep_embedder",
+    "audio_proj_out",
+    "to_gate_logits",
+    "patchify_proj",
+    "adaln_single",
+    "audio_attn1",
+    "audio_attn2",
+    "audio_ff",
+    "linear_1",
+    "linear_2",
+    "proj_out",
+    "k_norm",
+    "q_norm",
+    "to_out",
+    "to_k",
+    "to_q",
+    "to_v",
+)
+
+
+_LTX2_MAIN_LORA_ARCHITECTURES = {"ltx2_22B", "ltx2_25_22B"}
+
+
+def _ltx2_main_loras_compatible(base_model_type: str | None) -> bool:
+    return base_model_type in _LTX2_MAIN_LORA_ARCHITECTURES
+
+
+def _ltx2_main_ingredients_enabled(base_model_type: str | None, video_prompt_type: str) -> bool:
+    video_prompt_type = video_prompt_type or ""
+    return _ltx2_main_loras_compatible(base_model_type) and "I" in video_prompt_type and not any(letter in video_prompt_type for letter in f"KFVOPDEMA{VIDEO_PROMPT_HDR_OUTPUT_FLAG}")
 
 
 def _normalize_config(config_value):
@@ -68,6 +148,10 @@ def _normalize_config(config_value):
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _is_editanything_model(model_def) -> bool:
+    return bool((model_def or {}).get("ltx2_edit_anything", False))
 
 
 def _load_config_from_checkpoint(path, fallback_config_path: str | None = None):
@@ -184,6 +268,58 @@ def _make_vae_postprocess(prefix: str):
     return postprocess
 
 
+def _split_diffusion_vae_state_dict(state_dict: dict, prefix: str):
+    new_sd = {}
+    for key, value in state_dict.items():
+        key = _strip_model_prefix(key)
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+        elif not key.startswith(("encoder.", "decoder.", "per_channel_statistics.")):
+            continue
+        if key == "decoder.type_emb":
+            continue
+        if key.startswith("per_channel_statistics."):
+            suffix = key[len("per_channel_statistics."):]
+            new_sd[f"encoder.per_channel_statistics.{suffix}"] = value.clone()
+            new_sd[f"decoder.per_channel_statistics.{suffix}"] = value.clone()
+        elif key.startswith("decoder.t_embedder.mlp.0."):
+            new_sd[key.replace("decoder.t_embedder.mlp.0.", "decoder.t_embedder.timestep_embedder.linear_1.")] = value
+        elif key.startswith("decoder.t_embedder.mlp.2."):
+            new_sd[key.replace("decoder.t_embedder.mlp.2.", "decoder.t_embedder.timestep_embedder.linear_2.")] = value
+        elif ".attn.qkv." in key:
+            prefix_key, suffix = key.split(".attn.qkv.", 1)
+            q, k, v = value.chunk(3, dim=0)
+            new_sd[f"{prefix_key}.attn.qkv.to_q.{suffix}"] = q
+            new_sd[f"{prefix_key}.attn.qkv.to_k.{suffix}"] = k
+            new_sd[f"{prefix_key}.attn.qkv.to_v.{suffix}"] = v
+        else:
+            new_sd[key] = value
+    return new_sd, {}
+
+
+def _make_diffusion_vae_postprocess(prefix: str):
+    def postprocess(state_dict, quantization_map):
+        return _split_diffusion_vae_state_dict(state_dict, prefix)
+
+    return postprocess
+
+
+def _diffusion_vae_encoder_config(config: dict) -> dict:
+    encoder = config["vae"]["encoder"]
+    return {
+        "vae": {
+            "dims": encoder["dims"],
+            "in_channels": encoder["in_channels"],
+            "latent_channels": encoder["out_channels"],
+            "encoder_blocks": encoder["blocks"],
+            "patch_size": encoder["patch_size"],
+            "norm_layer": encoder["norm_layer"],
+            "latent_log_var": encoder["latent_log_var"],
+            "encoder_spatial_padding_mode": encoder["spatial_padding_mode"],
+        }
+    }
+
+
 class _AudioVAEWrapper(torch.nn.Module):
     def __init__(self, decoder: torch.nn.Module) -> None:
         super().__init__()
@@ -221,8 +357,7 @@ class LTX2SuperModel(torch.nn.Module):
             self.split_linear_modules_map = split_map
 
         self.text_embedding_projection = ltx2_model.text_embedding_projection
-        self.video_embeddings_connector = ltx2_model.video_embeddings_connector
-        self.audio_embeddings_connector = ltx2_model.audio_embeddings_connector
+        self.text_embeddings_connector = ltx2_model.text_embeddings_connector
 
     @property
     def _interrupt(self) -> bool:
@@ -323,22 +458,36 @@ def _attach_lora_preprocessor(transformer: torch.nn.Module) -> None:
                 key = key[len("diffusion_model.") :]
             if key.startswith("transformer."):
                 key = key[len("transformer.") :]
-            if key.startswith("embeddings_connector."):
-                key = f"video_embeddings_connector.{key[len('embeddings_connector.'):]}"
-            if key.startswith("feature_extractor_linear."):
-                key = f"text_embedding_projection.{key[len('feature_extractor_linear.'):]}"
-
             module_name, suffix = split_lora_key(key)
             if not module_name:
                 dropped_keys.append(original_key)
                 continue
+            if module_name.startswith("lora_unet_"):
+                module_name = module_name[len("lora_unet_") :]
+                for name in LTX2_COMFY_LORA_UNDERSCORED_NAMES:
+                    module_name = module_name.replace(name, name.replace("_", "\0"))
+                module_name = module_name.replace("_", ".").replace("\0", "_")
+            if not LTX2_ENABLE_EMBEDDING_LORAS and module_name.startswith(LTX2_EMBEDDING_LORA_PREFIXES):
+                continue
+            if module_name.startswith("embeddings_connector."):
+                module_name = f"text_embeddings_connector.video_embeddings_connector.{module_name[len('embeddings_connector.') :]}"
+            if module_name.startswith("video_embeddings_connector."):
+                module_name = f"text_embeddings_connector.{module_name}"
+            if module_name.startswith("audio_embeddings_connector."):
+                module_name = f"text_embeddings_connector.{module_name}"
+            if module_name.startswith("feature_extractor_linear."):
+                module_name = f"text_embedding_projection.{module_name[len('feature_extractor_linear.') :]}"
             if module_name not in module_names:
                 prefixed_name = f"velocity_model.{module_name}"
-                if prefixed_name in module_names:
+                if module_name.endswith(".to_out") and f"{prefixed_name}.0" in module_names:
+                    module_name = f"{prefixed_name}.0"
+                elif prefixed_name in module_names:
                     module_name = prefixed_name
                 else:
                     dropped_keys.append(original_key)
                     continue
+            elif module_name.endswith(".to_out") and f"{module_name}.0" in module_names:
+                module_name = f"{module_name}.0"
             new_sd[f"{module_name}{suffix}"] = value
         if dropped_keys:
             sample = ", ".join(dropped_keys[:8])
@@ -356,6 +505,160 @@ def _coerce_image_list(image_value):
     if isinstance(image_value, list):
         return image_value[0] if image_value else None
     return image_value
+
+
+def _duplicate_ref_image_as_video(ref_image, frame_count: int = 9):
+    if ref_image is None:
+        return None
+    frame_count = max(1, int(frame_count))
+    if isinstance(ref_image, (list, tuple)):
+        ref_image = ref_image[0] if ref_image else None
+        if ref_image is None:
+            return None
+    if torch.is_tensor(ref_image):
+        image = ref_image.detach()
+        if image.ndim == 3:
+            if image.shape[0] in (1, 3, 4):
+                return image.unsqueeze(1).repeat(1, frame_count, 1, 1)
+            return image.unsqueeze(0).repeat(frame_count, 1, 1, 1)
+        if image.ndim == 4:
+            if image.shape[0] in (1, 3, 4):
+                return image[:, :1].repeat(1, frame_count, 1, 1)
+            if image.shape[-1] in (1, 3, 4):
+                return image[:1].repeat(frame_count, 1, 1, 1)
+        return image
+
+    import numpy as np
+    from PIL import Image
+
+    if isinstance(ref_image, str):
+        with Image.open(ref_image) as image:
+            frame = np.array(image.convert("RGB"))
+    else:
+        frame = np.array(ref_image)[..., :3]
+    return np.repeat(frame[None, ...], frame_count, axis=0)
+
+
+def _msr_ref_image_to_frame(ref_image, width: int, height: int):
+    import numpy as np
+    from PIL import Image
+
+    if isinstance(ref_image, str):
+        with Image.open(ref_image) as image:
+            pil_image = image.convert("RGB")
+    elif torch.is_tensor(ref_image):
+        image = ref_image.detach().cpu()
+        if image.ndim == 4:
+            image = image[0]
+        if image.ndim == 3 and image.shape[0] in (1, 3, 4):
+            image = image.permute(1, 2, 0)
+        frame = image.numpy()
+        if frame.dtype != np.uint8:
+            if frame.max() <= 1.0:
+                frame = frame * 255.0
+            frame = frame.clip(0, 255).astype(np.uint8)
+        pil_image = Image.fromarray(frame[..., :3]).convert("RGB")
+    else:
+        frame = np.array(ref_image)
+        if frame.dtype != np.uint8:
+            if frame.max() <= 1.0:
+                frame = frame * 255.0
+            frame = frame.clip(0, 255).astype(np.uint8)
+        pil_image = Image.fromarray(frame[..., :3]).convert("RGB")
+    return np.array(pil_image.resize((int(width), int(height)), Image.Resampling.LANCZOS))
+
+
+def _is_msr_v2_model_def(model_def) -> bool:
+    values = [str((model_def or {}).get("name", ""))]
+    loras = (model_def or {}).get("loras", [])
+    values.extend(str(value) for value in (loras if isinstance(loras, (list, tuple)) else [loras]))
+    return any("msr-v2" in value.lower() or "msr ref v2" in value.lower() for value in values)
+
+
+def _resolve_msr_reference_frame_count(model_def, custom_settings, ref_images, background_first: bool) -> int:
+    default = int((model_def or {}).get("ltx2_msr_frame_count", 41))
+    if not _is_msr_v2_model_def(model_def):
+        return default
+    raw_value = (custom_settings or {}).get("msr_reference_frames", "") if isinstance(custom_settings, dict) else ""
+    try:
+        selected = int(raw_value or 0)
+    except (TypeError, ValueError):
+        selected = 0
+    if selected in (17, 25, 33, 41, 49, 57, 65):
+        return selected
+    ref_count = len(ref_images) if isinstance(ref_images, (list, tuple)) else 1
+    subject_count = max(1, ref_count - 1 if background_first else ref_count)
+    return min(65, 16 * subject_count + 1)
+
+
+def _build_msr_v2_reference_frames(frames, frame_count: int):
+    subject_frames = frames[:-1]
+    background_frame = frames[-1]
+    video_frames = [background_frame] * frame_count
+    subject_budget = max(0, (frame_count - 1) // 8)
+
+    if subject_budget >= len(subject_frames):
+        counts = [1] * len(subject_frames)
+        extra = subject_budget - len(subject_frames)
+        priority = [0, *range(1, len(subject_frames)), 0]
+        for index in priority:
+            if extra <= 0:
+                break
+            counts[index] += 1
+            extra -= 1
+        index = 0
+        while extra > 0:
+            counts[index % len(counts)] += 1
+            extra -= 1
+            index += 1
+        cursor = 0
+        for frame, count in zip(subject_frames, counts):
+            start = 0 if cursor == 0 else 1 + (cursor - 1) * 8
+            end = (cursor + count - 1) * 8
+            cursor += count
+            for frame_index in range(start, min(frame_count - 1, end) + 1):
+                video_frames[frame_index] = frame
+    else:
+        subject_frame_count = max(1, (subject_budget - 1) * 8 + 1)
+        for index, frame in enumerate(subject_frames):
+            start = int(index * subject_frame_count / len(subject_frames))
+            end = int((index + 1) * subject_frame_count / len(subject_frames)) - 1
+            if index == len(subject_frames) - 1:
+                end = subject_frame_count - 1
+            for frame_index in range(start, min(frame_count - 1, max(start, end)) + 1):
+                video_frames[frame_index] = frame
+
+    return video_frames
+
+
+def _build_msr_reference_video(
+    ref_images,
+    frame_count: int,
+    width: int,
+    height: int,
+    background_first: bool,
+    msr_v2: bool = False,
+):
+    import numpy as np
+
+    ref_images = list(ref_images) if isinstance(ref_images, (list, tuple)) else [ref_images]
+    if background_first:
+        if not 2 <= len(ref_images) <= 5:
+            raise ValueError("LTX2 MSR Background + Subjects mode requires 2 to 5 reference images, with the background image first.")
+        # WanGP uses the first K+I reference as the ratio/background anchor; MSR expects it last in the pseudo-video.
+        ref_images = ref_images[1:] + ref_images[:1]
+    elif not 1 <= len(ref_images) <= 4:
+        raise ValueError("LTX2 MSR Subjects / Objects only mode requires 1 to 4 reference images.")
+    frames = [_msr_ref_image_to_frame(ref_image, width, height) for ref_image in ref_images]
+    if msr_v2 and background_first:
+        video_frames = _build_msr_v2_reference_frames(frames, frame_count)
+    else:
+        base_count = frame_count // len(frames)
+        remainder = frame_count % len(frames)
+        video_frames = []
+        for index, frame in enumerate(frames):
+            video_frames.extend([frame] * (base_count + (1 if index < remainder else 0)))
+    return np.stack(video_frames, axis=0)
 
 
 def _to_latent_index(frame_idx: int, stride: int) -> int:
@@ -417,7 +720,7 @@ def _build_tiling_config(tile_size: int | tuple | list | None, fps: float | None
     temporal_config = None
     if fps is not None and fps > 0:
         temporal_tiling_divisor = max(1, temporal_tiling_divisor)
-        tile_frames = _normalize_temporal_tiling_size(int(math.ceil(float(fps) * 5.0 / temporal_tiling_divisor)))
+        tile_frames = _normalize_temporal_tiling_size(int(math.ceil(LTX2_VAE_TEMPORAL_TILING_FPS * 5.0 / temporal_tiling_divisor)))
         if tile_frames > 0:
             overlap_frames = int(round(tile_frames * 3 / 8))
             overlap_frames = _normalize_temporal_overlap(overlap_frames, tile_frames)
@@ -536,34 +839,6 @@ def _build_frozen_control_video(
     return frozen_video[:, :target_frames]
 
 
-def _normalize_outpainting_dims(outpainting_dims) -> list[float] | None:
-    if outpainting_dims is None:
-        return None
-    if isinstance(outpainting_dims, str):
-        outpainting_dims = outpainting_dims.strip()
-        if not outpainting_dims or outpainting_dims.startswith("#"):
-            return None
-        outpainting_dims = outpainting_dims.split()
-    if not isinstance(outpainting_dims, (list, tuple)) or len(outpainting_dims) != 4:
-        return None
-    dims = [max(0.0, float(v)) for v in outpainting_dims]
-    return dims if any(dims) else None
-
-
-def _get_outpainting_inner_rect(height: int, width: int, outpainting_dims) -> tuple[int, int, int, int] | None:
-    dims = _normalize_outpainting_dims(outpainting_dims)
-    if dims is None or height <= 0 or width <= 0:
-        return None
-    from shared.utils.utils import get_outpainting_frame_location
-
-    inner_height, inner_width, margin_top, margin_left = get_outpainting_frame_location(int(height), int(width), dims, 1)
-    top = max(0, min(int(margin_top), int(height)))
-    left = max(0, min(int(margin_left), int(width)))
-    bottom = max(top, min(top + int(inner_height), int(height)))
-    right = max(left, min(left + int(inner_width), int(width)))
-    return (top, bottom, left, right) if bottom > top and right > left else None
-
-
 def _apply_gamma_to_media(media_tensor: torch.Tensor | None, gamma: float) -> bool:
     if media_tensor is None or not torch.is_tensor(media_tensor) or media_tensor.dim() < 2 or gamma <= 0 or media_tensor.numel() == 0:
         return False
@@ -626,21 +901,23 @@ class LTX2:
         gemma_root = text_encoder_filepath if text_encoder_filename is None else text_encoder_filename
         if not gemma_root:
             raise ValueError("Missing Gemma text encoder path.")
+        pixel_spatial_upsampler = model_type.startswith("ltx2_upsampler_")
         if component_paths:
             spatial_upsampler_path = component_paths.get("spatial_upsampler")
         else:
             spatial_upsampler_path = None
-        if not spatial_upsampler_path:
+        if not pixel_spatial_upsampler and not spatial_upsampler_path:
             spatial_upsampler_name = model_def.get("ltx2_spatial_upscaler_file", _SPATIAL_UPSCALER_FILENAME)
             spatial_upsampler_path = fl.locate_file(spatial_upsampler_name)
 
         # Internal FP8 handling is disabled; mmgp manages quantization/dtypes.
-        pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
+        pipeline_kind = "distilled" if model_type.startswith("ltx2_upsampler_") else model_def.get("ltx2_pipeline", "two_stage")
 
         pipeline_models = self._init_models(
             transformer_path=transformer_path,
             component_paths=component_paths,
             gemma_root=gemma_root,
+            gemma_side_files_root=text_encoder_filepath,
             spatial_upsampler_path=spatial_upsampler_path,
         )
 
@@ -662,7 +939,8 @@ class LTX2:
         transformer_path,
         component_paths: dict,
         gemma_root: str,
-        spatial_upsampler_path: str,
+        gemma_side_files_root: str | None,
+        spatial_upsampler_path: str | None,
     ):
         from mmgp import offload as mmgp_offload
 
@@ -702,21 +980,37 @@ class LTX2:
         with init_empty_weights():
             velocity_model = LTXModelConfigurator.from_config(base_config)
         velocity_model = _load_component(velocity_model, transformer_path, transformer_sd_ops, ignore_unused_weights=True)
+        transformer_modules = component_paths.get("transformer_modules") if component_paths else None
+        if transformer_modules:
+            from .editanything import install_editanything_modules
+
+            install_editanything_modules(velocity_model, transformer_modules, self.model_def)
         transformer = X0Model(velocity_model)
         transformer.eval().requires_grad_(False)
         VAE_URLs = self.model_def.get("VAE_URLs", None)
         video_vae_path =  fl.locate_file(VAE_URLs[0]) if VAE_URLs is not None and len(VAE_URLs) else _component_path("video_vae")
-        video_config = copy.deepcopy(_component_config(video_vae_path))
+        video_config_path = component_paths.get("video_vae_config") if component_paths else None
+        if video_config_path:
+            with open(video_config_path, "r", encoding="utf-8") as reader:
+                video_config = copy.deepcopy(json.load(reader))
+        else:
+            video_config = copy.deepcopy(_component_config(video_vae_path))
+        diffusion_vae = video_config.get("vae", {}).get("_class_name") == "CausalDiffusionVAE"
+        if diffusion_vae:
+            print("[WanGP][LTX2] Loading NAD Diffusion Decoder.")
+        elif self.model_def.get("ltx2_pruna_vae", False):
+            print("[WanGP][LTX2] Loading PrunaAI VAE (up to x2 faster).")
         video_config_vae = video_config.setdefault("vae", {})
         video_config_vae["spatial_padding_mode"] = "reflect"
         video_config_vae["encoder_spatial_padding_mode"] = "reflect"
         video_config_vae["decoder_spatial_padding_mode"] = "reflect"
         # print("[LTX2 VAE Config] forcing encoder/decoder spatial_padding_mode=reflect")
         with init_empty_weights():
-            video_encoder = VideoEncoderConfigurator.from_config(video_config)
-            video_decoder = VideoDecoderConfigurator.from_config(video_config)
+            video_encoder = VideoEncoderConfigurator.from_config(_diffusion_vae_encoder_config(video_config) if diffusion_vae else video_config)
+            video_decoder = DiffusionVideoDecoder.from_config(video_config) if diffusion_vae else VideoDecoderConfigurator.from_config(video_config)
             video_vae = _VAEContainer(video_encoder, video_decoder)
-        video_vae = _load_component(video_vae, video_vae_path, postprocess=_make_vae_postprocess("vae."), ignore_unused_weights=True)
+        vae_postprocess = _make_diffusion_vae_postprocess("vae.") if diffusion_vae else _make_vae_postprocess("vae.")
+        video_vae = _load_component(video_vae, video_vae_path, postprocess=vae_postprocess, ignore_unused_weights=True)
         video_encoder = video_vae.encoder
         video_decoder = video_vae.decoder
 
@@ -742,19 +1036,40 @@ class LTX2:
             text_embedding_projection = GemmaFeaturesExtractorProjLinear.from_config(text_projection_config)
         text_embedding_projection = _load_component( text_embedding_projection, text_projection_path, TEXT_EMBEDDING_PROJECTION_KEY_OPS )
 
-        text_connector_path = _component_path("text_embeddings_connector")
-        text_connector_config = _component_config(text_connector_path)
-        with init_empty_weights():
-            text_embeddings_connector = GemmaTextEmbeddingsConnectorModelConfigurator.from_config(text_connector_config)
-        text_embeddings_connector = _load_component( text_embeddings_connector, text_connector_path, TEXT_EMBEDDINGS_CONNECTOR_KEY_OPS )
+        self.split_text_connectors = "video_embeddings_connector" in component_paths
+        if self.split_text_connectors:
+            video_connector_path = _component_path("video_embeddings_connector")
+            video_connector_config = _component_config(video_connector_path)
+            with init_empty_weights():
+                video_embeddings_connector = Embeddings1DConnectorConfigurator.from_config(video_connector_config)
+            video_embeddings_connector = _load_component(video_embeddings_connector, video_connector_path, VIDEO_EMBEDDINGS_CONNECTOR_KEY_OPS)
 
-        text_encoder = build_gemma_text_encoder(gemma_root, default_dtype=self.dtype)
+            audio_connector_path = _component_path("audio_embeddings_connector")
+            audio_connector_config = _component_config(audio_connector_path)
+            with init_empty_weights():
+                audio_embeddings_connector = AudioEmbeddings1DConnectorConfigurator.from_config(audio_connector_config)
+            audio_embeddings_connector = _load_component(audio_embeddings_connector, audio_connector_path, AUDIO_EMBEDDINGS_CONNECTOR_KEY_OPS)
+            text_embeddings_connector = GemmaTextEmbeddingsConnectorModel(video_embeddings_connector, audio_embeddings_connector)
+        else:
+            text_connector_path = _component_path("text_embeddings_connector")
+            text_connector_config = _component_config(text_connector_path)
+            with init_empty_weights():
+                text_embeddings_connector = GemmaTextEmbeddingsConnectorModelConfigurator.from_config(text_connector_config)
+            text_embeddings_connector = _load_component(text_embeddings_connector, text_connector_path, TEXT_EMBEDDINGS_CONNECTOR_KEY_OPS)
+
+        text_encoder = build_gemma_text_encoder(
+            gemma_root,
+            default_dtype=self.dtype,
+            side_files_root=gemma_side_files_root,
+        )
         text_encoder.eval().requires_grad_(False)
 
-        upsampler_config = _load_config_from_checkpoint(spatial_upsampler_path)
-        with init_empty_weights():
-            spatial_upsampler = LatentUpsamplerConfigurator.from_config(upsampler_config)
-        spatial_upsampler = _load_component(spatial_upsampler, spatial_upsampler_path, None)
+        spatial_upsampler = None
+        if spatial_upsampler_path:
+            upsampler_config = _load_config_from_checkpoint(spatial_upsampler_path)
+            with init_empty_weights():
+                spatial_upsampler = LatentUpsamplerConfigurator.from_config(upsampler_config)
+            spatial_upsampler = _load_component(spatial_upsampler, spatial_upsampler_path, None)
 
         self.text_encoder = text_encoder
         self.text_embedding_projection = text_embedding_projection
@@ -826,6 +1141,74 @@ class LTX2:
             trans = self.model
         return trans, None
 
+    def upscale_video(
+        self,
+        sample: torch.Tensor,
+        prompt: str,
+        negative_prompt: str,
+        audio_waveform,
+        audio_sample_rate: int,
+        upsampler_variant: str,
+        seed: int,
+        fps: float,
+        pixel_frame_offset: int = 0,
+        VAE_tile_size=None,
+        callback=None,
+        set_progress_status=None,
+        interrupt_check=None,
+    ) -> torch.Tensor | None:
+        if not isinstance(self.pipeline, DistilledPipeline):
+            raise RuntimeError("LTX video upsampling requires a distilled checkpoint")
+        channels, frame_count, source_height, source_width = map(int, sample.shape)
+        if channels != 3 or frame_count > LTX2_UPSCALE_MAX_FRAMES:
+            raise ValueError(f"LTX video upsampling expects RGB windows of at most {LTX2_UPSCALE_MAX_FRAMES} frames")
+        was_uint8 = sample.dtype == torch.uint8
+        source = sample.to(dtype=torch.float32)
+        source = source.div_(127.5).sub_(1.0) if was_uint8 else source.clamp_(-1.0, 1.0)
+        source = source.unsqueeze(0)
+        source = source.to(device=self.device, dtype=torch.bfloat16)
+        tiling_config = _build_tiling_config(VAE_tile_size, fps)
+        if set_progress_status is not None:
+            set_progress_status("Audio VAE encoding")
+        waveform = torch.as_tensor(audio_waveform, dtype=torch.float32)
+        waveform = waveform.unsqueeze(1) if waveform.ndim == 1 else waveform
+        waveform = waveform.T.unsqueeze(0)
+        audio_encoder = self.pipeline._get_model("audio_encoder")
+        target_channels = int(audio_encoder.in_channels)
+        if waveform.shape[1] != target_channels:
+            if waveform.shape[1] == 1:
+                waveform = waveform.repeat(1, target_channels, 1)
+            elif target_channels == 1:
+                waveform = waveform.mean(dim=1, keepdim=True)
+            else:
+                waveform = waveform[:, :target_channels]
+                if waveform.shape[1] < target_channels:
+                    waveform = torch.cat((waveform, waveform.new_zeros(waveform.shape[0], target_channels - waveform.shape[1], waveform.shape[2])), dim=1)
+        audio_processor = AudioProcessor(sample_rate=audio_encoder.sample_rate, mel_bins=audio_encoder.mel_bins, mel_hop_length=audio_encoder.mel_hop_length, n_fft=audio_encoder.n_fft)
+        mel = audio_processor.waveform_to_mel(waveform, int(audio_sample_rate))
+        audio_params = next(audio_encoder.parameters())
+        audio_latent = audio_encoder(mel.to(device=audio_params.device, dtype=audio_params.dtype))
+        decoded = self.pipeline.upscale_video(
+            source_video=source,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            audio_latent=audio_latent,
+            upsampler_variant=upsampler_variant,
+            seed=seed,
+            frame_rate=fps,
+            sigma_values=LTX2_UPSCALE_SIGMAS,
+            latent_frame_offset=int(pixel_frame_offset) // 8,
+            pixel_frame_offset=pixel_frame_offset,
+            tiling_config=tiling_config,
+            callback=callback,
+            set_progress_status=set_progress_status,
+            interrupt_check=interrupt_check,
+        )
+        if decoded is None:
+            return None
+        decoded = decoded[:frame_count, :source_height * 2, :source_width * 2]
+        return decoded.permute(3, 0, 1, 2).contiguous()
+
     def get_loras_transformer(self, get_model_recursive_prop, model_type, video_prompt_type, base_model_type=None, model_def = None, lora_dir = None, sample_solver = None, **kwargs):
         control_map = {
             "O": "pose_align",
@@ -841,46 +1224,69 @@ class LTX2:
         audio_prompt_type = kwargs["audio_prompt_type"]
         outpainting_ratio = kwargs["video_guide_outpainting_ratio"].strip()
         outpainting_setting = str(kwargs["video_guide_outpainting"])
-        preload_urls = get_model_recursive_prop(model_type, "preload_URLs")
         pipeline_kind = model_def.get("ltx2_pipeline", "two_stage")
         resolved_base_model_type = base_model_type
+        sample_solver = (sample_solver or "").lower()
         selected_loras = {os.path.basename(lora).lower() for lora in kwargs.get("activated_loras", [])}
+        preload_urls = get_model_recursive_prop(model_type, "preload_URLs", return_list=True)
+        if isinstance(preload_urls, str):
+            preload_urls = [preload_urls]
 
-        def _append_preload_lora(signature, multiplier):
+        def _get_preload_lora_url(signature):
+            matched_url = None
+            for entry in preload_urls:
+                if isinstance(entry, str) and entry.endswith("|%lora_dir"):
+                    source_url = entry.split("|", 1)[0]
+                    if signature in os.path.basename(source_url).lower():
+                        matched_url = source_url
+            return matched_url
+
+        def _append_system_lora(name, multiplier, signature):
             signature = signature.lower()
-            for file_name in preload_urls:
-                local_filename = fl.get_local_model_filename(file_name, lora_dir=lora_dir)
-                base_name = os.path.basename(local_filename)
-                if signature in base_name.lower():
-                    if any(signature in lora for lora in loras): return
-                    for lora in selected_loras:
-                        if signature in lora:
-                            print(f"Default system '{signature}' lora and corresponding multiplier will be ignored as User has provided its own lora ({lora})")
-                            return
-                    loras.append(local_filename)
-                    loras_mult.append(multiplier)
+            url = _get_preload_lora_url(signature) or model_def.get(f"ltx2_lora_{name}", "")
+            if not url:
+                return
+            if any(signature in os.path.basename(lora).lower() for lora in loras):
+                return
+            for lora in selected_loras:
+                if signature in lora:
+                    print(f"Default system '{signature}' lora and corresponding multiplier will be ignored as User has provided its own lora ({lora})")
                     return
+            loras.append(url)
+            loras_mult.append(multiplier)
 
-        if pipeline_kind != "distilled" and guidance_phases > 1:
+        distilled_samplers = {"distilled_8_steps", "distilled_8_steps_ancestral"}
+        if pipeline_kind != "distilled" and (guidance_phases > 1 or sample_solver in distilled_samplers | {"res2s"}):
             use_hq_sampler = sample_solver == "res2s"
+            use_distilled_8_steps = sample_solver in distilled_samplers
             use_id_lora = "1" in audio_prompt_type
-            if use_hq_sampler:
+            if guidance_phases == 1 and use_hq_sampler:
+                mult = 0.2
+            elif guidance_phases == 1 and use_distilled_8_steps:
+                mult = 0.5
+            elif use_hq_sampler:
                 mult = "0.25;0.5"
             elif use_id_lora:
                 mult = "0;0.8"
+            elif use_distilled_8_steps:
+                mult = "0.5;0.5"
             else:
                 mult = "0;1"
-            _append_preload_lora("distilled", mult)
-        if pipeline_kind == "distilled":
-            if resolved_base_model_type == "ltx2_22B" and VIDEO_PROMPT_HDR_OUTPUT_FLAG in video_prompt_type:
-                _append_preload_lora("ic-lora-hdr", 1.0)
-            if any(letter in video_prompt_type for letter in control_map):
-                _append_preload_lora("union-control", 1.0)
-            if resolved_base_model_type == "ltx2_22B" and get_outpainting_dims(outpainting_setting, outpainting_ratio) is not None:
-                _append_preload_lora("outpaint", 1.0)
+            distilled_lora_name = "distilled_1_1" if resolved_base_model_type == "ltx2_22B" and sample_solver in distilled_samplers | {"res2s"} else "distilled"
+            _append_system_lora(distilled_lora_name, mult, "distilled-lora")
+        if _ltx2_main_loras_compatible(resolved_base_model_type) and VIDEO_PROMPT_HDR_OUTPUT_FLAG in video_prompt_type:
+            _append_system_lora("hdr", 1.0, "ic-lora-hdr")
+        if any(letter in video_prompt_type for letter in control_map):
+            _append_system_lora("union_control", 1.0, "union-control")
+        any_outpainting = get_outpainting_dims(outpainting_setting, outpainting_ratio) is not None
+        if _ltx2_main_loras_compatible(resolved_base_model_type) and any_outpainting and LTX2_OUTPAINTING_METHOD == 1:
+            _append_system_lora("outpaint", 1.0, "ic-lora-outpaint")
+        if _ltx2_main_loras_compatible(resolved_base_model_type) and (_ltx2_inpainting_enabled(video_prompt_type) or any_outpainting and LTX2_OUTPAINTING_METHOD == 2):
+            _append_system_lora("inpaint", 1.0, "in-outpainting")
+        if _ltx2_main_ingredients_enabled(resolved_base_model_type, video_prompt_type):
+            _append_system_lora("ingredients", 1.4, "ic-lora-ingredients")
         if "1" in audio_prompt_type:
-            id_signature = "id-lora-celebvhq" if resolved_base_model_type == "ltx2_22B" else "id-lora-celebvhq-ltx2"
-            _append_preload_lora(id_signature, 1.0 if guidance_phases == 1 else "1;0")
+            _append_system_lora("id", 1.0 if guidance_phases == 1 else "1;0", "id-lora-celebvhq")
         return loras, loras_mult
 
     def generate(
@@ -889,12 +1295,13 @@ class LTX2:
         n_prompt: str | None = None,
         image_start=None,
         image_end=None,
+        image_end_frame_position: int | None = None,
         sampling_steps: int = 40,
         guide_scale: float = 4.0,
         alt_guide_scale: float = 1.0,
         input_video=None,
         prefix_frames_count: int = 0,
-        conditioning_latents_size: int = 0,
+        window_no: int = 1,
         input_frames=None,
         input_frames2=None,
         frames_to_inject = None,
@@ -926,12 +1333,13 @@ class LTX2:
         loras_slists=None,
         loras_selected=None,
         text_connectors=None,
+        input_ref_images=None,
         input_waveform=None,
         input_waveform_sample_rate=None,
         audio_scale: float | None = None,
-        masking_source: dict | None = None,
         outpainting_dims: list[int] | None = None,
         frame_num: int = 121,
+        image_mode: int = 0,
         height: int = 1024,
         width: int = 1536,
         fps: float = 24.0,
@@ -940,22 +1348,48 @@ class LTX2:
         set_progress_status=None,
         VAE_tile_size=None,
         guide_phases= 1,
+        custom_settings=None,
+        video_guide=None,
+        frame_window_options=None,
+        gen_state=None,
+        input_video_is_hdr: bool = False,
+        lora_dir: str | None = None,
         **kwargs,
     ):
         if self._interrupt:
             return None
-
+        joyai_context = None
+        joyai_memory_bank = None
+        joyai_store_mem_selectors = []
+        if self.model_def.get("joyai_echo", False):
+            from .joyai_echo import prepare_joyai_echo_context
+            joyai_context, joyai_memory_bank, joyai_store_mem_selectors, clear_joyai_control_inputs = prepare_joyai_echo_context(self, gen_state, custom_settings, video_guide, frame_window_options, fps, video_prompt_type, height, width, guide_phases, VAE_tile_size, window_no)
+            if clear_joyai_control_inputs:
+                input_frames = input_frames2 = input_masks = input_masks2 = None
+                video_prompt_type = ""
         distill = self.model_def.get("ltx2_pipeline", "two_stage") == "distilled"
-        hdr_enabled = distill and self.base_model_type == "ltx2_22B" and VIDEO_PROMPT_HDR_OUTPUT_FLAG in video_prompt_type
-        input_video_is_hdr = bool(kwargs.get("input_video_is_hdr", False))
-        hdr_scene_context = self._load_hdr_scene_context(kwargs.get("lora_dir")) if hdr_enabled else None
+        editanything = _is_editanything_model(self.model_def)
+        msr = self.model_def.get("ltx2_msr", False)
+        main_ingredients = _ltx2_main_ingredients_enabled(self.base_model_type, video_prompt_type)
+        output_frame_num = frame_num
+        msr_frame_count = 0
+        if msr and "I" in video_prompt_type and input_ref_images is not None:
+            msr_frame_count = _resolve_msr_reference_frame_count(
+                self.model_def,
+                custom_settings,
+                input_ref_images,
+                "K" in video_prompt_type,
+            )
+            frame_num = max(frame_num, msr_frame_count)
+
+        hdr_enabled = _ltx2_main_loras_compatible(self.base_model_type) and VIDEO_PROMPT_HDR_OUTPUT_FLAG in video_prompt_type
+        input_video_is_hdr = bool(input_video_is_hdr)
+        hdr_scene_context = self._load_hdr_scene_context(lora_dir) if hdr_enabled else None
         if hdr_enabled:
             NAG_scale = 1.0
             audio_prompt_type = ""
             input_waveform = None
-        if distill:
-            audio_prompt_type = audio_prompt_type.replace("1", "")
-        audio_from_control_video = distill and "2" in audio_prompt_type
+        audio_from_control_video = "2" in audio_prompt_type
         image_start = _coerce_image_list(image_start)
         image_end = _coerce_image_list(image_end)
         if frames_to_inject is None:
@@ -980,18 +1414,29 @@ class LTX2:
 
         outpainting_dims = _normalize_outpainting_dims(outpainting_dims)
         any_outpainting = outpainting_dims is not None and "V" in video_prompt_type
+        ltx2_inpainting = _ltx2_inpainting_enabled(video_prompt_type)
+        new_outpainting = any_outpainting and LTX2_OUTPAINTING_METHOD == 2
         self_refiner_max_plans = self.model_def.get("self_refiner_max_plans", 1)
-        requested_outpaint_gamma_roundtrip =  distill and self.base_model_type == "ltx2_22B" and any_outpainting 
+        requested_outpaint_gamma_roundtrip = _ltx2_main_loras_compatible(self.base_model_type) and any_outpainting and LTX2_OUTPAINTING_METHOD == 1
         if hdr_enabled:
             requested_outpaint_gamma_roundtrip = False
-        if any_outpainting:
+        if any_outpainting and LTX2_OUTPAINTING_METHOD == 1:
             guide_phases = 1
+        if new_outpainting:
+            input_masks = _merge_ltx2_masks(input_masks, _build_outpainting_mask_cthw(input_frames, outpainting_dims))
+            input_masks2 = _merge_ltx2_masks(input_masks2, _build_outpainting_mask_cthw(input_frames2, outpainting_dims))
+        if ltx2_inpainting:
+            input_frames, input_masks = _apply_ltx2_inpaint_preprocess_dilation(input_frames, input_masks, LTX2_INPAINTING_PREPROCESS_MASK_DILATION)
+            input_frames2, input_masks2 = _apply_ltx2_inpaint_preprocess_dilation(input_frames2, input_masks2, LTX2_INPAINTING_PREPROCESS_MASK_DILATION)
         use_outpaint_gamma_roundtrip = False
         latent_stride = 8
         if hasattr(self.pipeline, "pipeline_components"):
             scale_factors = getattr(self.pipeline.pipeline_components, "video_scale_factors", None)
             if scale_factors is not None:
                 latent_stride = int(getattr(scale_factors, "time", scale_factors[0]))
+        if image_mode > 0 and "V" in video_prompt_type and any(letter in video_prompt_type for letter in "PODE") and ((int(frame_num) - 1) // latent_stride + 1) <= 1:
+            frame_num = latent_stride + 1
+            print(f"[WAN2GP][LTX2] Expanding image pose/depth/edge control from one latent to two latents ({frame_num} frames) to allow denoised image generation.")
 
         input_video_strength = max(0.0, min(1.0, input_video_strength))
         if requested_outpaint_gamma_roundtrip:
@@ -1007,13 +1452,17 @@ class LTX2:
         if "G" not in video_prompt_type:
             denoising_strength = 1.0
             masking_strength = 0.0
+        if ltx2_inpainting or new_outpainting:
+            masking_strength = 0.0
         if hdr_enabled and input_video_is_hdr and torch.is_tensor(input_video):
             input_video = hdr_linear_to_vae_range(input_video, transform=LTX2_HDR_TRANSFORM).to(dtype=input_video.dtype)
         control_strength = denoising_strength
         ic_lora_downscale_factor = None
-        if distill:
-            ic_lora_downscale_factor = _infer_ic_lora_downscale_factor(loras_selected)
+        ic_lora_downscale_factor = _infer_ic_lora_downscale_factor(loras_selected)
         video_conditioning_downscale_factor = ic_lora_downscale_factor or 1
+        if video_conditioning_downscale_factor > 1 and ((int(frame_num) - 1) // latent_stride + 1) <= 1:
+            print("[WAN2GP][LTX2] Disabling downscaled control conditioning for single-latent-frame generation.")
+            video_conditioning_downscale_factor = 1
          # merge_conditioning_and_guide = False
         has_prefix_frames = input_video is not None 
         is_start_image_only = image_start is not None and (not has_prefix_frames or prefix_frames_count <= 1)
@@ -1041,8 +1490,12 @@ class LTX2:
                 if merge_conditioning_and_guide or continuous_conditioning_and_guide:
                     if prefix_frames_count == 1:
                         input_frames[:, 0] = input_video[:, 0]
+                        if new_outpainting and input_masks is not None:
+                            input_masks[:, 0] = 0
                     else:
                         input_frames = torch.concat( [input_video[:, :prefix_frames_count],  input_frames[:, 1:]], dim=1)
+                        if new_outpainting and input_masks is not None:
+                            input_masks = torch.concat([torch.zeros_like(input_video[:1, :prefix_frames_count], dtype=input_masks.dtype, device=input_masks.device), input_masks[:, 1:]], dim=1)
                     if continuous_conditioning_and_guide:
                         control_start_frame = -prefix_frames_count
                     else:
@@ -1052,6 +1505,10 @@ class LTX2:
                 elif skip_first_guide_latent:
                     control_start_frame = -prefix_frames_count
 
+                if LTX2_PAD_MASKED_CONTROL_VIDEO_TAIL and new_outpainting:
+                    target_control_frames = int(frame_num) - int(control_start_frame) if control_start_frame > 0 else int(frame_num)
+                    input_frames, input_masks = _pad_ltx2_masked_control_video_tail(input_frames, input_masks, target_control_frames)
+                    input_frames2, input_masks2 = _pad_ltx2_masked_control_video_tail(input_frames2, input_masks2, target_control_frames)
 
                 conditioning_entries = []
                 if input_frames is not None:
@@ -1073,6 +1530,36 @@ class LTX2:
                             "mask": input_masks2,
                             "start_frame": control_start_frame,
                         }
+
+        force_stage2_ref_video_conditioning = False
+        if msr and "I" in video_prompt_type and input_ref_images is not None:
+            ref_video = _build_msr_reference_video(
+                input_ref_images,
+                msr_frame_count,
+                int(width),
+                int(height),
+                "K" in video_prompt_type,
+                _is_msr_v2_model_def(self.model_def),
+            )
+            if video_conditioning is None:
+                video_conditioning = []
+            video_conditioning.append((ref_video, 0, control_strength))
+            force_stage2_ref_video_conditioning = True
+        elif main_ingredients and "I" in video_prompt_type and input_ref_images is not None:
+            ref_frame_count = int(frame_num)
+            ref_video = _duplicate_ref_image_as_video(input_ref_images, ref_frame_count)
+            if ref_video is not None:
+                if video_conditioning is None:
+                    video_conditioning = []
+                video_conditioning.append((ref_video, 0, control_strength))
+                force_stage2_ref_video_conditioning = True
+        elif not editanything and "I" in video_prompt_type and "F" not in video_prompt_type and "K" not in video_prompt_type and input_ref_images is not None:
+            ref_frame_count = self.model_def.get("ltx2_ic_lora_ref_video_frames", 1)
+            ref_video = _duplicate_ref_image_as_video(input_ref_images, ref_frame_count)
+            if ref_video is not None:
+                if video_conditioning is None:
+                    video_conditioning = []
+                video_conditioning.append((ref_video, 0, control_strength))
 
         latent_conditioning_stage2 = None
 
@@ -1109,7 +1596,7 @@ class LTX2:
             images_stage2.append(entry)
 
         if image_end is not None:
-            entry = (image_end, int(frame_num - 1), input_video_strength)
+            entry = (image_end, output_frame_num - 1 if image_end_frame_position is None else int(image_end_frame_position), input_video_strength)
             guiding_images.append(entry)
             guiding_images_stage2.append(entry)
 
@@ -1118,6 +1605,7 @@ class LTX2:
         tiling_config = _build_tiling_config(VAE_tile_size, fps)
         interrupt_check = lambda: self._interrupt
         text_connectors = text_connectors or getattr(self, "_text_connectors", None)
+        editanything_ref_images = input_ref_images if editanything else None
 
         audio_conditionings = None
         audio_conditionings_stage2 = None
@@ -1154,60 +1642,67 @@ class LTX2:
                             )
                             waveform = torch.cat([waveform, pad], dim=1)
 
+                waveform = waveform.to(device="cpu", dtype=torch.float32)
+                if "1" in audio_prompt_type:
+                    max_samples = int(round(float(waveform_sample_rate) * LTX2_ID_LORA_MAX_REFERENCE_SECONDS))
+                    waveform = waveform[:, :, :max_samples]
                 audio_processor = AudioProcessor(
                     sample_rate=self.audio_encoder.sample_rate,
                     mel_bins=self.audio_encoder.mel_bins,
                     mel_hop_length=self.audio_encoder.mel_hop_length,
                     n_fft=self.audio_encoder.n_fft,
                 )
-                waveform = waveform.to(device="cpu", dtype=torch.float32)
-                if "1" in audio_prompt_type:
-                    max_samples = int(round(float(waveform_sample_rate) * LTX2_ID_LORA_MAX_REFERENCE_SECONDS))
-                    waveform = waveform[:, :, :max_samples]
-                audio_processor = audio_processor.to(waveform.device)
-                mel = audio_processor.waveform_to_mel(waveform, waveform_sample_rate)
-                if self._interrupt:
-                    return None
-                audio_params = next(self.audio_encoder.parameters(), None)
-                audio_device = audio_params.device if audio_params is not None else self.device
-                audio_dtype = audio_params.dtype if audio_params is not None else self.dtype
-                mel = mel.to(device=audio_device, dtype=audio_dtype)
-                with torch.inference_mode():
-                    audio_latent = self.audio_encoder(mel)
-                if self._interrupt:
-                    return None
-                audio_downsample = getattr(
-                    getattr(self.audio_encoder, "patchifier", None),
-                    "audio_latent_downsample_factor",
-                    4,
-                )
-                audio_latent = audio_latent.to(device=self.device, dtype=self.dtype)
-                if "1" in audio_prompt_type:
-                    audio_conditionings = [AudioConditionByReferenceLatent(audio_latent)]
-                    audio_conditionings_stage2 = []
-                    audio_identity_guidance_scale = LTX2_ID_LORA_GUIDANCE_SCALE
-                else:
-                    target_shape = AudioLatentShape.from_video_pixel_shape(
-                        VideoPixelShape(
-                            batch=audio_latent.shape[0],
-                            frames=int(frame_num),
-                            width=1,
-                            height=1,
-                            fps=float(fps),
-                        ),
-                        channels=audio_latent.shape[1],
-                        mel_bins=audio_latent.shape[3],
-                        sample_rate=self.audio_encoder.sample_rate,
-                        hop_length=self.audio_encoder.mel_hop_length,
-                        audio_latent_downsample_factor=audio_downsample,
+                skip_audio_conditioning = False
+                waveform_sample_rate = int(waveform_sample_rate or 0)
+                input_samples = int(waveform.shape[-1])
+                if "1" not in audio_prompt_type and audio_processor.waveform_too_short_for_mel(waveform, waveform_sample_rate):
+                    print(f"[WAN2GP][LTX2] Audio conditioning is too short for mel encoding ({input_samples} samples at {waveform_sample_rate} Hz); disabling it so audio frames are denoised.")
+                    skip_audio_conditioning = True
+                if not skip_audio_conditioning:
+                    audio_processor = audio_processor.to(waveform.device)
+                    mel = audio_processor.waveform_to_mel(waveform, waveform_sample_rate)
+                    if self._interrupt:
+                        return None
+                    audio_params = next(self.audio_encoder.parameters(), None)
+                    audio_device = audio_params.device if audio_params is not None else self.device
+                    audio_dtype = audio_params.dtype if audio_params is not None else self.dtype
+                    mel = mel.to(device=audio_device, dtype=audio_dtype)
+                    with torch.inference_mode():
+                        audio_latent = self.audio_encoder(mel)
+                    if self._interrupt:
+                        return None
+                    audio_downsample = getattr(
+                        getattr(self.audio_encoder, "patchifier", None),
+                        "audio_latent_downsample_factor",
+                        4,
                     )
-                    target_frames = target_shape.frames
-                    if audio_latent.shape[2] < target_frames:
-                        audio_conditionings = [AudioConditionByLatentPrefix(audio_latent)]
+                    audio_latent = audio_latent.to(device=self.device, dtype=self.dtype)
+                    if "1" in audio_prompt_type:
+                        audio_conditionings = [AudioConditionByReferenceLatent(audio_latent)]
+                        audio_conditionings_stage2 = []
+                        audio_identity_guidance_scale = LTX2_ID_LORA_GUIDANCE_SCALE
                     else:
-                        if audio_latent.shape[2] > target_frames:
-                            audio_latent = audio_latent[:, :, :target_frames, :]
-                        audio_conditionings = [AudioConditionByLatent(audio_latent, audio_strength)]
+                        target_shape = AudioLatentShape.from_video_pixel_shape(
+                            VideoPixelShape(
+                                batch=audio_latent.shape[0],
+                                frames=int(frame_num),
+                                width=1,
+                                height=1,
+                                fps=float(fps),
+                            ),
+                            channels=audio_latent.shape[1],
+                            mel_bins=audio_latent.shape[3],
+                            sample_rate=self.audio_encoder.sample_rate,
+                            hop_length=self.audio_encoder.mel_hop_length,
+                            audio_latent_downsample_factor=audio_downsample,
+                        )
+                        target_frames = target_shape.frames
+                        if audio_latent.shape[2] < target_frames:
+                            audio_conditionings = [AudioConditionByLatentPrefix(audio_latent)]
+                        else:
+                            if audio_latent.shape[2] > target_frames:
+                                audio_latent = audio_latent[:, :, :target_frames, :]
+                            audio_conditionings = [AudioConditionByLatent(audio_latent, audio_strength)]
 
         target_height = int(height)
         target_width = int(width)
@@ -1231,8 +1726,8 @@ class LTX2:
         video_conditioning_stage2 = None
         negative_prompt = n_prompt if n_prompt else DEFAULT_NEGATIVE_PROMPT
         skip_stage_2 = guide_phases <= 1
-        phase2_ic_lora = phase2_ic_lora_name(loras_selected, loras_slists) if video_conditioning else None
-        if video_conditioning and phase2_ic_lora is not None:
+        phase2_ic_lora = phase2_ic_lora_name(loras_selected, loras_slists, force_phase2_control=editanything, force_name="EditAnything") if video_conditioning else None
+        if video_conditioning and (phase2_ic_lora is not None or (force_stage2_ref_video_conditioning and not skip_stage_2)):
             video_conditioning_stage2 = video_conditioning
         if audio_cfg_scale is None:
             effective_audio_cfg_scale = LTX2_ID_LORA_AUDIO_CFG_SCALE if "1" in audio_prompt_type else float(guide_scale)
@@ -1241,9 +1736,26 @@ class LTX2:
         if "1" in audio_prompt_type and effective_audio_cfg_scale <= 1.0:
             effective_audio_cfg_scale = LTX2_ID_LORA_AUDIO_CFG_SCALE
         sample_solver = sample_solver.lower()
+        prompt_relay_epsilon = 1e-3
+        if isinstance(custom_settings, dict):
+            try:
+                prompt_relay_epsilon = float(custom_settings.get("prompt_relay_epsilon", prompt_relay_epsilon))
+            except (TypeError, ValueError):
+                pass
+        if not 0 < prompt_relay_epsilon < 1:
+            prompt_relay_epsilon = 1e-3
+        prompt_relay_frame_offset = 0
+        if int(window_no or 1) > 1 or (input_video is not None and not is_start_image_only):
+            prompt_relay_frame_offset = max(0, int(prefix_frames_count or 0))
+        ltx2_22B_class = self.model_def.get("ltx2_22B_class", False)
+
+        def run_ltx2_pipeline(**pipeline_kwargs):
+            pipeline_context = self.pipeline.joyai_echo_context(joyai_context) if joyai_context is not None else nullcontext()
+            with pipeline_context:
+                return self.pipeline(**pipeline_kwargs)
 
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
-            pipeline_output = self.pipeline(
+            pipeline_output = run_ltx2_pipeline(
                 prompt=input_prompt,
                 negative_prompt=negative_prompt,
                 seed=int(seed),
@@ -1251,6 +1763,8 @@ class LTX2:
                 width=target_width,
                 num_frames=int(frame_num),
                 frame_rate=float(fps),
+                prompt_relay_frame_offset=prompt_relay_frame_offset,
+                prompt_relay_epsilon=prompt_relay_epsilon,
                 num_inference_steps=int(sampling_steps),
                 cfg_guidance_scale=float(guide_scale),
                 audio_cfg_guidance_scale=effective_audio_cfg_scale,
@@ -1286,11 +1800,17 @@ class LTX2:
                 return_latent_slice=return_latent_slice,
                 continuous_conditioning_and_guide=continuous_conditioning_and_guide,
                 skip_stage_2=skip_stage_2,
+                frozen_video_conditioning=frozen_control_video,
+                frozen_output_video=frozen_control_video,
                 self_refiner_setting=self_refiner_setting,
                 self_refiner_plan=self_refiner_plan,
                 self_refiner_f_uncertainty=self_refiner_f_uncertainty,
                 self_refiner_certain_percentage=self_refiner_certain_percentage,
                 self_refiner_max_plans=self_refiner_max_plans,
+                editanything_ref_images=editanything_ref_images,
+                ltx2_22B_class=ltx2_22B_class,
+                hdr_transform=LTX2_HDR_TRANSFORM if hdr_enabled else None,
+                skip_audio=hdr_enabled,
             )
         else:
             distilled_kwargs = {}
@@ -1302,7 +1822,7 @@ class LTX2:
                         "NAG_alpha": float(NAG_alpha),
                     }
                 )
-            pipeline_output = self.pipeline(
+            pipeline_output = run_ltx2_pipeline(
                 prompt=input_prompt,
                 negative_prompt=negative_prompt,
                 seed=int(seed),
@@ -1310,6 +1830,8 @@ class LTX2:
                 width=target_width,
                 num_frames=int(frame_num),
                 frame_rate=float(fps),
+                prompt_relay_frame_offset=prompt_relay_frame_offset,
+                prompt_relay_epsilon=prompt_relay_epsilon,
                 images=images,
                 guiding_images=guiding_images or None,
                 guiding_images_stage2=guiding_images_stage2 or None,
@@ -1345,11 +1867,17 @@ class LTX2:
                 self_refiner_f_uncertainty=self_refiner_f_uncertainty,
                 self_refiner_certain_percentage=self_refiner_certain_percentage,
                 self_refiner_max_plans=self_refiner_max_plans,
+                editanything_ref_images=editanything_ref_images,
+                ltx2_22B_class=ltx2_22B_class,
+                use_ancestral_sampler=distill and self.base_model_type == "ltx2_25_22B",
                 **distilled_kwargs,
             )
 
         latent_slice = None
-        if isinstance(pipeline_output, tuple) and len(pipeline_output) == 3:
+        memory_latents = None
+        if isinstance(pipeline_output, tuple) and len(pipeline_output) == 4:
+            video, audio, latent_slice, memory_latents = pipeline_output
+        elif isinstance(pipeline_output, tuple) and len(pipeline_output) == 3:
             video, audio, latent_slice = pipeline_output
         else:
             video, audio = pipeline_output
@@ -1369,8 +1897,10 @@ class LTX2:
         if video_tensor is None:
             return None
 
-        video_tensor = video_tensor[:, :frame_num, :height, :width]
+        video_tensor = video_tensor[:, :output_frame_num, :height, :width]
         if use_outpaint_gamma_roundtrip:
+            if torch.is_inference(video_tensor):
+                raise RuntimeError("LTX2 decoded video output is still an inference tensor; decode_video_to_tensor must allocate the output buffer outside inference mode.")
             exponent = float(LTX2_OUTPAINT_GAMMA)
             if video_tensor.dtype == torch.uint8:
                 corrected = video_tensor.to(dtype=torch.float32).div_(255.0).clamp_(0.0, 1.0).pow_(exponent)
@@ -1378,7 +1908,16 @@ class LTX2:
             else:
                 corrected = video_tensor.to(dtype=torch.float32).add_(1.0).mul_(0.5).clamp_(0.0, 1.0).pow_(exponent)
                 video_tensor.copy_(corrected.mul_(2.0).sub_(1.0).to(dtype=video_tensor.dtype))
-        audio_np = None if hdr_enabled else audio.detach().float().cpu().numpy() if audio is not None else None
+        blend_inpainting = ltx2_inpainting and LTX2_INPAINTING_LAPLACIAN_BLEND
+        blend_outpainting = new_outpainting and LTX2_OUTPAINTING_LAPLACIAN_BLEND
+        if blend_inpainting or blend_outpainting:
+            blend_source = input_frames if input_frames is not None else input_frames2
+            blend_mask = input_masks if input_masks is not None else input_masks2
+            mask_low_res_dilation = LTX2_OUTPAINTING_LAPLACIAN_MASK_LOW_RES_DILATION if blend_outpainting else LTX2_INPAINTING_LAPLACIAN_MASK_LOW_RES_DILATION
+            video_tensor = _apply_ltx2_mask_blend(video_tensor, blend_source, blend_mask, output_frame_num, height, width, mask_low_res_dilation=mask_low_res_dilation, sanitize_masked_source=blend_inpainting and LTX2_INPAINTING_SANITIZE_LAPLACIAN_SOURCE)
+        if image_mode > 0:
+            video_tensor = video_tensor[:, :1]
+        audio_np = None if image_mode > 0 or hdr_enabled else audio.detach().float().cpu().numpy() if audio is not None else None
         if audio_np is not None and audio_np.ndim == 2:
             if audio_np.shape[0] in (1, 2) and audio_np.shape[1] > audio_np.shape[0]:
                 audio_np = audio_np.T
@@ -1394,4 +1933,9 @@ class LTX2:
             result["hdr_transform"] = LTX2_HDR_TRANSFORM
         if latent_slice is not None:
             result["latent_slice"] = latent_slice
+        if memory_latents is not None:
+            result["_memory_latents"] = memory_latents
+        if joyai_memory_bank is not None:
+            from .joyai_echo import record_joyai_echo_memory
+            result = record_joyai_echo_memory(self, result, joyai_memory_bank, joyai_store_mem_selectors, prefix_frames_count, frame_num, fps, window_no)
         return result

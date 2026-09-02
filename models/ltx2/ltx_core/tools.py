@@ -49,7 +49,8 @@ class LatentTools(Protocol):
         latent = self.patchifier.patchify(latent_state.latent)
         clean_latent = self.patchifier.patchify(latent_state.clean_latent)
         denoise_mask = self.patchifier.patchify(latent_state.denoise_mask)
-        return replace(latent_state, latent=latent, denoise_mask=denoise_mask, clean_latent=clean_latent)
+        keyframes_mask = self.patchifier.patchify(latent_state.keyframes_mask) if latent_state.keyframes_mask is not None else None
+        return replace(latent_state, latent=latent, denoise_mask=denoise_mask, clean_latent=clean_latent, keyframes_mask=keyframes_mask)
 
     def unpatchify(self, latent_state: LatentState) -> LatentState:
         """
@@ -61,7 +62,8 @@ class LatentTools(Protocol):
         denoise_mask = self.patchifier.unpatchify(
             latent_state.denoise_mask, output_shape=self.target_shape.mask_shape()
         )
-        return replace(latent_state, latent=latent, denoise_mask=denoise_mask, clean_latent=clean_latent)
+        keyframes_mask = self.patchifier.unpatchify(latent_state.keyframes_mask, output_shape=self.target_shape.mask_shape()) if latent_state.keyframes_mask is not None else None
+        return replace(latent_state, latent=latent, denoise_mask=denoise_mask, clean_latent=clean_latent, keyframes_mask=keyframes_mask)
 
     def clear_conditioning(self, latent_state: LatentState) -> LatentState:
         """
@@ -76,7 +78,12 @@ class LatentTools(Protocol):
         denoise_mask = torch.ones_like(latent_state.denoise_mask)[:, :num_tokens]
         positions = latent_state.positions[:, :, :num_tokens]
 
-        return LatentState(latent=latent, denoise_mask=denoise_mask, positions=positions, clean_latent=clean_latent)
+        attention_mask = None
+        if latent_state.attention_mask is not None:
+            attention_mask = latent_state.attention_mask[:, :num_tokens, :num_tokens]
+        keyframes_mask = latent_state.keyframes_mask[:, :num_tokens] if latent_state.keyframes_mask is not None else None
+
+        return LatentState(latent=latent, denoise_mask=denoise_mask, positions=positions, clean_latent=clean_latent, attention_mask=attention_mask, keyframes_mask=keyframes_mask)
 
 
 @dataclass(frozen=True)
@@ -130,14 +137,18 @@ class VideoLatentTools(LatentTools):
         ).float()
         positions[:, 0, ...] = positions[:, 0, ...] / self.fps
 
-        return self.patchify(
+        state = self.patchify(
             LatentState(
                 latent=initial_latent,
                 denoise_mask=denoise_mask,
-                positions=positions.to(dtype),
+                positions=positions,
                 clean_latent=clean_latent,
             )
         )
+        keyframes_mask = torch.zeros_like(state.denoise_mask)
+        first_frame_tokens = self.patchifier.get_token_count(self.target_shape._replace(frames=1))
+        keyframes_mask[:, :first_frame_tokens] = 1.0
+        return replace(state, keyframes_mask=keyframes_mask)
 
 
 @dataclass(frozen=True)
@@ -208,5 +219,8 @@ class AudioLatentTools(LatentTools):
         clean_latent = latent_state.clean_latent[:, start_token:stop_token]
         denoise_mask = torch.ones_like(latent_state.denoise_mask[:, start_token:stop_token])
         positions = latent_state.positions[:, :, start_token:stop_token]
+        attention_mask = None
+        if latent_state.attention_mask is not None:
+            attention_mask = latent_state.attention_mask[:, start_token:stop_token, start_token:stop_token]
 
-        return LatentState(latent=latent, denoise_mask=denoise_mask, positions=positions, clean_latent=clean_latent)
+        return LatentState(latent=latent, denoise_mask=denoise_mask, positions=positions, clean_latent=clean_latent, attention_mask=attention_mask)

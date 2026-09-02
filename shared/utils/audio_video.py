@@ -21,6 +21,7 @@ import re
 from .hdr import hdr10_x265_params, hdr10_zscale_filter, iter_hdr_gbrpf32_frames, iter_video_chunks
 
 from .video_decode import probe_video_stream_metadata, resolve_media_binary
+from .video_codecs import SUPPORTED_VIDEO_CONTAINERS, get_imageio_codec_params, get_video_encode_args, validate_video_output_settings
 from .virtual_media import get_virtual_media_entry, parse_virtual_media_path, strip_virtual_media_suffix
 
 def _ffmpeg_binary():
@@ -100,8 +101,126 @@ def create_silent_wav_file(output_dir=None, duration_seconds=0.0, sample_rate=16
     return write_wav_file(path, np.zeros(num_samples, dtype=np.float32), sample_rate)
 
 
-def _compute_active_abs_amplitude(audio_data):
-    abs_audio = np.abs(np.asarray(audio_data, dtype=np.float32)).reshape(-1)
+def truncate_audio(generated_audio, trim_video_frames_beginning, trim_video_frames_end, video_fps, audio_sampling_rate):
+    samples_per_frame = audio_sampling_rate / video_fps
+    start = int(trim_video_frames_beginning * samples_per_frame)
+    end = generated_audio.shape[0] - int(trim_video_frames_end * samples_per_frame)
+    return generated_audio[start:end if end > 0 else None]
+
+
+def shift_audio_trim_ranges(trim_ranges, offset_frames):
+    shifted = []
+    for start_frame, frame_count in trim_ranges:
+        start_frame -= offset_frames
+        end_frame = start_frame + frame_count
+        if end_frame <= 0:
+            continue
+        start_frame = max(0, start_frame)
+        shifted.append((start_frame, end_frame - start_frame))
+    return shifted
+
+
+def trim_audio_ranges(audio_data, trim_ranges, video_fps, audio_sampling_rate):
+    if len(trim_ranges) == 0:
+        return audio_data
+    audio_data = np.asarray(audio_data, dtype=np.float32)
+    samples_per_frame = audio_sampling_rate / video_fps
+    pieces = []
+    cursor = 0
+    total_samples = audio_data.shape[0]
+    removed_frames = 0
+    for start_frame, frame_count in sorted(trim_ranges):
+        source_start_frame = start_frame + removed_frames
+        source_end_frame = source_start_frame + frame_count
+        start = max(cursor, min(total_samples, int(source_start_frame * samples_per_frame)))
+        end = max(start, min(total_samples, int(source_end_frame * samples_per_frame)))
+        if start > cursor:
+            pieces.append(audio_data[cursor:start])
+        cursor = end
+        removed_frames += frame_count
+    if cursor < total_samples:
+        pieces.append(audio_data[cursor:])
+    return np.concatenate(pieces, axis=0) if len(pieces) > 0 else audio_data[:0]
+
+
+def trim_audio_file_ranges(audio_path, trim_ranges, video_fps, output_path):
+    if len(trim_ranges) == 0:
+        return audio_path
+    audio_data, audio_sampling_rate = sf.read(audio_path, dtype="float32")
+    trimmed_audio = trim_audio_ranges(audio_data, trim_ranges, video_fps, audio_sampling_rate)
+    return write_wav_file(output_path, trimmed_audio, audio_sampling_rate)
+
+
+def slice_audio_window(audio_path, start_frame, num_frames, fps, output_dir=None, suffix="", pad_head=True, pad_tail=True):
+    start_sec = float(start_frame) / float(fps)
+    duration_sec = float(num_frames) / float(fps)
+
+    with sf.SoundFile(audio_path) as audio_file:
+        sample_rate = audio_file.samplerate
+        channels = audio_file.channels
+        total_frames = len(audio_file)
+        start_sample = int(round(start_sec * sample_rate))
+        pad_start = 0
+        if start_sample < 0 and pad_head:
+            pad_start = -start_sample
+        if start_sample < 0:
+            start_sample = 0
+        frames_to_read = int(round(duration_sec * sample_rate))
+        if start_sample > total_frames:
+            data = np.zeros((0, channels), dtype=np.float32)
+        else:
+            audio_file.seek(min(start_sample, total_frames))
+            data = audio_file.read(frames_to_read, dtype="float32", always_2d=True)
+
+    if pad_head and pad_start > 0:
+        data = np.concatenate([np.zeros((pad_start, channels), dtype=np.float32), data], axis=0)
+    if pad_tail:
+        target_frames = (pad_start if pad_head else 0) + frames_to_read
+        if data.shape[0] < target_frames:
+            pad_end = target_frames - data.shape[0]
+            data = np.concatenate([data, np.zeros((pad_end, channels), dtype=np.float32)], axis=0)
+    return data, sample_rate
+
+
+def get_audio_file_sample_rate(audio_path):
+    probe = ffmpeg.probe(os.fspath(audio_path), cmd=_ffprobe_binary())
+    audio_stream = next((stream for stream in probe["streams"] if stream.get("codec_type") == "audio"), None)
+    if audio_stream is None or not audio_stream.get("sample_rate"):
+        raise ValueError(f"Unable to read audio sample rate from {audio_path}")
+    return int(audio_stream["sample_rate"])
+
+
+def get_audio_file_channels(audio_path):
+    probe = ffmpeg.probe(os.fspath(audio_path), cmd=_ffprobe_binary())
+    audio_stream = next((stream for stream in probe["streams"] if stream.get("codec_type") == "audio"), None)
+    if audio_stream is None or not audio_stream.get("channels"):
+        raise ValueError(f"Unable to read audio channel count from {audio_path}")
+    return int(audio_stream["channels"])
+
+
+def resolve_mux_audio_sampling_rate(default_rate, source_audio_metadata=None, audio_paths=None):
+    sample_rates = [int(default_rate)]
+    for meta in source_audio_metadata or []:
+        sample_rate = int(meta.get("sample_rate", 0) or 0)
+        if sample_rate > 0:
+            sample_rates.append(sample_rate)
+    for audio_path in audio_paths or []:
+        if audio_path:
+            sample_rates.append(get_audio_file_sample_rate(audio_path))
+    return max(sample_rates)
+
+
+def _compute_active_abs_amplitude(audio_data, active_mask=None):
+    audio_data = np.asarray(audio_data, dtype=np.float32)
+    if active_mask is not None:
+        active_mask = np.asarray(active_mask, dtype=np.float32).reshape(-1) > 0.5
+        if audio_data.ndim == 1:
+            active_mask = active_mask[:audio_data.shape[0]]
+            audio_data = audio_data[:active_mask.shape[0]][active_mask]
+        else:
+            active_mask = active_mask[:audio_data.shape[0]]
+            audio_data = audio_data[:active_mask.shape[0]][active_mask]
+    abs_audio = np.abs(audio_data).reshape(-1)
     if abs_audio.size == 0:
         return 0.0, 0.0
     avg_abs = float(abs_audio.mean())
@@ -113,19 +232,31 @@ def _compute_active_abs_amplitude(audio_data):
     return avg_abs, active_avg_abs
 
 
-def normalize_audio_pair_volumes_to_temp_files(audio_path1, audio_path2, output_dir=None, prefix="audio_norm_"):
-    audio1, sr1 = sf.read(os.fspath(audio_path1), dtype="float32", always_2d=False)
-    audio2, sr2 = sf.read(os.fspath(audio_path2), dtype="float32", always_2d=False)
-
-    avg1, active1 = _compute_active_abs_amplitude(audio1)
-    avg2, active2 = _compute_active_abs_amplitude(audio2)
+def normalize_audio_pair_volumes(audio1, audio2, active_mask1=None, active_mask2=None):
+    audio1 = np.asarray(audio1, dtype=np.float32)
+    audio2 = np.asarray(audio2, dtype=np.float32)
+    avg1, active1 = _compute_active_abs_amplitude(audio1, active_mask1)
+    avg2, active2 = _compute_active_abs_amplitude(audio2, active_mask2)
     midpoint = 0.5 * (active1 + active2)
     eps = 1e-8
     gain1 = midpoint / active1 if active1 > eps else 1.0
     gain2 = midpoint / active2 if active2 > eps else 1.0
+    stats = {
+        "audio1_avg_abs": float(avg1),
+        "audio2_avg_abs": float(avg2),
+        "audio1_active_avg_abs": float(active1),
+        "audio2_active_avg_abs": float(active2),
+        "target_active_avg_abs": float(midpoint),
+        "audio1_gain": float(gain1),
+        "audio2_gain": float(gain2),
+    }
+    return np.clip(audio1 * float(gain1), -1.0, 1.0), np.clip(audio2 * float(gain2), -1.0, 1.0), stats
 
-    norm1 = np.clip(np.asarray(audio1, dtype=np.float32) * float(gain1), -1.0, 1.0)
-    norm2 = np.clip(np.asarray(audio2, dtype=np.float32) * float(gain2), -1.0, 1.0)
+
+def normalize_audio_pair_volumes_to_temp_files(audio_path1, audio_path2, output_dir=None, prefix="audio_norm_", active_mask1=None, active_mask2=None):
+    audio1, sr1 = sf.read(os.fspath(audio_path1), dtype="float32", always_2d=False)
+    audio2, sr2 = sf.read(os.fspath(audio_path2), dtype="float32", always_2d=False)
+    norm1, norm2, stats = normalize_audio_pair_volumes(audio1, audio2, active_mask1=active_mask1, active_mask2=active_mask2)
 
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
@@ -136,16 +267,6 @@ def normalize_audio_pair_volumes_to_temp_files(audio_path1, audio_path2, output_
     os.close(fd2)
     sf.write(out1, norm1, int(sr1))
     sf.write(out2, norm2, int(sr2))
-
-    stats = {
-        "audio1_avg_abs": float(avg1),
-        "audio2_avg_abs": float(avg2),
-        "audio1_active_avg_abs": float(active1),
-        "audio2_active_avg_abs": float(active2),
-        "target_active_avg_abs": float(midpoint),
-        "audio1_gain": float(gain1),
-        "audio2_gain": float(gain2),
-    }
     return out1, out2, stats
 
 
@@ -176,22 +297,40 @@ def get_mp4_audio_codec_settings(codec_key):
     return settings.get(codec_key, settings["aac_128"])
 
 
-def get_video_encode_args(codec_key: str | None, container: str | None) -> list[str]:
-    codec_key = str(codec_key or "libx264_8").strip().lower() or "libx264_8"
-    container = str(container or "mp4").strip().lower() or "mp4"
-    if codec_key == "libx264_8":
-        return ["-c:v", "libx264", "-crf", "23", "-pix_fmt", "yuv420p"]
-    if codec_key == "libx264_10":
-        return ["-c:v", "libx264", "-crf", "21", "-pix_fmt", "yuv420p"]
-    if codec_key == "libx265_28":
-        return ["-c:v", "libx265", "-crf", "28", "-pix_fmt", "yuv420p", "-x265-params", "log-level=none"]
-    if codec_key == "libx265_8":
-        return ["-c:v", "libx265", "-crf", "8", "-pix_fmt", "yuv420p", "-x265-params", "log-level=none"]
-    if codec_key == "libx264_lossless":
-        if container == "mkv":
-            return ["-c:v", "ffv1", "-pix_fmt", "rgb24"]
-        return ["-c:v", "libx264", "-crf", "0", "-pix_fmt", "yuv444p"]
-    return ["-c:v", "libx264", "-crf", "23", "-pix_fmt", "yuv420p"]
+def _infer_video_dimensions(tensor):
+    if torch.is_tensor(tensor):
+        if tensor.ndim == 5:
+            return int(tensor.shape[-1]), int(tensor.shape[-2])
+        if tensor.ndim == 4:
+            if tensor.shape[-1] in (1, 3, 4):
+                return int(tensor.shape[2]), int(tensor.shape[1])
+            return int(tensor.shape[-1]), int(tensor.shape[-2])
+    if isinstance(tensor, (list, tuple)):
+        for chunk in tensor:
+            dims = _infer_video_dimensions(chunk)
+            if dims is not None:
+                return dims
+    return None
+
+
+def _validate_video_save_settings(codec_type, container, tensor):
+    dims = _infer_video_dimensions(tensor)
+    width = height = None
+    if dims is not None:
+        width, height = dims
+    error = validate_video_output_settings(codec_type, container, width=width, height=height, allowed_containers=SUPPORTED_VIDEO_CONTAINERS)
+    if error is not None:
+        raise RuntimeError(error)
+
+
+def _video_frame_tensor_to_uint8(frame, normalize=True, value_range=(-1, 1)):
+    if frame.dtype == torch.uint8:
+        return frame.detach().cpu().contiguous().numpy()
+    frame = frame.detach().to(dtype=torch.float32, copy=True)
+    if normalize:
+        value_min, value_max = min(value_range), max(value_range)
+        frame.clamp_(value_min, value_max).sub_(value_min).div_(value_max - value_min)
+    return frame.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().contiguous().numpy()
 
 
 def _crf_from_video_codec(codec_key: str | None, default: str = "18") -> str:
@@ -403,27 +542,32 @@ def combine_and_concatenate_video_with_audio_tracks(
         s = (sources[i] if i < len(sources)
              else sources[0] if duplicate_source else None)
         n = news[i] if len(news) == N else (news[0] if news else None)
+        meta = source_audio_metadata[i] if source_audio_metadata and i < len(source_audio_metadata) else {}
+        source_channels = int(meta.get('channels', 0) or 0) if s else 0
+        if s and source_channels == 0:
+            source_channels = get_audio_file_channels(s)
+        new_channels = get_audio_file_channels(n) if n else 0
+        channel_layout = 'stereo' if max(source_channels, new_channels) >= 2 else 'mono'
 
         if source_audio_duration == 0:
             if n:
                 inputs += ['-i', n]
-                filters.append(f'[{idx}:a]apad=pad_dur=100[aout{i}]')
+                filters.append(f'[{idx}:a]aformat=channel_layouts={channel_layout},apad=pad_dur=100[aout{i}]')
                 idx += 1
             else:
-                filters.append(f'anullsrc=r={audio_sampling_rate}:cl=mono,apad=pad_dur=100[aout{i}]')
+                filters.append(f'anullsrc=r={audio_sampling_rate}:cl={channel_layout},apad=pad_dur=100[aout{i}]')
         else:
             if s:
                 inputs += ['-i', s]
-                meta = source_audio_metadata[i] if source_audio_metadata and i < len(source_audio_metadata) else {}
                 needs_filter = (
                     meta.get('codec') != audio_codec or
                     meta.get('sample_rate') != audio_sampling_rate or
-                    meta.get('channels') != 1 or
+                    source_channels != (2 if channel_layout == 'stereo' else 1) or
                     meta.get('duration', 0) < source_audio_duration
                 )
                 if needs_filter:
                     filters.append(
-                        f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts=mono,'
+                        f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts={channel_layout},'
                         f'apad=pad_dur={source_audio_duration},atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
                 else:
                     filters.append(
@@ -433,13 +577,13 @@ def combine_and_concatenate_video_with_audio_tracks(
                 idx += 1
             else:
                 filters.append(
-                    f'anullsrc=r={audio_sampling_rate}:cl=mono,atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
+                    f'anullsrc=r={audio_sampling_rate}:cl={channel_layout},atrim=0:{source_audio_duration},asetpts=PTS-STARTPTS[s{i}]')
 
             if n:
                 inputs += ['-i', n]
                 start = '0' if new_audio_from_start else source_audio_duration
                 filters.append(
-                    f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts=mono,'
+                    f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts={channel_layout},'
                     f'atrim=start={start},asetpts=PTS-STARTPTS[n{i}]')
                 filters.append(f'[s{i}][n{i}]concat=n=2:v=0:a=1[aout{i}]')
                 idx += 1
@@ -454,10 +598,9 @@ def combine_and_concatenate_video_with_audio_tracks(
            '-c:v', 'copy',
            '-c:a', audio_codec,
            '-ar', str(audio_sampling_rate),
-           '-ac', '1',
            '-shortest', save_path_tmp]
     if audio_bitrate:
-        cmd[-6:-6] = ['-b:a', audio_bitrate]
+        cmd[-4:-4] = ['-b:a', audio_bitrate]
 
     if verbose:
         print(f"ffmpeg command: {cmd}")
@@ -468,12 +611,14 @@ def combine_and_concatenate_video_with_audio_tracks(
 
 
 def combine_video_with_audio_tracks(target_video, audio_tracks, output_video,
-                                     audio_metadata=None, verbose=False):
+                                     audio_metadata=None, audio_codec_key="aac_128", verbose=False, video_duration=None):
     if not audio_tracks:
         if verbose: print("No audio tracks to combine."); return False
 
-    dur = float(next(s for s in ffmpeg.probe(target_video, cmd=_ffprobe_binary())['streams']
-                     if s['codec_type'] == 'video')['duration'])
+    if video_duration is None:
+        video_duration = float(next(s for s in ffmpeg.probe(target_video, cmd=_ffprobe_binary())['streams']
+                               if s['codec_type'] == 'video')['duration'])
+    dur = video_duration
     if verbose: print(f"Video duration: {dur:.3f}s")
 
     cmd = [_ffmpeg_binary(), '-y', '-i', target_video]
@@ -488,7 +633,11 @@ def combine_video_with_audio_tracks(target_video, audio_tracks, output_video,
         if (lang := meta.get('language')):
             cmd += ['-metadata:s:a:' + str(i), f'language={lang}']
 
-    cmd += ['-c:v', 'copy', '-c:a', 'copy', '-t', str(dur), output_video]
+    audio_settings = get_mp4_audio_codec_settings(audio_codec_key)
+    cmd += ['-c:v', 'copy', '-c:a', audio_settings["codec"]]
+    if audio_settings["bitrate"]:
+        cmd += ['-b:a', audio_settings["bitrate"]]
+    cmd += ['-t', str(dur), output_video]
 
     result = subprocess.run(cmd, capture_output=not verbose, text=True)
     if result.returncode != 0:
@@ -542,6 +691,8 @@ def save_video(tensor,
         
     if torch.is_tensor(tensor) and len(tensor.shape) == 4:
         tensor = tensor.unsqueeze(0)
+
+    _validate_video_save_settings(codec_type, container, tensor)
         
     suffix = f'.{container}'
     cache_file = osp.join('/tmp', rand_name(suffix=suffix)) if save_file is None else save_file
@@ -584,7 +735,7 @@ def save_video(tensor,
                             else:
                                 frames = chunk.permute(1, 2, 3, 0)
                             for frame in frames:
-                                writer.append_data(frame.cpu().numpy())
+                                writer.append_data(_video_frame_tensor_to_uint8(frame, normalize=normalize, value_range=value_range))
                         else:
                             writer.append_data(chunk)
                 else:
@@ -627,7 +778,6 @@ def save_hdr_video(
             break
     if width is None or height is None:
         raise RuntimeError("Unable to determine HDR video dimensions.")
-
     error = None
     for _ in range(retry):
         cmd = [
@@ -670,23 +820,7 @@ def save_hdr_video(
 
 def _get_codec_params(codec_type, container):
     """Get codec parameters based on codec type and container."""
-    if codec_type == 'libx264_8':
-        return {'codec': 'libx264', 'quality': 8, 'pixelformat': 'yuv420p'}
-    elif codec_type == 'libx264_10':
-        return {'codec': 'libx264', 'quality': 10, 'pixelformat': 'yuv420p'}
-    elif codec_type == 'libx265_28':
-        return {'codec': 'libx265', 'pixelformat': 'yuv420p', 'output_params': ['-crf', '28', '-x265-params', 'log-level=none','-hide_banner', '-nostats']}
-    elif codec_type == 'libx265_8':
-        return {'codec': 'libx265', 'pixelformat': 'yuv420p', 'output_params': ['-crf', '8', '-x265-params', 'log-level=none','-hide_banner', '-nostats']}
-    elif codec_type == 'libx264_lossless':
-        if container == 'mkv':
-            return {'codec': 'ffv1', 'pixelformat': 'rgb24'}
-        else:  # mp4
-            return {'codec': 'libx264', 'output_params': ['-crf', '0'], 'pixelformat': 'yuv444p'}
-    elif codec_type == 'libx264_mjpeg':
-        return {'codec': 'libx264', 'quality': 10, 'mode': 'I'}
-    else:  # libx264
-        return {'codec': 'libx264', 'pixelformat': 'yuv420p'}
+    return get_imageio_codec_params(codec_type, container)
 
 
 
@@ -715,22 +849,22 @@ def save_image(tensor,
                          
     for _ in range(retry):
         try:
-            tensor = tensor.clamp(min(value_range), max(value_range))
-            
             if format_info['use_pil'] or RGBA:
                 # Use PIL for WebP and advanced options
-                grid = torchvision.utils.make_grid(tensor, nrow=nrow, normalize=normalize, value_range=value_range)
-                # Convert to PIL Image
-                grid = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+                if tensor.dtype == torch.uint8:
+                    grid = torchvision.utils.make_grid(tensor, nrow=nrow, normalize=False).permute(1, 2, 0).cpu().numpy()
+                else:
+                    tensor = tensor.clamp(min(value_range), max(value_range))
+                    grid = torchvision.utils.make_grid(tensor, nrow=nrow, normalize=normalize, value_range=value_range)
+                    grid = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
                 mode = 'RGBA' if RGBA else 'RGB'
                 img = Image.fromarray(grid, mode=mode)
                 img.save(save_file, **format_info['params'])
             else:
                 # Use torchvision for JPEG and PNG
-                torchvision.utils.save_image(
-                    tensor, save_file, nrow=nrow, normalize=normalize, 
-                    value_range=value_range, **format_info['params']
-                )
+                was_uint8 = tensor.dtype == torch.uint8
+                tensor = tensor.float().div_(255.0) if was_uint8 else tensor.clamp(min(value_range), max(value_range))
+                torchvision.utils.save_image(tensor, save_file, nrow=nrow, normalize=False if was_uint8 else normalize, value_range=value_range, **format_info['params'])
             break
         except Exception as e:
             error = e

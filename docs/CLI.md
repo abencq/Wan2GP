@@ -80,6 +80,19 @@ Queue completed: 3/3 tasks in 5m 23s
 | 1 | Error (file not found, invalid queue, or task failures) |
 | 130 | Interrupted by user (Ctrl+C) |
 
+## MCP Server
+
+```bash
+--mcp                              # Start WanGP as an MCP server without the web UI
+--mcp-transport TRANSPORT          # stdio, sse, or streamable-http
+--mcp-host HOST                    # Host for HTTP transports
+--mcp-port PORT                    # Port for HTTP transports
+--mcp-console-output               # Mirror WanGP output while serving MCP
+--mcp-allow-read-file-system       # Allow agents to submit arbitrary server file paths (disabled by default)
+```
+
+Media IDs returned by the Gallery remain usable when filesystem reads are disabled. Streamable HTTP and SSE servers also expose short-lived Gallery upload/download URLs; stdio does not provide HTTP media transfer.
+
 ### Examples
 ```bash
 # Overnight batch processing
@@ -95,6 +108,16 @@ python wgp.py --process my_queue.zip --verbose 2
 python wgp.py --process queue.zip --output-dir ./out --attention sage2
 ```
 
+## LLM I/O Transcript
+
+```bash
+--llm-io FOLDER                     # Record local and remote LLM traffic as a readable plain-text transcript
+```
+
+WanGP creates a timestamped `.log` file in the supplied folder. Each record is labelled `[OUT → LLM]` or `[IN ← LLM]` and identifies the engine and stream. Text is preserved verbatim; known special tokens include their names and numeric IDs, while other token streams use numeric IDs. Binary media is described by its source, type, dimensions, and size instead of being written as encoded data.
+
+The transcript can contain prompts, conversation history, tool arguments/results, and model output. Enable it only while diagnosing a problem and treat the resulting file as private data.
+
 ## Model and Performance Options
 
 ### Model Configuration
@@ -105,6 +128,8 @@ python wgp.py --process queue.zip --output-dir ./out --attention sage2
 --profile NUMBER              # Performance profile 1-5 (default: 4)
 --preload NUMBER              # Preload N MB of diffusion model in VRAM
 --fp16                        # Force fp16 instead of bf16 models
+--save-quantized              # Save an INT8 Quanto checkpoint during model loading
+--convrot                     # With --save-quantized, save INT8 ConvRot instead of Quanto INT8
 --gpu DEVICE                  # Run on specific GPU device (e.g., "cuda:1")
 ```
 
@@ -241,6 +266,7 @@ python wgp.py --attention sdpa
 python wgp.py --attention sage
 ```
 - Requires Triton installation
+- On RTX 20XX, install SageAttention 1.0.6
 - 30% faster than SDPA
 - Small quality cost
 
@@ -249,6 +275,7 @@ python wgp.py --attention sage
 python wgp.py --attention sage2
 ```
 - Requires Triton and SageAttention 2.x
+- Requires RTX 30XX or newer (Ampere or newer)
 - 40% faster than SDPA
 - Best performance option
 

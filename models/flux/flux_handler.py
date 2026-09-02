@@ -116,6 +116,7 @@ class family_handler():
                 }
             extra_model_def["inpaint_color"] = "FF0000"
             extra_model_def["video_guide_outpainting"] = [1,2]
+            extra_model_def["outpainting_quantize_margins"]= 16
 
         if flux2:
             if flux2_klein:
@@ -158,8 +159,12 @@ class family_handler():
             extra_model_def["radiance"] = True
         elif not flux_schnell and not flux2_klein:
             extra_model_def["embedded_guidance"] = True
+        if not flux_chroma_radiance:
+            extra_model_def["vae_upsamplers"] = {"flux2_vae_pid" if flux2 else "flux_vae_pid": [1, 2]}
+            extra_model_def["excluded_spatial_upsamplers"] = ["flux2_pid" if flux2 else "flux_pid"]
         if flux_uso :
             extra_model_def["any_image_refs_relative_size"] = True
+            extra_model_def["image_refs_relative_size"] = {"min": 20, "max": 100, "step": 1}
             extra_model_def["no_background_removal"] = True
             extra_model_def["image_ref_choices"] = {
                 "choices":[("First Image is a Reference Image, and then the next ones (up to two) are Style Images", "KI"),
@@ -260,7 +265,7 @@ class family_handler():
 
     @staticmethod
     def query_family_infos():
-        return {"flux":(100, "Flux 1"), "flux2":(101, "Flux 2")}
+        return {"flux":(1100, "Flux 1"), "flux2":(1101, "Flux 2")}
 
     @staticmethod
     def register_lora_cli_args(parser, lora_root):
@@ -388,7 +393,7 @@ class family_handler():
             dtype = dtype,
             VAE_dtype = VAE_dtype, 
             mixed_precision_transformer = mixed_precision_transformer,
-            save_quantized = save_quantized
+            save_quantized = save_quantized,
         )
 
         pipe = { "transformer": flux_model.model, "vae" : flux_model.vae}

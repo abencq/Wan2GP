@@ -2,26 +2,56 @@
 
 -----
 <p align="center">
-<b>WanGP by DeepBeepMeep : The best Open Source Video Generative Models Accessible to the GPU Poor</b>
+<b>WanGP by DeepBeepMeep : The best Open Source Generative Models Accessible to the GPU Poor</b>
 </p>
 
-WanGP supports the Wan (and derived models) but also Hunyuan Video, Flux, Qwen, Z-Image, LongCat, Kandinsky, LTXV, LTX-2, Qwen3 TTS, Chatterbox, HearMula, ... with:
-- Low VRAM requirements (as low as 6 GB of VRAM is sufficient for certain models)
-- Support for old Nvidia GPUs (RTX 10XX, 20xx, ...)
-- Support for AMD GPUs (RDNA 4, 3, 3.5, and 2), instructions in the Installation Section Below.
-- Very Fast on the latest GPUs
-- Easy to use Full Web based interface
-- Support for many checkpoint Quantized formats: int8, fp8, gguf, NV FP4, Nunchaku
-- Auto download of the required model adapted to your specific architecture
-- Tools integrated to facilitate Video Generation : Mask Editor, Prompt Enhancer, Temporal and Spatial Generation, MMAudio, Video Browser, Pose / Depth / Flow extractor, Motion Designer
-- Plenty of ready to use Plug Ins: Gallery Browser, Upscaler, Models/Checkpoints Manager, CivitAI browser and downloader, ...
-- Loras Support to customize each model
-- Queuing system : make your shopping list of videos to generate and come back later
-- Headless mode: launch the generation of multiple image / videos / audio files using a command line
+WanGP is a one-stop super app for the best open source generative models across video, image, audio, and text-to-speech.
+
+## Highlights
+
+| Modality | Supported models |
+| --- | --- |
+| **Video** | **Wan 2.1/2.2** and derived models, **MiniMax H3**, **LTX-2/2.3/2.5**, **Hunyuan Video 1/1.5**, **LongCat**, **Kandinsky**, **LTXV**, **MagiHuman** |
+| **Image** | **Krea 2**, **Qwen Image**, **Z-Image**, **Flux 1/2** (*Klein*, Chroma), **SenseNova**, **Ideogram 4**, **HiDream** |
+| **Audio / TTS** | **Qwen3 TTS**, **Ace Step 1/2/XL**, **Omnivoice**, **Index TTS2/2.5**, **KugelAudio**, **HeartMula**, **Chatterbox**, **Minimax Music**, **Stable Audio 3** |
+
+### Run More Models on More Hardware
+
+- **Low VRAM requirements**: run select models with as little as **6 GB of VRAM**.
+- **Older Nvidia GPU support**: use GTX 10XX, RTX 20XX, and newer cards.
+- **AMD GPU support**: run on RDNA 4, 3, 3.5, and 2 hardware; see the Installation section below.
+- **Fast latest-GPU performance**: take advantage of modern GPU acceleration.
+- **Full web interface**: generate, manage, and reuse outputs from an easy browser UI.
+- **LoRA customization**: adapt each model with LoRAs, reuse LoRAs stored in another App.
+- **Many quantized checkpoint formats**: use int8, fp8, gguf, NV FP4, and Nunchaku.
+- **Architecture-aware downloads**: automatically fetch the model files suited to your hardware.
+- **Finetunes**: add your own finetunes / checkpoints or the ones you found on Hugging Face or CivitAI
+- **Generation queue**: line up videos, images, and audio jobs, then come back later.
+- **Headless mode**: launch batches from the command line for images, videos, and audio.
+- **WanGP API**: add generative capabilities to your own apps.
+
+### Built-In Creation Tools
+
+- **Video, image, and audio galleries**: browse generations and reuse them as new inputs.
+- **Reusable settings**: extract settings from any generation, create templates, and share them.
+- **Per-model prompt enhancer**: improve prompts with model-specific syntax and expectations.
+- **Input preparation tools**: use the mask editor, background remover, pose/depth/flow extractors, speaker diarization, and background noise/song remover.
+- **Deepy low-VRAM offline agent**: orchestrate generation jobs and tedious tasks such as transcription, video splitting, and color-frame generation while you are away.
+- **Temporal and spatial upsampling**: improve outputs with RIFE, FlashVSR, and Lanczos.
+- **Audio postprocessing**: generate soundtracks with MMAudio, replace voices with SeedVC, or remux a video with any soundtrack.
+- **Ready-to-use plug-ins**: Gallery Browser, Motion Designer, Models/Checkpoints Manager, CivitAI browser and downloader, and more.
 
 **Discord Server to get Help from the WanGP Community and show your Best Gens:** https://discord.gg/g7efUW9jGV
 
 **Follow DeepBeepMeep on Twitter/X to get the Latest News**: https://x.com/deepbeepmeep
+
+**Official WanGP Web Site**: https://wangp.ai/
+
+> [!IMPORTANT]
+> **WanGP is free to use locally.** The official project will never ask you to pay a license fee, subscription, or donation to run WanGP on your own computer (see the license for terms).
+>
+> **Use only the official GitHub repository or wangp.ai / wan2gp.ai websites. WanGP is not affiliated to any other third-party service using the WanGP/Wan2GP names**, unless explicitly stated here.
+
 
 ## 📋 Table of Contents
 
@@ -33,161 +63,329 @@ WanGP supports the Wan (and derived models) but also Hunyuan Video, Flux, Qwen, 
 
 
 ## 🔥 Latest Updates : 
-### 2nd of May 2026: WanGP v11.52, a Kind of Magic
+## 26th of August 2026: WanGP v12.643, Twice the Phase, Half the Trouble
 
-- **Vista 4D**: Vista4D allows a *Video Reshooting* of a *Dynamic scene* from novel camera trajectories and viewpoints. In other words this Wan 2.1 model will let you relive from a different (moving) perspective a scene with moving people or objects. The sequences are quite short (usually 49 frames, max around 97 frames) but it is a lot of fun as for once this really works. 
+- **H3 Two-Phase Generation with Latent Upscaling**: H3 now offers an LTX2-style two-phase workflow. Under *Advanced Mode / General*, select *Two Phases* from *Phases*. H3 first generates at half the target width and height, upscales the latent, and then performs a fixed three-step refinement at the target resolution using the LightX2V Turbo LoRA. This makes high-resolution generation much faster, even when the first phase uses many steps (for example, 20), but it does not reduce peak VRAM usage. To lower peak VRAM usage, select *Two Phases with Tiling*, which divides the high-resolution video into four tiles. Tiling may introduce visible seams; adjust the new *Phase 2 Noise Level Start* slider to balance fine detail against seamless tile blending.
 
-In real life, there is no chance you should have been able to run this model (it requires x3 the amount of VRAM than what is usally required for equivalent output res and the preprocessing needs 24 GB of VRAM to build a 4D map). But once again thanks to WanGP magic VRAM requirements have been reduced to 10 GB of VRAM or less.
+- **H3 Face Refiner**: detect, identity-track, and refine up to five faces with H3 Ref2VA without changing the video resolution. Select *H3 Face Refiner* under *Advanced Mode / Post Processing*, use the selected Gallery video's *Post Processing* tab for Late Post Processing, or ask Deepy. Set *Faces to Refine* to `0` for automatic selection of up to five relevant faces.
 
-It is highly recommended to apply the *Lightx2v 4 steps* lora profile. Also for best efficiency, you must list all the dynamic objects / people in the *Dynamic object keywords* input.
+- **H3 PDD LoRA Acceleration** (new WanGP 12.645): new 8-step acceleration variants are available for FL2VA and Ref2VA. This is not a mere *LoRA Accelerator*, each sequential model evaluation combines four learned denoising-interval outputs, so it why I had to create new model variants to handle this particular LoRA accelerator. Before you ask, yes when using PDD you are stuck to 8 steps and to the Euler Scheduler. 
 
-- **Magic Mask**: generating a *Video Mask* or *Image Mask* has never been easier and faster. No need to get into the *Video Mask Generator* tab, just click the *Magic Wand* next to *Mask field* and enter a few keywords like *blue car* or *lady to the right* and a high quality mask powered by *SAM3* will be generated automatically. You will appreciate the very good *Temporal Consistency* brought by SAM3.
+- **Sense Nova U1.5**: *SenseNova-U1.5 8B MoT* is a unified image generator and editor designed for native-4K images, text-heavy layouts, and infographics. Select it from the Image model list and generate from text or one or more *Reference Images*. Its built-in *Infographic Prompt* enhancer can expand a short brief into a structured layout; native 4K can be still be generated with 8-9GB of RAM and will produce the best infographics. SenseNova comes with a 8 steps *LoRA Accelerator Profile*. Generation can be further accelerated at the cost of some VRAM by enabling the *KV Cache*.
 
-- **Video Mask Generator with SAM3 support**: if you still need to generate complex masks you can combine the good old point and click masks with the SAM3 / Magic Mask masks. You need to enable this feature in the *Config / Extensions* tab.
+- **New H3 Grouped Row Denoising Mode for Inpainting**: available for both FL2VA & Ref2VA can be used for *Inpainting* in a *Masked Area*
 
-- **LTX-2 Video to Audio**: it was more or less already possible but this new Control Video Process will be much faster and the output video will be unaltered
+- **Deepy Prime for Everyone / Prompts Enhanced by Claude or ChatGPT**: use an OpenAI Codex or Anthropic Claude account, including supported free accounts, to power Deepy Prime and Prompt Enhancer without pausing a WanGP's generation. Open *Configuration / Prompt Enhancer / Deepy*, select *Codex* or *Claude Code* as the LLM engine, sign in, select *Deepy Prime*, and save. Choose models carefully and monitor the token usage shown in the chat footer; see the [Remote LLM guide](docs/REMOTE_LLMS.md) for details.
 
-*update 11.51*: various fixes\
-*update 11.52*: LTX-Video to Audio, fixed bugs in audio continuation with sliding windows 
+- **New Deepy Capabilities**: Deepy can now analyse the content of a video, compare frames and use the new H3 Head refiner. 
 
-### 25th of April 2026: WanGP v11.41, LTX-2 Mega Mix Part 2
-More nice goodies for **LTX-2**:
-- **HDR Control Video support**: you can now provide an HDR Control Video it will be automatically converted to SDR if model doesnt support HDR
+- **Even More Deepy Capabilities**:  (WanGP 12.643),  Deepy can create text files, create sub folders, zip multiple files and send notifications. This opens unlimited possibilities: for instance Deepy can store reference images in a dedicated folder so that these images can be used later, create zip of all generation made today, notify you when the work is done or let you know about current work progress, ...
 
-- **LTX 2.3 SDR to HDR**: thanks to a new HDR Ic lora, you can now convert SDR Videos to HDR using LTX 2.3. This feature is available as a new *Control Video process* and also in the *Process Full Video* plugin. Please note that the embedded Gradio Gallery video player converts automatically any HDR content to SDR, so if you want to enjoy the full HDR content you will need an external media player (for instance *MPC-BE*)
+- **Remote Notifications**: (WanGP 12.643) you can now define *Apprise Destinations* in the *Config / Notification* tab and receives Queue or Deepy related notifications in WhatsApp, Discord, Ntfyn .... The easiest way is to use the *ntfy.sh* service. For instance, just open in your Web Browser https://ntfy.sh/my_unique_sequence and then enter in Apprise Destination *ntfys://my_unique_sequence*
 
-- **LTX 2.3 Control Video Injection in Phase 2**: up to now even if you picked 2 phases, the *Control Video* was only injected in Phase 1 (Phase 2 was only used for upsampling). Now if you have chosen for at least one Ic Lora, a non null mutiplier for phase 2, the control video will be injected also for phase 2. This will increase output quality with 2 phases but will require more VRAM for phase 2.
+*WanGP 12.643*: Even More Deepy Capabilities, Remote Notifications\
+*WanGP 12.644*: Masked Denoising Grouped Row\
+*WanGP 12.645*: H3 PDD LoRA Acceleration
+## 19th of August 2026: WanGP v12.61, Remember to be nice with Deepy
 
-- **Process Full Video Custom Settings**: you can now reuse your own presaved settings in the plugin. As you will  link the plugin to your settings any change to the saved settings  will be immediatly available in the plugin. If you find some great combination of loras / model / settings to be used with this Plugin please share them on the discord server so that I can add them in the official list.
+Deepy and the WanGP Prompt Enhancer have learned some impressive new tricks (enable them from the *Configuration / Deepy* menu):
+- **Speculative Decoding** lets Deepy (and Prompt Enhancer) think up to twice as fast, so there is less waiting between ideas and actions.
+- **INT8 KV Cache Quantization** lets it remember conversations roughly twice as long for the same VRAM budget. Install **GGUF Kernels 1.11** for the best performance; see the [installation guide](docs/INSTALLATION.md).
+- **Smart context compaction** lets Deepy summarize the journey and carry on when its memory starts getting crowded, instead of suddenly forgetting the plot.
+- The new **Qwen3.8 VL 27B** model brings sharper reasoning and richer enhanced prompts. It is available in GGUF Q2 and GGUF Q4 (recommended)
+- With your permission, Deepy can browse your files and use them as part of a creative workflow.
+- Deepy could already inspect media, trim clips, and process audio; it can now reach much further into WanGP's processing toolbox, including upscaling videos on demand.
 
-*update 11.41*: added Process Full Video Custom Settings 
+But the star of this release is **Deepy Prime**. Open *Configuration / Deepy* and use the **Deepy** menu to invite either **Deepy Prime** or the original **Deepy Zero**:
+- **Deepy Zero** is the quick, lightweight companion for straightforward requests and smaller language models.
+- **Deepy Prime**, powered by **Qwen3.8 VL 27B**, is the ambitious one: give it a multi-step idea involving images, sound, and video, and it will plan the whole production.
+- It understands WanGP's creative toolbox well enough to choose models, combine media, and plan long videos as connected sliding windows.
+- When a plan hits a wall, Prime is resourceful: it can reconsider, try another route, and keep working toward the goal. Watching its thoughts unfold can be half the fun.
+- It can connect to optional **MCP Servers** when you want outside help or interaction with another app; these connections live under **Deepy Prime Guidance** in the same settings page.
+- Set **Deepy Filesystem Access** to read or read/write and you can ask for things like *"make one video for every prompt in this text file"* or the wonderfully vague *"use the files in this folder and make something nice out of them."* Access is scoped to WanGP outputs and folders you select.
 
-### 21st of April 2026: WanGP v11.35, LTX-2 Mega Mix
-Lots of nice goodies for **LTX-2**:
+There is one catch worthy of a tiny violin: for now, **Deepy Prime requires a GPU with at least 24 GB of VRAM**.
 
-- **LTX-2.3 Distilled 1.1**: new version of the *Distilled model* released by *LTX team*, it should offer better audio and visuals. You will find also a Dev 1.1 version which uses Distilled 1.1 for Phase 2.
+**Breaking News WanGP 12.61**: by selecting the newly added *Qwen3.8 VL 27B GGUF Q2*, a max *32000 KV Cache*, *Speculative Decoding Disabled*, and launching the Web Browser in *no GPU mode*, **you can now use Deepy Prime with 16GB of VRAM** !
 
-- **VBVR Lora Preset**: This LoRA enhances the base LTX-2 for Enhanced Complex Prompt Understanding, Improved Motion Dynamics & Temporal Consistency. You can select it in the *Settings list* at the top.
+Also in the news:
+- **Sol Attention 0.6.2 for H3**: faster generations and better-looking results, according to its creators.
+- **Ralston 2S Sampler for H3**: considered one of the best-looking H3 samplers, although it likes to take roughly twice as long.
+- **IndexTTS 2.5**: a new version of this Text-to-Speech model for voices that delivers realistic emotions.
 
-- **Phase 1/2 Choice**: you can now either you go for a good old *2 Phases Gen* (1st Phase Low Res, 2nd shorter Phase High res) or go straight to a single High Res Phase (needs more VRAM and slower, but potentially higher quality). Please note that Outpainting mode and Pose/Edge/Depth extractors are always using 1 phase.
+## 16th of August 2026: WanGP v12.53, Jess is Back !
 
-- **Improved Sliding Window**: transition between windows should be less noticable, *Sliding Windows overlapped Frames* carry now also the audio of the overlapped frames, so the higher the number of overlapped frames the higher the chance that the sound / voice used in the previous window will be used in the new one.
+**LTX 2.5. Jess is back, Dad is still in the garden, and this time the camera crew brought an upgrade.**
 
-- **Video Length not Limited by Audio**: if you provide an Audio input, WanGP will no longer stops when the audio is consumed. It will continue the Video/Audio Gen based on the content of your Text prompt, and guess what ? it may reuse the same voice/sound used up to now !  This is an option, you need to check the checkbox *Video Length not Limited by Audio*.
+- **LTX 2.5 Visual Quality Upgrade:** expect sharper details, better visual consistency, and cleaner results than with LTX 2.3.
 
-- **Silent Movie Mode**: if for some reason you want video with not only no sound but that takes into account that there is no sound (you dont want people to open their mouth for instance), just now leave the *Control Audio* empty
+- **A new VAE decoder to play with:** the Original (much Faster) VAE remains the default, while the optional NAD Diffusion Decoder trades speed and VRAM for higher quality. NAD also works with LTX 2.3 and uses its Triton accelerator when supported.
 
-~~ - LTX2/2.3 Loras Split: as LTX2.0 Loras work badly with LTX2-3 and were getting on the way, now each version of LTX2 has its own lora folder. Loras will be moved automatically at startup using a lora migration script. I invit you to verify that the loras landed in the right folder.~~ 
+- **Bring your LTX2 LoRAs:** LTX 2.5 finds LoRAs in the shared `loras/ltx2` folder and restores the compatible LTX 2.3 LoRA workflows, including pose/depth/canny control, inpainting, outpainting, Ingredients references, SDR-to-HDR conversion, and reference-voice conditioning.
 
-- **System Loras Multipliers Overrides**: WanGP adds automatically and transparently loras (that is they are loaded although they are not visible) if needed by a feature (distilled lora, id lora, outpaint lora, union control lora). You can now override the default multipliers used by WanGP by selecting the target lora in the *Activated Loras* input and by specifiying the corresponding *Loras Multipliers*.
+- **LTX-2 Video Upsampler:** use LTX 2.3 or LTX 2.5 as a spatial video upsampler—directly after generation, as a late postprocessor, or as part of a Media Flow process. In WanGP 12.53, LTX 2.6 upsampler has been greatly improved an produces much better outputs.
 
-- **Transfer Human Motion With Pose Alignment**: you are trying to transfer a human motion from a control video, but you use a start image with a person who has a different body shape (larger, taller, ...) and stands in a different location in the frame. This is not going to work well as you start image wil end up distorted. This is a past issue, as now the control video pose can be aligned with the start image if you pick Transfer *Human Motion With Pose Alignment*. This feature is also supported by *Wan Vace*, start image  must be the *Background ref image*.
+Dev and Distilled are available in BF16 and INT8 ConvRot, while Distilled also gets an NVFP4 option for compatible NVIDIA hardware. Shared embedders are reused instead of being duplicated inside every checkpoint, saving both disk space and RAM.
 
-- **Injected Frames & Sliding Windows**: injected frames were not properly injected starting from window no 2. This is now supported.
+**Bonus:**  
+- **Wan2.2 Animate 2 Cache**: up to 50% faster thanks to VRAM or RAM cache
 
-- **Process Process Full Video Plugin**: this *bundled PlugIn* which needs to be enabled first in *the PlugIn tab*, right now supports only *Outpainting*. It relies on *LTX2 Lora outpainting*. It is more or less a *Super Sliding Windows* mode but without the *RAM restrictions* and no risk to explode the *Video Gallery* with huge files. If you are patient enough you can change the Aspect Ratio of a few hours movie (check out below the 1 min sample). Behold how *Sliding Windows transitions* are almost invisible !
+- **MinaMax Music 3**: Ace Step has met its match as Minimax Music 3 generates high quality songs. WanGP implementation is optimized with a *vllm engine* for x3 faster generation. It is recommended to have 16 GB of VRAM to use profile 3/3+ for much faster generation. This implementation contains several *Prompt Enhancers* that can either generate for you lyrics and / or the music description.
 
-- **NEW Processes for Full Video Plugin**: *Refocus* (remove blur), *Ungrade* (remove stylized color grading) and *Uncompress* (remove compression artifacts) have been added. Many thanks to *Oumoumad Mohamed* who created the Ic Loras (including the *Outpainting* lora ) that power these processes. If you have found some Ic Loras that are useful and dont cause glitches with Sliding Windows, let me know and I will add them.
+- **Upgraded GGUF Kernels 1.08**: lower VRAM, accurate native BF16, and CUDA-graph-safe Stream-K for GGUF models; check *docs/INSTALLATION.md* to upgrade.
 
-- **WanGP API Video Gen**: *Plugin Developers* can now *Queue a Gen* directly from a plugin. This opens the possibility of plugins that place various gen orders and then combine the results (hint: we could have our very own version of *LTX-Destop* inside WanGP).
+*update 12.51*: Unlocked Control Video Processes, LTX-2 video upsampler\
+*update 12.53*: MiniMax 3, LTX Upsampler 2.5 improved, upgraded GGUF Kernels
+ 
+## 9th of August 2026: WanGP v12.45, Meet The One
 
-- **New One Click Install / Update Scripts**: We have to thank **Tophness / @steve_Jabz** for that one. *Huge Kudos to him!* The scripts will not only install WanGP but also all the *Kernels* (among *Triton, Sage, Flash, GGuf, Lightx2v, Nunchaku*) supported by your GPU. Please have a look at the instructions further down. Dont't hesitate to share feedback or report any issue.
+**MiniMax H3 had all that potential waiting to be unleashed. We found the keys.**
 
-*update 11.31*: fixed phase 1 forced incorrectly in some cases\
-*update 11.32*: bugs fixes, Process Full Video now supports Distilled 1.1 & accepts video without audio\
-*update 11.33*: Separated LTX2 & LTX2.3 loras in different folders, added easy loras multipliers override\
-*update 11.34*: Reverted split as not popular\
-*update 11.35*: added Aligned Pose Transfer, Injected Frames & Sliding Windows support, new processes for Process Full Video Plugin 
+- **Sliding Windows / Continue Video:** both *FL2VA* and *Ref2VA* can now build longer videos. WanGP carries the previous window's closing motion and matching audio into the next one. Most importantly, overlap is no longer limited to a single frame: using multiple overlap frames gives H3 real motion and sound context across the join, delivering much smoother transitions.
 
-### 11th of April 2026: WanGP v11.26, Now I Can See
+- **Start Image / End Image for Ref2VA:** launch a new shot from a chosen image, aim for a specific ending, or give a continued video the destination it deserves. Ref2VA preserves its selected reference memories across every Sliding Window, so later windows can keep following the same people, places, motion, and sound.
 
-- **LTX-2 Ic Lora Rebooted**: *Ic Loras* behave like *Control Nets* and can do *Video to Video* by applying an effect specific to the Ic Lora for instance *Pose Extraction*, *Upsampling*, *Transfer Camera Movement*, ...  More and More Ic Loras are available nowadays. Until now WanGP Ic Lora implementation was based on the official LTX-2 github implementation (which a 2 phases process where the Ic Lora is only applied during the first low res phase). However I have just discovered that all the Ic Loras around expect in fact the ComfyUI implementation which is one phase only process at full res. 
+- **Frames Injection in FL2VA:** place several selected images at exact moments in an FL2VA video. Enter frame positions for precise timing or `L` for the end of a sliding-window segment—digital storyboarding without the sticky notes.
 
-So from then on WanGP Ic Lora will work this way too. The downside is that a single Full Res pass is much more GPU intensive. But all is good in WanGP world, as the LTX2 VRAM optimisations will allow you to use Ic Loras at resolutions impossible anywhere else.
+- **Audio Source:** FL2VA can create everything from text, follow an uploaded soundtrack, use a Control Video with its original audio, or keep the video unchanged while composing a new soundtrack. Full-length source audio is preserved in the final file; if it runs out early, H3 takes over instead of serving silence.
 
-As a bonus I have tuned *Sliding Windows* for Ic Loras, and if you set *Overlap Size* to a single frame, transitions between windows when using Ic Lora will be almost invisible. 
+- **Spectrum v0.2.1 with offline replay:** H3 Spectrum now captures a clean accelerated trajectory and performs a transformer-free smoothing replay. Video and audio are reconstructed independently for better audio quality.
 
-- **Outpaint Ic Lora**: this new impressive Ic Lora will be loaded automatically if you select the *Control Video for Ic Lora* option and enable *Outpainting*. If you use Sliding Windows with Outpainting you will be able to outpaint a full movie (assuming you have enough RAM).
+- **Control Video / Denoising Strength:** FL2VA can stay close to a Control Video or wander further from it as the strength increases. At `1.0` with *Whole Frame*, the visual control is unnecessary, so WanGP skips the extra work—your GPU may now take a very short coffee break.
 
-- **New Outpainting Auto Change Aspect Ratio**: As a reminder WanGP let you define manually where an Outpainting should happen. Alternatively you can now ask WanGP to use outpainting to change the *Width/ Height Aspect ratio* of the Control Video. For instance you can turn any 16/9 video into a 4/3 video by generating new details instead of adding black bars. The *Top/Bottom/Left/Right Sliders* in this new mode will be used to define which area should be expanded in priority to meet the requested aspect ratio.. 
+- **Video Mask / Masking Strength:** choose *Whole Frame*, *Masked Area*, or *Non Masked Area* to decide where FL2VA may make changes and how firmly the remaining picture should follow the original.
 
-*update 11.26*: fixed outpainting ignored with if Manual Expansion was selected
 
-### 8th of April 2026: WanGP v11.22, Self Destructing Model
+> **Best practices for longer H3 videos**
+> **For a multi-sequence video →** Direct it window by window: give each part its own prompt and duration, connect it smoothly with overlap, or use `[/new_shot]` for a hard cut. WanGP hands you the clapperboard instead of deciding where the story changes. Please check the Prompt Inline Help for the syntax.
+> **For one very long continuous shot →** Use one Start Image followed by several End Images. Each End Image becomes the destination of a later Sliding Window, guiding the action from one visual milestone to the next. This works with both FL2VA and Ref2VA.
 
-- **Magi Human**: this is a newly *Talking Head* model that accepts either a *custom soundrack* or can generate the *audio speech* that comes with the video. 
-   - *The bad news* :it is VRAM hungry (targets RTX 5090+) and very res picky, that is the ouput res must be either 256p or 1080p (using a 2 stage pipeline with upsampling). There is also a 540p version (using also an upsampler) but it is not included as I found it unpractical (ghosting guaranteed if your output is not exactly the right height/width ratio), 
-   - *The good news* : now that it is WanGP optimized, 101 frames at 1080p requires "only" 16 GB of VRAM. If you dont have that much VRAM I recommend to still go for 1080p but set a 45 frames *Sliding Window* (not too low to avoid artifacts) as *Sliding Windows* sometime works well with this model.  
+**Bonus:**  
+- **Wan2.2 Animate 2**. *Animate* is back—and it wants to reclaim the crown *Scail 2* snatched away. Give it a character image and a driving video, and it will make that character follow the video's movements, expressions, and camera action: dance routines, performances, gestures, fashion clips, creature animation, and more.
 
-**I have spent a lot of time optimizing Magi Human, but I am not yet sure it is worth keeping it given all the constraints to run this model. So this is where I need YOU. Please share your experience using Magi Human on the Discord server and you shall decide its fate. Should we keep it or send it to the model graveyard ?**
+*update 12.45*: spectrum upgraded, animate 2
 
-- **Ace 1.5 Turbo XL**: the best open source song generator has now a big brother *XL* that delivers better audio quality and sticks closer to the requested lyrics. 
+## 6th of August 2026: WanGP v12.434, Cache Me If You Can
 
-- **LTX 2 Id Lora**: due to a huge popular demand I have added this one (it is a new *Generate Video* option). You can provide a voice audio sample, a start image and text script and it will turn LTX 2/2.3 into talking heads. Cost is high to get this feature as **Id Lora works only with LTX2/2.3 DEV**. By chance it seems it can produce decent results in only 10 inference steps. To get the best results it is recommended to use prefix tags [VISUAL], [SPEECH] & [SOUND]. Alternatively you can use WanGP *Prompt Enhancer* that has been to tuned to generate a prompt following this syntax. 
+**MiniMax H3 shifts up a gear!**
 
-- **LTX 2 NAG**: you can now inject a *Negative Prompt* even if you use the Distilled Model thanks to *NAG* support for LTX 2
+H3 now has new accelerators and RAM shrinkers. Pick one or stack them—the exact gain depends on your video, hardware, and settings.
 
-- **LTX 2 DEV HQ Mode**: this High Quality mode should produce better output at higher res. You can turn it on using the new *HQ (res2s)* Sampler and set 15 steps and guidance rescaler to 0.45. It is compatible with *Id Loras*. Note that a HQ steps is twice as slow as a vanilla Dev step, so it is going to be as slow as Dev if not slower.
+- **First Block Cache:** under *Advanced Mode / Steps Skipping*, H3 runs the first block and reuses the remaining blocks' previous result when little has changed—think TeaCache's cool cousin, driven by the first block's output. *Balanced (0.08)* is the upstream default; higher thresholds can skip more work and go faster, with a possible trade in motion or fine detail. The cache is tuned to add very little VRAM overhead. And yes, *Skip Steps starting moment in % of generation* means exactly what it says: it chooses when skipping may begin, not an acceleration factor.
 
-- **LTX2 DEV Presets**: Vanilla Dev mode & HQ Mode have lots of tunable settings. To make your life easier I have added selectionable presets in the *Settings Drop Downbox*
+- **Sol-Attn:** under *Advanced Mode / Misc. / Override Attention Mode*, sparse attention speeds up large visual sequences. It requires BF16, Triton 3.6+, and a compatible NVIDIA GPU (RTX 40/50-series, H100/H200, or B100/B200). Expected gains range from 10–20% on RTX 40-series to around 30% on RTX 50-series, with a possible small quality trade-off.
 
-- **More Deepy** : 
-   - *UI Improvements*: you can *queue* requests by inserting empty lines between two requests, get the last turn by clicking the *Down Arrow*
-   - *More Responsive*: Deepy should execute much more quickly consecutive actions
-   - *More Reliable*: fast full context compaction (when deepy ran out of tokens), Deepy will remember what you stopped / aborted
-   - *More Capabilities*: you can ask Deepy to specifiy a *guidance*, *denoising strength*, ... value (the value defined in the *tool template* will be overridden)
+- **Mix and match:** *Spectrum* and *First Block Cache* are alternative step-skipping modes. Sol-Attn can technically run with either, but stacking approximations may reduce quality and should be checked with the same seed before relying on the combination.
 
-As a reminder beside writting huge essays about how great you are, Deepy can generate Video, Image & Audio, extract / transcribe / trim / resize (when applicable) video or audio clip, inspect the content of an image or a video frame, generate black frames, ... Deepy used Tool templates but you can specify for one task the loras, number of frames, dimensions, ... There is also a CLI version of Deepy quite useful for remote use. Please check the fulldoc *docs/DEEPY.md*. 
+- **Lower-RAM Video VAE:** select *FP8 Mixed Precision* under *Advanced Mode / Misc. / Video VAE* to reduce the RAM occupied by H3's Video VAE weights. Thanks to *Kijai* for creating this quantized VAE.
 
-- **Multi Multilines Prompts**: check new options in *"How to Process each Line of the Text Prompt"*, you can now have multiple multi lines prompts. They just need to be separated by an empty line.
-   
- *update 11.21*: added Ace Step 1.5 Turbo XL\
- *update 11.22*: added LTX2 NAG
+- **New W4A8 INT8 support:** H3 can now load asymmetric W4A8 checkpoints. Their 4-bit weights reduce checkpoint size and system RAM use, while 8-bit activations use optimized INT8 kernels on compatible NVIDIA GPUs (RTX 30-series or newer). Seriously short on RAM? Look for compatible community H3 W4A8/Q4 or NVFP4 checkpoints already available online. See *docs/FINETUNES.md* to add them to WanGP—and don't forget to share the finetune files you create on the Discord server!
 
-### March 30th 2026: WanGP v11.13, The Machine Within The Machine
+- **Ref2VA tune-up:** this one is on me—I followed the original implementation and could end up feeding H3 a 4K reference image for a 480p video. Great for detail, less great for your stopwatch! You can now choose the reference-image pixel budget from 50% to 400%: lower is faster, 100% matches the output, and higher favors fidelity. The immediate payoff: **WanGP H3 Ref2VA is now twice as fast as before.**
 
-Meet **Deepy** your friendly *WanGP Agent*.
+- **New control-video choices:** use a *Reference Video* to reuse subjects, appearance, or motion without changing the output size; *Depth Control* to guide the scene's depth and layout; or *Generic Control* to feed the clip directly to H3. Control videos define the output canvas, while reference videos do not.
 
-It works *offline* with as little of *8 GB of VRAM* and won't *divulge your secrets*. It is *100% free* (no need for a ChatGPT/Claude subscription).
+- **No LoRA Lost in Translation:** Pruned and non-pruned models can now read either LoRA format—the translation happens automatically as they load. Pruned (4 rank) LoRAs can also be used on original WanGP pruned checkpoints (rank 64) if you still use them.
 
-You can ask Deepy to perform for you tedious tasks such as: 
-```text
-generate a black frame, crop a  video, extract a specific frame from a video, trim an audio, ...
-```
+- **LoRAs Accelerators**: kudos to *Lightx2v* and *larryvrh* for delivering the first *LoRAs accelerators* for Minimax H3. You will find them in WanGP as predefined profiles in the *Settings* dropdown box at the top. You may need to increase the number of steps to 8 if not happy with the quality and / or to play with the *LoRA multiplier* (default is 0.5 as 1.0 seems too strong)
 
-Deepy can also perform full workflows:
-```text
-1) Generate an image of a robot disco dancing on top of a horse in a nightclub.
-2) Now edit the image so the setting stays the same, but the robot has gotten off the horse and the horse is standing next to the robot.
-3) Verify that the edited image matches the description; if it does not, generate another one.
-4) Generate a transition between the two images.
-```
-or
+*Update v12.431 + Update v12.432*: more LoRAs format supported, fixed NVFP4 Format, on the fly LoRA conversion of Non Pruned Loras\
+*Update v12.433 + Update v12.434*: even more LoRAs format and quantization supported, LoRAs accelerators
 
-```text
-Create a high quality image portrait that you think represents you best in your favorite setting. Then create an audio sample in which you will introduce the users to your capabilities. When done generate a video based on these two files.
-```
+## 5th of August 2026: WanGP v12.42, No Time for Taglines
 
-Deepy can also transcribe the audio content of a video (*new to WanGP 11.11*)
-```text
-extract the video from the moment it says "Deepy changed my life"
-```
+**MiniMax H3**
 
-*Deepy* reuses the *Qwen3VL Abliterated* checkpoints and it is highly recommended to install the *GGUF kernels* (check docs/INSTALLATION.md) for low VRAM / fast inference. **now available with Linux!**
+MiniMax H3 is a top-notch open-weight contender to Seedance 2, combining cinematic video generation, convincing motion, strong prompt adherence, and a synchronized native stereo soundtrack in one model.
 
-Please install also *flash attention 2* and *triton* to enable *vllm* and get x2/x3 speed gain and lower VRAM usage.
+Given no *Steps Distilled Checkpoints* is available for the moment, 15-20 inference steps is a minimum.
 
-You can customize Deepy to use the settings of your choice when generating a video, image, ... (please check docs/DEEPY.Md). 
+But rejoice WanGP version is as usual Ultra Optimized: **5-6GB of VRAM only for 5s (124 frames) and 8-9GB of VRAM for 15s at 832x480**. 
 
-*Go the Config > Prompt Enhancer / Deep tab to enable Deepy (you must first choose a Qwen3.5VL Prompt Enhancer)*
+- **MiniMax H3 FL2VA: create or continue a shot**: choose this version to generate synchronized video and stereo audio from text alone, start from an image or the last frame of a previous video, target an end image, or constrain both ends of the shot. It also supports longer generations with sliding windows.
 
-**Important**: in order to save Deepy from learning all the specificities of each model to generate image, videos or audio, Deepy uses *Predefined Settings Templates* for its six main tools (*Generate Video*, *Generate Image*, ...). You can change the templates used in a session or even add your own settings. Just have a look at the doc.
+- **MiniMax H3 Ref2VA: reuse people, scenes, motion, or voices**: choose this version when the new video should follow *Reference Images*, *Reference Videos*, or *Reference Audio*. References guide the newly generated result rather than becoming fixed frames, and remain available across sliding windows.
 
-With WanGP 11.11 you can *ask Deepy to generate a Video or an Image in specific dimensions and also a number of frames for a video*. You can also specify an optional *number of inference of steps* or *loras* to use with *multipliers*. If you don't mention any of these to Deepy, Deepy Default settings or the current Templated Settings will be used instead.
+Both flavours offer the same controls in full 33B and lighter pruned 20B versions.
 
-WanGP 11 addresses a long standing Gradio issue: *Queues keep being processed even if your Web Browser is in the background*. Beware this feature may drain more battery, so you can disable it in the *Config / General tab*.
+- **Spectrum step skipping**: Spectrum can make MiniMax H3 generation substantially faster, with a modest potential quality tradeoff. Its default offline replay retains every actual-step anchor in system RAM, reconstructs skipped steps from bracketing and spectral estimates, and keeps audio on local interpolation. Enable it under *Advanced Mode / Steps Skipping* by setting *Skip Steps Cache Type* to *Spectrum Feature Forecasting*.
 
-You have maybe also noticed the new option *Keep Intermediate Sliding Windows* in the *Config / Outputs* tab that allows you to discard intermediate *Sliding Windows*
+- **Spatial upsampler improvements**: high-resolution MiniMax H3 generation can be slow, so a practical alternative is to generate at a lower resolution, such as 480p, and upscale the result afterward.
+ - **FlashVSR optimizations**: FlashVSR has been further optimized to reduce system RAM usage.
+ - **SeedVR2**: this high-quality image and video upsampler previously required too much VRAM for longer videos on many consumer GPUs. The WanGP integration reduces its VRAM requirement to roughly one-third of the original implementation. SeedVR2 is available under *Advanced Mode / Post Processing*, in *Late Post Processing*, and through the *Media Flow* plugin.
+
+- **Memory priority**: MiniMax H3 defaults to *Lower VRAM*. If system RAM is the limiting factor and you have spare VRAM, select *Lower RAM* under *Advanced Mode / Misc. / Priority*.
+
+- **Updated pruned checkpoints**: WanGP now uses ComfyUI-compatible pruned H3 checkpoints so upcoming H3 LoRAs can work with both applications. The previous WanGP-specific checkpoints were slightly less compressed and offered a small, usually imperceptible quality advantage. Existing installations will download the replacement files after upgrading. The old checkpoints are not removed automatically; keep them only if you plan to create finetunes from them, otherwise they can be deleted. The replacements require about 1 GB less disk space and system RAM.
+
+- **Lower-RAM text encoders**: if system RAM is limited, open *Advanced Mode / Misc. / Text Encoder* and select one of the quantized Qwen3-VL variants.
+
+*WanGP v12.41*: Added quantized text-encoder selection.\
+*WanGP v12.42*: Added Spectrum, SeedVR2, the memory-priority selector, and updated pruned checkpoints.
+## 25th of July 2026: Featured Plugins / Apps
+
+WanGP's growing community has developed more than 20 plugins that expand what you can do. Here is a selection of seven newly available community plugins, all of which can be installed or updated directly from the WanGP Plugin Manager:
+
+- **Finetune Manager** by *GKartist* — Browse community finetunes, load them into WanGP, and create, improve, or share your own.
+- **Image Suite** by *saintorphan* — Create and edit images with text-to-image, image-to-image, layered canvases, masks, inpainting, cropping, resizing, and color adjustments.
+- **Prompt Library** by *saintorphan* — Save your favorite prompts and generation settings, then reuse them with any supported model.
+- **Prompt Manager** by *David Brum* — Search and organize generated images and videos, copy their settings, and manage reusable prompts in one place.
+- **Queue Notifier** by *Javier-bat* — Get progress, completion, and failure alerts through services such as Discord, Telegram, WhatsApp, and Google Chat.
+- **VRAM / RAM Adjuster** by *g3n3rativ3* — Tune how much graphics and system memory WanGP uses without manually editing configuration files.
+- **Wildcards** by *GKartist* — Add reusable variables and random choices to prompts so you can quickly produce controlled variations.
+
+**New Wan2GP Desktop Installer** — [Wan2GP Desktop](https://github.com/GKartist75/wan2gp-desktop) by GKArtist lets you install, update, and launch WanGP from a single window. It handles Git, Python, CUDA, and PyTorch setup for you, making it the easiest way to get started on Windows.
+
+### 29th of July 2026: WanGP v12.3456, Increasingly Greater
+
+- **Krea 2 Identity Edit**: this Krea2 finetune adds Editing capabilities to Krea 2. You can edit an existing image or combine up to 2 *Reference Images* to produce a new one. WanGP implementation comes out of the box with *Inpainting* and *Outpainting*   
+
+- **PiD 1.5**: The *PiD Spatial Upsampler* has been updated and should deliver better quality (v1 still there if you prefer it) and also now exists in *Qwen VAE* flavor (that is it can be plugged directly to Wan2.1 t2i, Qwen or Krea2 latent output for best quality)
+
+- **LTX2 MSR 2.0**: this new version of this LTX2 finetune with Image Reference support preserves better Identity. WanGP v12.345 adds the setting *MSR Reference Video Length* that will let you control how the *Reference Images* are packed (please check model help for more info)
+
+- **Joy Echo Surgical**: as a reminder the *Joy Echo* LTX2 variant lets you reuse characters identities between shots. This *Surgical* finetune claims to preserve better identity between shots and offers better audio quality.
+
+- **ConvRot LoRA support**: Int8 ConvRot checkpoints can now use LoRAs without producing garbage output 
+
+- **Text Encoder GGUF Support**: you should be able now to use in your Finetunes Text Encoder *GGUF* Checkpoints with LTX2, Krea2, Flux 1/2 and Wan 2.1/2.2
+
+- **Onmnivoice Speed ajustment**: a new option gives you more control on the pace on spoken words (for instance to you fit more words in a shorter timespan)
+
+- **More Krea2 LoRA Support**: more LoRAs formats are supported 
+
+- **Shotplan**: some form *PromptRelay* for Wan 2.1 and Wan 2.2, you can divide a gen into different shots that reuses the same characters or objects
+
+- **PrunaVAED**: this an alternative *VAE Video Decoder** for LTX2 that is 2.7 faster and requires half the VRAM during the *VAE decoding*. You will be able to select PrunaVAED in the *Misc* Tab at the bottom, in the new *Config* dropdown box
+
+- **WanGP Configs**: if you just want to change the VAE or the text encoder you no longer need to create multiple finetune, you can now just create a single finetune with multiple configs in it. Please check *docs/FINETUNES.md*
+
+*update 12.345*: Text Encode GGUF Support, Joy Echo Surgical, MSR2 new setting, Omnivoice Speed adjustment, new Krea2 LoRA formats\
+*update 12.346*: Shotplan, PrunaVAED, WanGP Configs
+
+### 1st of July 2026: WanGP v12.3, The VRAM Digger
+
+- **Krea2 Lanpaint**: Krea2 can now do *inpainting* thanks to *Lanpaint*. To get the best results you will need to adjust the prompt and increase the number of Lanpaint steps.
+
+- **Krea2 NAG**: WanGP exclusivity, *NAG* will allow you to define *Negative Prompts* with distilled models such as *Krea2 Turbo*
+
+- **Gradio Optimizations**: thanks to numerous exclusive optimizations, Gradio UI should be faster (especially using the *Image Editor*) 
+
+- **Chrome CPU Only Scripts**: you probably noticed that you Web Browser takes away VRAM just to display the UI. If you disable GPU Usage in Chrome for instance **you could save between 1GB of VRAM and 5GB of VRAM !!!**. The more VRAM capacity your GPU has the greater the gain (as Chrome tends to be greedier). I have added in the *Scripts* folder two scripts to disable GPU when using Chrome. WanGP has been optimized to still offer decent UI speed even if the web browser uses only the CPU. 
+
+### 26th of June 2026: WanGP v12.278, Let's Experiment!
+
+- **KREA-2** : new Image Generator model that claims to be the most aesthetic open-source image model available.
+
+- **LTX-2.3 Multiple Subject Reference**: Here comes another way to add *Reference Images* when using LTX 2.3. This finetune combines Distilled 1.1 and a new LoRA from *LiconStudio*. Just provide 2 to 5 reference images; background first, then subjects and objects. Please note that the embedded lora is quite fond of character sheets with white background.
+
+I added an experimental support for text to image, not sure it works as MSR doesnt seem to be made for that. 
+
+- **LTX 2.3 Inpainting**: you will find this new *Inpainting* capability for LTX2 in the *Process List*. It is based on the set of *LoRAs* just released by the LTX Team. If you see glitches dont hesitate to expand the mask.
+
+- **LTX 2.3 Ingredients**: part of the same new LoRAs collection the *Ingredients* process allows you to inject a character defined in a character sheet, preferably on a white background with black separator lines between individual pieces. Dont expect miracles with slidings windows or start frames.
+
+- **Easy Frames Cap based on Control Video/Audio**: for supported models (*LTX2*, *Vace*) if you provide a control video or source audio you can ask WanGP either to stop when the control video / audio is done or continue until all the requested frames have been produced.
+
+- **Ideograms v4 unlocked**: most hidden settings are now exposed (*mu*, *std*), you can change guidance half way, use a different scheduler. I added  resolutions used by Ideograms. Also please note that Ideograms runs two transformers in parallel *cond* and *uncond*. If you want to apply different *loras multipliers* to each transformer, use the new ":" separator, for instance with *1:1.2*, 1 will be applied to cond and 1.2 to uncond.
+
+- **Ideograms v4 Turbo Time**: distilled version of Ideograms v4, from 4 steps to 8 steps and no guidance. 
+
+- **Experimental Scail 2 Parallel Subwindows**: in order to reduce image degradations with long videos, I am experimenting a new concept: *Parallel Subwindows*, the idea is to work on a much larger Sliding Windows than usual (>200 frames) and to generate multiple sub windows (of 80 frames of so) in parallel. It is experimental, may end up a big fail and removed in next version, let me know...
+
+- **Scail 2 Start Frame Fix**: you should no longer see a few bad frames at the beginning of the video in *Animate* mode. Many thanks to @pauldps that gave me part of the solution.
+
+- **Scail 2 Experimental Multi References**: you can now provide different point of view of your character. This is an official feature but experimental.
+
+- **PrismAudio**: this a *video to audio* processor, an alternative to *MMaudio*, quite good to add sound to an existing video. It requires a prompt. It is not made to generate spoken words.
+
+- **More Plugins Types: Temporal Upsamplers / Audio Processors**: you can now add your own Temporal Upsampler (*Rife* alternative) or *Audio Processor* (*MMAudio* alternative). As a reminder the previous version allowed already to add a custom *Spatial Upsampler*.
+
+- **API+, MCP+.**: I have improved the API capabilties (please check *docs/API.md*), and widened *MCP* support. Feel free to share feedback on Discord
+
+- **Finetune Resolutions**: define custom resolutions directly in finetunes
+
+*Update 12.25*: Ideograms v4 Turbo Time, MSR t2i, Scail2 parallel subwindows\
+*Update 12.26*: LTX2 inpainting & ingredients, Easy cap, Scail2 fix\
+*Update 12.27*: KREA2, Scail2 multiref
+
+
+### 14th of June 2026: WanGP v12.22, Go with the Flow
+- **Media Flow Plugin**: the *Full Video Process* is now named *Media Flow* because it can process *Images* as well as *Videos*. Even better, the new *Batch* mode can process any number of files: for instance, give *Media Flow* the path to the folder containing your collection of butterfly pictures and *all the corresponding images will be upsampled in one click*!
+
+- **Scail 2**: the sequel to one of the best video *Character Animators*, and a very good alternative to *Wan 2.2 Animate*. You can either *Animate* up to 5 people by providing a *Start Image* and a *Control Video* that contains the movement, or *Replace* one person in an existing Control Video. Animate mode preserves identity well thanks to the new *Reference Image* input and, best of all, it supports *Sliding Windows* for non-stop dancing!
+
+Please note that Scail 2 *Replace* and *Animate* modes require colored masks if more than two people are being replaced or animated. You can build them easily with *WanGP Magic Mask* (remember the magic wand icon). Also, for best results, I recommend using a *Reference Image* or a *Start Image* that is closely aligned to the first frame of the control video; you can use an *Image Model* generator for this.
+
+Version *update 12.21* introduces RAM optimisations when using many *sliding windows* and added support for *Lora accelerator lightx2v 4 steps*
+
+- **Int8 ConvRot Support**: model checkpoints saved in this quantized int8 format used by Comfy can now be loaded in WanGP.
+
+- **LTX2 Image Generator (t2i)**: this one was always within grasp but required a little bit of packaging. Here we go we, just pick the *text to image* tab and use *LTX2* to use your favorite *Ic LoRAs* (outpainting, refiner, ...) on *images*. Best of all, the *LTX2 Image Processes* are available in the *Media Flow* Plugin.
+
+- **Bernini 1.3B**: a much more gentle version (*lower VRAM requirements and faster*) for your GPU. Not as good as the 14GB version, but still produces some nice outputs.
+
+- **Chain of Zoom Upsampler**: new upsampler that can magnify up to x16, quite good with hair and skin. However it expects low quality image so it may reinvent existing details. WanGP optimized: low VRAM and up to x4 times faster
+
+- **Upsampler & Model Plugins**: PlugIn developers can now create plugins that add new *Spatial Upsampler* or new *Models*
+
+As sample plugins, enjoy:
+   - **Stable Diffusion 1.4**: the father of all image generators !
+   - **Pixel Upsampler**: upsample by duplicating the same pixel for a grandiose Pixel Art effect !
+
+*update 12.21*: Scail 2 RAM optim + lightx2v support, added LTX2 t2v & Bernini 1.3B\
+*update 12.22*: Chain of Zoom Upsampler,  Upsampler & Model Plugins
+
+### 7th of June 2026: WanGP v12.13, Prompt Control
+- **Ideogram 4 Prompt Helper**: the great thing about Ideogram 4 is that you can position every object or text exactly where you expect it in your output image. Ideogram 4 now has a *Visual Helper* to create and edit its JSON prompt format. Click the *Magic Wand* next to the prompt to draw or resize text/object boxes, tune the main prompt fields, and apply the final JSON back to the prompt. *Magic Prompt* can still create the first draft for you.
+
+- **JoyAI-Echo**: this new LTX-2.3 model is the closest thing to *SeeDance 2* that you may find in the open source world. It is an audio-video model for connected multi-window stories. JoyAI-Echo keeps compact memories between windows so later shots can reuse characters, voices, objects, and places. WanGP implementation of *JoyAI-Echo* goes well beyond the original implementation:
+   - With the new *Sliding Window commands* (see below), you can extend existing *Sliding Windows*, *Create New Shots*, or *Continue a Video*.
+   - The new memory command system (`[/store_mem]`, `[/load_mem]`, and `[/drop_mem]`) lets you pick which sliding windows can be reused for future memory and which ones should no longer be used. Please check the JoyAI-Echo *Prompt help* for the full syntax.
+   - Use a *Control Video* to target audio/video segments in the *Joy Memory Positions* field and seed the first memories with characters and background. 
+For instance *Joy Memory Positions* could be `man=4s,woman=12s`, if a man is speaking at around 4s and a woman at around 12s. The two memories can be used in later windows with the command [/load_mem=man] or  [/load_mem=woman] 
+
+- **Sliding Window Commands**: thanks to new inline prompt commands (for instance `[/duration=...]`, `[/overlap=...]`, and `[/new_shot]`), you can now define a different duration, number of frames, or transition style on a per-window basis. You can also change the LoRAs multipliers of the current window with `[/loras_mult=1;0]`. See `docs/PROMPTS.md` for the full syntax and examples.
+
+### 4th of June 2026: WanGP v12.00, The Journey Continues
+- **PiD**: a new high quality x4 spatial upsampler for images by Nvidia. It is supposed to work with only Flux/Flux2 compatible models since it needs to plug directly to the VAE Decoder. However thanks to a simple trick it is available everywhere. Some automated Tiling may be triggered if you ask for very high out res. WanGP version is as usual ultra optimized and should require little VRAM even when tiling is not used.
+
+- **Ideograms v4**: this image generator claims to be the best open source image generator. It consumes a special *Json Prompt Format* that WanGP *Prompt Enhancer* can produce for you. There is a snag though: occasionnaly, even a harmless prompt may trigger a *Safety Filter*. No way to get around this as it is hardcoded in the model weights.
+
+- **Stable Audio 3**:  WanGP *Text To Speech* (TTS) collection of models is now completed with a model that can generate sounds, background music or special effects 
+
+- **Bernini 14B**: the video model derived from Wan 2.2 is really incredible. You can ask it to modify the content of an existing video or to generate a new video with any number of *References Images*. and *it just works*. There is a price to pay though: to generate 81 frames, you will need 12 GB of VRAM for *v2v* / 16GB for *v2v + ref frames*. v2v  works quite well with Lora Accelerators such as *lightning 4 steps* . But as soon as you include reference frames, you will have to go for at least 15 steps with guidance and no lora accelerator. You are not allowed to complain, this model is advertised to work on a H100 and thanks to WanGP magic you can run it at home.
+
+- **MCP Server & Agent Skills**: WanGP includes now a *MCP server* to make life much easier to your AI Agents. WanGP exposes also new discovery functions that can be queried by to agent to get the list of all generative models and features that are available.
+
+### 1st of June 2026: WanGP v11.90, Everything will be fine...
+**Finetune Creator / Editor**
+*Create* a new *Finetune* (use an existing model with your own checkpoints), *Edit* or *Import* an existing Finetune in only one click directly from the *WanGP UI*. You can then share easily a finetune with other users by clicking the *Export* button.
+
+Look for the new **+** in the *WanGP Tool Bar*.
+
+The finetune creator allows you not only to customize an existing models with *Custom URLs* or *Local Paths* for both the main *Transformer files* & *Text encoders* but also to define *User help* and set *Custom System Templates* to be used with the finetune *Prompt Enhancer*.
+
+Please check *docs/FINETUNE.md* doc for info about finetunes.
+
+### 29th of May 2026: WanGP v11.88, Humans Accelerators
+- **Create Hierarchies of Loras / Change Order of Loras**
+
+- **WanGP Toolbar** with keyboard shortcuts:
+    - **Search**: switch quickly to another model by just entering a few letters of its name
+    - **Refresh Model List**: no longer needed to restart the app to add or modify a finetune
+    - **Unload All**: free most of the RAM/VRAM used by WanGP
+
+- **MOV/MKV Container Support**: beside *mp4* files you can now store you video gens in *mov* and *mkv* containers
+
+- **ProRes422 & DNxHR HQ Video Codecs**: these professional video codecs have some fans out there
+
+- **LTX-2 Guide**: click the "i" to the right of the model description to get tips / explanations on how to use LTX2 models
+
+- **LTX2 Smearing Fix**: the smearing / ghosting is now mostly gone
+
+- **Omnivoice Fix**: you will enjoy this fix unless you liked the gibberish generator of the previous version
+
 
 
 
@@ -231,7 +429,7 @@ Use this script to get the latest updates for WAN2GP and upgrade dependencies.
 * **1. Update:** Fetches the latest code from GitHub and updates requirements.
 * **2. Upgrade:** Allows you to manually individually upgrade heavy backend components (like PyTorch, Triton, Sage Attention).
 
-#### 4️⃣ Managing Environments (`scripts\manage.bat` | `/manage.sh`)
+#### 4️⃣ Managing Environments (`scripts\manage.bat` | `scripts/manage.sh`)
 Use this script to manage and switch between your sandboxed environments safely.
 
 * **Example Scenario 1: Migrating an Existing Setup**
@@ -244,13 +442,13 @@ Use this script to manage and switch between your sandboxed environments safely.
 
 ---
 
-### One-click (Pinokio) installer:
-
+### One-click Installers
+- Pinokio installer
 Get started instantly with [Pinokio App](https://pinokio.computer/)\
 It is recommended to use in Pinokio the Community Scripts *wan2gp* or *wan2gp-amd* by **Morpheus** rather than the official Pinokio install.
 
----
-
+- Wan2GP Desktop by GKArtist
+[Wan2GP Desktop](https://github.com/GKartist75/wan2gp-desktop) is a desktop launcher for Wan2GP that installs, updates, and runs it from one window — handling Git, Python, CUDA, and PyTorch setup so you don't have to configure them manually.
 
 ### Manual installation: (for RTX20xx - RTX50xx)
 
@@ -259,9 +457,11 @@ git clone https://github.com/deepbeepmeep/Wan2GP.git
 cd Wan2GP
 conda create -n wan2gp python=3.11.14
 conda activate wan2gp
-pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
 ```
+
+For optimized attention, install **SageAttention 1.0.6 on RTX 20XX** and **SageAttention 2.2.0 on RTX 30XX or newer**. SageAttention 2 requires an Ampere-or-newer GPU; GTX 10XX should use SDPA. See the **[Installation Guide](docs/INSTALLATION.md#sage-attention)** for the platform-specific commands.
 
 ### Manual installation: (for GTX 10xx)
 
@@ -270,14 +470,18 @@ git clone https://github.com/deepbeepmeep/Wan2GP.git
 cd Wan2GP
 conda create -n wan2gp python=3.10.9
 conda activate wan2gp
-pip install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/test/cu128
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/test/cu128
 pip install -r requirements.txt
 ```
 
 #### Run the application:
+
 ```bash
 python wgp.py
 ```
+If you are low on VRAM, there is a trick to increase the amount of VRAM available (between 1GB and 5GB of VRAM to be gained depending on the GPU): *disable GPU Usage in your Web Browser*.
+
+Run *scripts/start-chrome-no-gpu.bat* or *scripts/start-chrome-no-gpu.sh* to launch Chrome without using your GPU. 
 
 First time using WanGP ? Just check the *Guides* tab, and you will find a selection of recommended models to use.
 
@@ -300,9 +504,9 @@ conda rename -n wan2gp  old_wan2gp
 Get in the directory where WanGP is installed and:
 ```bash
 git pull
-conda create -n wa2gp python=3.11.9
+conda create -n wan2gp python=3.11.9
 conda activate wan2gp
-pip install torch==2.10.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
 ```
 
@@ -359,7 +563,7 @@ This automated script will:
 
 ### Nvidia
 For detailed installation instructions for different GPU generations:
-- **[Installation Guide](docs/INSTALLATION.md)** - Complete setup instructions for RTX 10XX to RTX 50XX
+- **[Installation Guide](docs/INSTALLATION.md)** - Complete setup instructions for GTX 10XX, RTX 20XX to RTX 50XX
 
 ### AMD
 For detailed installation instructions for different GPU generations:
@@ -374,9 +578,11 @@ For detailed installation instructions for different GPU generations:
 
 ### Advanced Features
 - **[Deepy Assistant](docs/DEEPY.md)** - Enable Deepy, configure its tool presets, use selected media and frames, and run Deepy from the CLI
+- **[Remote LLMs](docs/REMOTE_LLMS.md)** - Configure Codex, Claude Code, and OpenCode providers for Deepy and Prompt Enhancer
 - **[Loras Guide](docs/LORAS.md)** - Using and managing Loras for customization
 - **[Finetunes](docs/FINETUNES.md)** - Add manually new models to WanGP
 - **[VACE ControlNet](docs/VACE.md)** - Advanced video control and manipulation
+- **[Processing Guide](docs/PROCESSING.md)** - Preprocessing, masks, sliding windows, and postprocessing
 - **[Command Line Reference](docs/CLI.md)** - All available command line options
 
 ## 📚 Documentation
