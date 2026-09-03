@@ -51,3 +51,15 @@ plugins_local.json
 /plugins/wangp-*/
 loras_url_cache.json
 loras_url_cache_v2.json
+
+# [NC]
+venv/
+venv.rtx30/
+ckpts
+ffmpeg_bins/
+loras
+SageAttention/
+*.orig
+resolutions.json
+run.sh
+run30.sh
