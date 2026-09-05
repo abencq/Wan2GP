@@ -964,15 +964,32 @@ class LTX2:
         def _load_component(model, path, sd_ops=None, postprocess=None, ignore_unused_weights=False):
             if postprocess is None and sd_ops is not None:
                 postprocess = _make_sd_postprocess(sd_ops)
-            mmgp_offload.load_model_data(
-                model,
-                path,
-                postprocess_sd=postprocess,
-                default_dtype=self.dtype,
-                writable_tensors=False,
-                ignore_missing_keys=False,
-                ignore_unused_weights=ignore_unused_weights,
-            )
+            try:
+                mmgp_offload.load_model_data(
+                    model,
+                    path,
+                    postprocess_sd=postprocess,
+                    default_dtype=self.dtype,
+                    writable_tensors=False,
+                    ignore_missing_keys=False,
+                    ignore_unused_weights=ignore_unused_weights,
+                )
+            except RuntimeError as exc:
+                message = str(exc)
+                if "size mismatch" in message:
+                    lines = [line.strip() for line in message.splitlines() if "size mismatch for" in line]
+                    detail = "\n".join(f"  {line}" for line in lines[:5])
+                    more = f"  ... and {len(lines) - 5} more" if len(lines) > 5 else ""
+                    raise RuntimeError(
+                        "LTX2 checkpoint is incompatible with the model architecture: "
+                        f"{len(lines)} tensor(s) in {path} have shapes that do not match the model. Examples:\n"
+                        f"{detail}{more}\n"
+                        "This file was most likely built for a different model version/configuration. "
+                        "Continuing would leave those modules randomly initialized and produce corrupted "
+                        "(often all-black) output, so the load is aborted. Re-download or re-quantize this "
+                        "checkpoint for the intended model."
+                    ) from exc
+                raise
             model.eval().requires_grad_(False)
             return model
 

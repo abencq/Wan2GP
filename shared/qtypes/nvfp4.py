@@ -12,6 +12,11 @@ try:
 except Exception:  # pragma: no cover
     _TorchFakeTensor = ()
 
+try:
+    from torch._subclasses.functional_tensor import FunctionalTensor as _TorchFunctionalTensor
+except Exception:  # pragma: no cover
+    _TorchFunctionalTensor = ()
+
 def _maybe_add_nvfp4_cu13_dll_dir():
     if os.name != "nt":
         return
@@ -80,8 +85,7 @@ _NVFP4_SPLIT_FIELDS = {
     "output_scale": 0,
 }
 
-_NVFP4_BACKEND = os.environ.get("WGP_NVFP4_BACKEND", _NVFP4_BACKEND_AUTO).strip().lower()
-_NVFP4_BACKEND = _NVFP4_BACKEND_LIGHTX2V
+_NVFP4_BACKEND_RAW = os.environ.get("WGP_NVFP4_BACKEND", _NVFP4_BACKEND_AUTO)
 
 def _normalize_nvfp4_backend(name):
     if name is None:
@@ -96,6 +100,9 @@ def _normalize_nvfp4_backend(name):
     if norm in ("off", "none", "fallback", "disable", "disabled"):
         return "fallback"
     return norm
+
+# Resolve the effective backend selection (env var WGP_NVFP4_BACKEND or auto).
+_NVFP4_BACKEND = _normalize_nvfp4_backend(_NVFP4_BACKEND_RAW)
 
 
 def _split_or_share_nvfp4_scale(src, *, dim, split_sizes, context):
@@ -215,7 +222,6 @@ def _nvfp4_note_load_backend():
 
 
 def _check_nvfp4_kernel_support(device, backend):
-    # return False
     if device.type != "cuda":
         return False
     if backend == _NVFP4_BACKEND_COMFY:
@@ -275,54 +281,127 @@ _init_nvfp4_kernel_support()
 
 
 def _is_fake_tensor(tensor):
-    return isinstance(tensor, _TorchFakeTensor)
+    if isinstance(tensor, _TorchFakeTensor):
+        return True
+    if isinstance(tensor, _TorchFunctionalTensor):
+        # During torch.compile pregraph (aot_autograd) fake tensors arrive
+        # wrapped in a FunctionalTensor; unwrap to the base tensor.
+        try:
+            return _is_fake_tensor(tensor.from_functional())
+        except Exception:
+            elem = getattr(tensor, "elem", None)
+            if torch.is_tensor(elem):
+                return _is_fake_tensor(elem)
+    return False
 
 
 def _nvfp4_layout(weight):
     return getattr(weight, "_layout", _NVFP4_LAYOUT_LEGACY)
 
 
-def _nvfp4_can_use_kernel(input, weight):
-    if not torch.is_tensor(input):
-        return False
-    if not getattr(weight, "_allow_kernel", True):
-        return False
-    if not _supports_nvfp4_kernel(input.device):
-        return False
-    backend = _NVFP4_KERNEL_BACKEND
-    if backend is None:
-        return False
-    layout = _nvfp4_layout(weight)
-    if backend == _NVFP4_BACKEND_LIGHTX2V:
-        if input.shape[-1] % 32 != 0:
-            return False
-        if weight.size(0) % 32 != 0:
-            return False
-    else:
-        if layout == _NVFP4_LAYOUT_LEGACY:
-            if input.shape[-1] % 64 != 0:
-                return False
-        else:
-            if input.shape[-1] % 16 != 0:
-                return False
-        if weight.size(0) % 8 != 0:
-            return False
-    if weight._data.shape[1] * 2 != input.shape[-1]:
-        return False
-    if weight._block_size != 16:
-        return False
-    if not torch.is_tensor(weight._input_global_scale) or not torch.is_tensor(weight._alpha):
-        return False
-    if getattr(weight._input_global_scale, "is_meta", False):
-        return False
-    if _is_fake_tensor(input):
-        return True
+# ---------------------------------------------------------------------------
+# Dispatch telemetry: lightweight counters so we can see, after a run, which
+# NVFP4 linears took the CUDA kernel path vs the CPU fallback, and (when
+# WGP_NVFP4_DEBUG=1) why a kernel was rejected.
+# ---------------------------------------------------------------------------
+_NVFP4_DISPATCH_STATS = {
+    "kernel_allowed": 0,
+    "kernel_denied": {},
+    "linear_kernel": 0,
+    "linear_fallback": 0,
+    "linear_fake": 0,
+}
+_NVFP4_DEBUG = os.environ.get("WGP_NVFP4_DEBUG", "").strip().lower() not in ("", "0", "off", "false")
+_NVFP4_DEBUG_PRINTED = 0
+
+
+def _nvfp4_stat(kind, reason=None):
+    if reason is None:
+        _NVFP4_DISPATCH_STATS[kind] = _NVFP4_DISPATCH_STATS.get(kind, 0) + 1
+        return
+    denied = _NVFP4_DISPATCH_STATS["kernel_denied"]
+    denied[reason] = denied.get(reason, 0) + 1
+
+
+def _nvfp4_debug_line(context, input, weight, extra=""):
+    global _NVFP4_DEBUG_PRINTED
+    if not _NVFP4_DEBUG or _NVFP4_DEBUG_PRINTED >= 30:
+        return
+    _NVFP4_DEBUG_PRINTED += 1
+    scale = getattr(weight, "_scale", None)
+    igs = getattr(weight, "_input_global_scale", None)
     try:
-        if not torch.isfinite(weight._input_global_scale).all():
-            return False
+        shape = tuple(input.shape)
     except Exception:
-        return False
-    return True
+        shape = "?"
+    scale_dev = scale.device if torch.is_tensor(scale) else type(scale).__name__
+    igs_dev = igs.device if torch.is_tensor(igs) else type(igs).__name__
+    print(
+        f"[NVFP4DBG] {context} in={type(input).__name__} dev={getattr(input, 'device', '?')} "
+        f"shape={shape} scale_dev={scale_dev} igs_dev={igs_dev} {extra}",
+        flush=True,
+    )
+
+
+def nvfp4_dispatch_stats():
+    return dict(_NVFP4_DISPATCH_STATS)
+
+
+def nvfp4_reset_dispatch_stats():
+    _NVFP4_DISPATCH_STATS.update(
+        {"kernel_allowed": 0, "kernel_denied": {}, "linear_kernel": 0, "linear_fallback": 0, "linear_fake": 0}
+    )
+
+
+def _nvfp4_can_use_kernel(input, weight):
+    reason = None
+    if not torch.is_tensor(input):
+        reason = "input_not_tensor"
+    elif not getattr(weight, "_allow_kernel", True):
+        reason = "allow_kernel_false"
+    elif not _supports_nvfp4_kernel(input.device):
+        reason = f"no_kernel_support_{input.device.type}"
+    else:
+        backend = _NVFP4_KERNEL_BACKEND
+        if backend is None:
+            reason = "kernel_backend_none"
+        else:
+            layout = _nvfp4_layout(weight)
+            if backend == _NVFP4_BACKEND_LIGHTX2V:
+                if input.shape[-1] % 32 != 0:
+                    reason = f"lx_in_dim_{input.shape[-1]}"
+                elif weight.size(0) % 32 != 0:
+                    reason = f"lx_out_dim_{weight.size(0)}"
+            else:
+                if layout == _NVFP4_LAYOUT_LEGACY:
+                    if input.shape[-1] % 64 != 0:
+                        reason = f"ck_in_dim_{input.shape[-1]}"
+                else:
+                    if input.shape[-1] % 16 != 0:
+                        reason = f"ck_in_dim_{input.shape[-1]}"
+                if reason is None and weight.size(0) % 8 != 0:
+                    reason = f"ck_out_dim_{weight.size(0)}"
+            if reason is None and weight._data.shape[1] * 2 != input.shape[-1]:
+                reason = f"k_dim_mismatch_{weight._data.shape[1] * 2}_vs_{input.shape[-1]}"
+            if reason is None and weight._block_size != 16:
+                reason = f"block_size_{weight._block_size}"
+            if reason is None and not (torch.is_tensor(weight._input_global_scale) and torch.is_tensor(weight._alpha)):
+                reason = "missing_scales"
+            if reason is None and getattr(weight._input_global_scale, "is_meta", False):
+                reason = "input_global_scale_is_meta"
+            if reason is None and not _is_fake_tensor(input):
+                try:
+                    if not torch.isfinite(weight._input_global_scale).all():
+                        reason = "input_global_scale_nonfinite"
+                except Exception as exc:
+                    reason = f"isfinite_error_{type(exc).__name__}"
+            if reason is None:
+                _nvfp4_stat("kernel_allowed")
+                return True
+    if reason is not None:
+        _nvfp4_stat("kernel_denied", reason)
+        _nvfp4_debug_line("denied", input, weight, extra=f"reason={reason}")
+    return False
 
 
 def _nvfp4_get_act_scale(device):
@@ -448,6 +527,9 @@ def _nvfp4_linear_cuda_lightx2v(input, weight, bias=None):
         if not bias.is_contiguous():
             bias = bias.contiguous()
     if layout == _NVFP4_LAYOUT_TENSORCORE:
+        # lightx2v dequantizes A to x/input_scale (global-scaled) units and B
+        # to W/input_global_scale_w, so the output alpha is weight_scale_2 *
+        # input_scale (== 1/(gs_x * gs_w)).
         quant_scale = torch.reciprocal(torch.clamp(input_scale, min=1e-8))
         alpha = alpha * input_scale
     else:
@@ -478,16 +560,41 @@ def _nvfp4_linear_cuda(input, weight, bias=None):
     return _nvfp4_linear_cuda_comfy(input, weight, bias=bias)
 
 
+def _nvfp4_fake_new_empty(input, weight):
+    # Return an empty (fake) tensor matching the linear output shape without
+    # touching any real tensor (LUT materialization would crash pregraph).
+    base = input
+    for _ in range(4):
+        if not isinstance(base, _TorchFunctionalTensor):
+            break
+        try:
+            base = base.from_functional()
+        except Exception:
+            elem = getattr(base, "elem", None)
+            if torch.is_tensor(elem):
+                base = elem
+            else:
+                break
+    if torch.is_tensor(base):
+        return base.new_empty((*input.shape[:-1], weight.size(0)))
+    return input.new_empty((*input.shape[:-1], weight.size(0)))
+
+
 @torch.compiler.disable()
 def _nvfp4_linear(input, weight, bias=None, op=None):
     if _nvfp4_can_use_kernel(input, weight):
         if _is_fake_tensor(input):
-            return input.new_empty((*input.shape[:-1], weight.size(0)))
+            _nvfp4_stat("linear_fake")
+            return _nvfp4_fake_new_empty(input, weight)
+        _nvfp4_stat("linear_kernel")
+        _nvfp4_debug_line("kernel", input, weight, extra=f"backend={_NVFP4_KERNEL_BACKEND}")
         return _nvfp4_linear_cuda(input, weight, bias=bias)
     _nvfp4_note_fallback()
     if _is_fake_tensor(input):
-        return input.new_empty((*input.shape[:-1], weight.size(0)))
-
+        _nvfp4_stat("linear_fake")
+        return _nvfp4_fake_new_empty(input, weight)
+    _nvfp4_stat("linear_fallback")
+    _nvfp4_debug_line("fallback", input, weight)
     if torch.is_tensor(input):
         qweight = weight.dequantize(dtype=input.dtype, device=input.device)
         bias_arg = bias
@@ -497,6 +604,128 @@ def _nvfp4_linear(input, weight, bias=None, op=None):
         return torch.nn.functional.linear(input, qweight, bias=bias_arg)
 
     return torch.nn.functional.linear(input, weight.dequantize(), bias=bias)
+
+
+# ---------------------------------------------------------------------------
+# torch.compile support: torch.ops.wgp_nvfp4.gemm
+#
+# Under torch.compile the NVFP4 weight arrives as a (Functional)Tensor subclass
+# during graph tracing. Two naive approaches both break:
+#   * a plain @torch.compiler.disable() graph break: inductor can bake the
+#     trace-time *empty* tensor into the compiled graph so the kernel never
+#     runs at runtime (black video); and
+#   * a custom op that takes the weight *subclass* as an argument: the
+#     dispatcher strips the subclass for a torch.library custom op, so the
+#     quantized state stored as Python attributes (_data/_scale/_alpha/...)
+#     is lost inside the op.
+#
+# The robust pattern is a custom op whose arguments are all *plain* tensors
+# (the activation plus the weight's stored sub-tensors). At trace time the
+# registered fake impl only provides the output shape, so inductor records a
+# real opaque node; at runtime it invokes the real impl, which runs the actual
+# NVFP4 kernel (or the dequant fallback) on real data.
+# ---------------------------------------------------------------------------
+_NVFP4_LAYOUT_ID = {_NVFP4_LAYOUT_LEGACY: 0, _NVFP4_LAYOUT_TENSORCORE: 1}
+_NVFP4_LAYOUT_FROM_ID = {v: k for k, v in _NVFP4_LAYOUT_ID.items()}
+_NVFP4_BACKEND_ID = {_NVFP4_BACKEND_LIGHTX2V: 0, _NVFP4_BACKEND_COMFY: 1}
+_NVFP4_BACKEND_FROM_ID = {v: k for k, v in _NVFP4_BACKEND_ID.items()}
+
+
+class _Nvfp4PlainWeight:
+    """Minimal standin exposing the attributes the CUDA kernel helpers read
+    from an NVFP4WeightTensor, backed by plain tensors (so it survives the
+    torch.library custom-op dispatch which strips tensor subclasses)."""
+
+    __slots__ = ("_data", "_scale", "_input_global_scale", "_alpha", "_layout", "_out")
+
+    def __init__(self, data, scale, input_global_scale, alpha, layout, out_features):
+        self._data = data
+        self._scale = scale
+        self._input_global_scale = input_global_scale
+        self._alpha = alpha
+        self._layout = layout
+        self._out = out_features
+
+    def size(self, dim=None):
+        if dim is None:
+            return (self._out, self._data.shape[1] * 2)
+        return self._out if dim == 0 else self._data.shape[1] * 2
+
+
+def _nvfp4_gemm_real(input, weight_fp4, weight_scale, input_scale, alpha, bias, layout_id, backend_id, use_kernel):
+    layout = _NVFP4_LAYOUT_FROM_ID.get(layout_id, _NVFP4_LAYOUT_LEGACY)
+    backend = _NVFP4_BACKEND_FROM_ID.get(backend_id, _NVFP4_BACKEND_LIGHTX2V)
+    if use_kernel and backend in (_NVFP4_BACKEND_LIGHTX2V, _NVFP4_BACKEND_COMFY):
+        standin = _Nvfp4PlainWeight(
+            weight_fp4, weight_scale, input_scale, alpha, layout, weight_fp4.shape[0]
+        )
+        # Count this real kernel execution (the graph-break/fallback dispatcher
+        # _nvfp4_linear does the equivalent when the custom op is unavailable).
+        _nvfp4_stat("linear_kernel")
+        _nvfp4_debug_line(
+            "gemm_real", input, standin,
+            extra=(
+                f"backend={backend} in={tuple(input.shape)} in_dev={input.device} "
+                f"w_dev={weight_fp4.device} layout={layout}"
+            ),
+        )
+        if backend == _NVFP4_BACKEND_LIGHTX2V:
+            return _nvfp4_linear_cuda_lightx2v(input, standin, bias=bias)
+        return _nvfp4_linear_cuda_comfy(input, standin, bias=bias)
+    # No kernel available (e.g. WGP_NVFP4_BACKEND=fallback): dequantize the
+    # plain sub-tensors and run a regular linear. Doing this inside the op
+    # (instead of a @torch.compiler.disable() graph break) keeps the compiled
+    # graph correct: a graph break would let inductor bake the trace-time
+    # empty tensor in and never execute the real computation at runtime.
+    _nvfp4_note_fallback()
+    _nvfp4_stat("linear_fallback")
+    _nvfp4_debug_line("gemm_dequant", input, None)
+    qweight = _dequantize_nvfp4_weight(
+        weight_u8=weight_fp4,
+        weight_scale=weight_scale,
+        input_global_scale=input_scale,
+        alpha=alpha,
+        dtype=input.dtype,
+        device=input.device,
+        block_size=16,
+        layout=layout,
+    )
+    bias_arg = bias
+    if bias_arg is not None and torch.is_tensor(bias_arg):
+        if bias_arg.device != input.device or bias_arg.dtype != input.dtype:
+            bias_arg = bias_arg.to(device=input.device, dtype=input.dtype)
+    return torch.nn.functional.linear(input, qweight, bias=bias_arg)
+
+
+def _nvfp4_gemm_fake(input, weight_fp4, weight_scale, input_scale, alpha, bias, layout_id, backend_id, use_kernel):
+    return input.new_empty(*input.shape[:-1], weight_fp4.shape[0])
+
+
+_NVFP4_HAS_CUSTOM_OP = False
+try:
+    # NOTE: in torch 2.9 `fn` is a positional-only argument of custom_op();
+    # passing it as a keyword raises TypeError (and a silent registration
+    # failure would leave the broken graph-break path active under compile).
+    _wgp_nvfp4_gemm_op = torch.library.custom_op(
+        "wgp_nvfp4::gemm",
+        _nvfp4_gemm_real,
+        mutates_args=(),
+        device_types=("cpu", "cuda"),
+        schema=(
+            "(Tensor input, Tensor weight_fp4, Tensor weight_scale, "
+            "Tensor input_scale, Tensor alpha, Tensor? bias, "
+            "int layout_id, int backend_id, bool use_kernel) -> Tensor"
+        ),
+    )
+    _wgp_nvfp4_gemm_op.register_fake(_nvfp4_gemm_fake)
+    _NVFP4_HAS_CUSTOM_OP = True
+    if os.environ.get("WGP_NVFP4_DEBUG", "").strip().lower() not in ("", "0", "off", "false"):
+        print("[NVFP4] custom op torch.ops.wgp_nvfp4.gemm registered", flush=True)
+except Exception:
+    import traceback
+
+    traceback.print_exc()
+    _wgp_nvfp4_gemm_op = None
 
 
 def _is_float8_dtype(dtype):
@@ -538,13 +767,13 @@ def _deswizzle_nvfp4_scale(scale, in_features, block_size=16, dtype=None):
         raise RuntimeError(
             f"NVFP4 scale shape mismatch: expected at least {k_groups} groups, got {scale.shape[1]}"
         )
-    if scale.shape[1] > k_groups:
-        scale = scale[:, :k_groups]
-
-    m, _ = scale.shape
+    # Deswizzle on the stored (padded) width first, then truncate the logical
+    # result: the 128x64 swizzle tiles are defined over the full stored grid,
+    # so truncating before the permute would corrupt the mapping (or crash the
+    # reshape) when a file stores more scale columns than in_features // 16.
+    m, stored_cols = scale.shape
+    k_tiles = (stored_cols + 3) // 4
     m_tiles = (m + 128 - 1) // 128
-    f = block_size * 4
-    k_tiles = (in_features + f - 1) // f
     tmp = scale if dtype is None else scale.to(dtype)
     tmp = tmp.reshape(1, m_tiles, k_tiles, 32, 4, 4)
     tmp = tmp.permute(0, 1, 4, 3, 2, 5)
@@ -967,6 +1196,25 @@ class NVFP4WeightTensor(QTensor):
             weight = args[1] if len(args) > 1 else kwargs.get("weight", None)
             bias = args[2] if len(args) > 2 else kwargs.get("bias", None)
             if isinstance(weight, NVFP4WeightTensor):
+                if _NVFP4_HAS_CUSTOM_OP:
+                    # Route every NVFP4 linear through the plain-tensor custom
+                    # op (torch.ops.wgp_nvfp4.gemm): at trace time the fake
+                    # impl provides shapes only; at runtime the real impl runs
+                    # the NVFP4 kernel (use_kernel=True) or the dequantized
+                    # fallback. A graph break instead can let inductor bake the
+                    # trace-time empty tensor into the compiled graph (black
+                    # video, no computation executed at runtime).
+                    return torch.ops.wgp_nvfp4.gemm(
+                        input,
+                        weight._data,
+                        weight._scale,
+                        weight._input_global_scale,
+                        weight._alpha,
+                        bias,
+                        _NVFP4_LAYOUT_ID.get(_nvfp4_layout(weight), 0),
+                        _NVFP4_BACKEND_ID.get(_NVFP4_KERNEL_BACKEND, 0),
+                        _nvfp4_can_use_kernel(input, weight),
+                    )
                 return _nvfp4_linear(input, weight, bias=bias)
         with torch._C.DisableTorchFunctionSubclass():
             return func(*args, **kwargs)
@@ -979,6 +1227,22 @@ class NVFP4WeightTensor(QTensor):
             weight = args[1]
             bias = args[2] if len(args) > 2 else None
             if isinstance(weight, NVFP4WeightTensor):
+                if _NVFP4_HAS_CUSTOM_OP:
+                    # Same plain-tensor custom op routing as __torch_function__:
+                    # keeps a real opaque node in the compiled graph so the
+                    # NVFP4 kernel (or the dequantized fallback) executes at
+                    # runtime with real data.
+                    return torch.ops.wgp_nvfp4.gemm(
+                        input,
+                        weight._data,
+                        weight._scale,
+                        weight._input_global_scale,
+                        weight._alpha,
+                        bias,
+                        _NVFP4_LAYOUT_ID.get(_nvfp4_layout(weight), 0),
+                        _NVFP4_BACKEND_ID.get(_NVFP4_KERNEL_BACKEND, 0),
+                        _nvfp4_can_use_kernel(input, weight),
+                    )
                 return _nvfp4_linear(input, weight, bias=bias, op=op)
         if op is torch.ops.aten.detach:
             t = args[0]

@@ -30,6 +30,50 @@ if is_mps:
     from shared.mps.device_patch import apply_mps_patch
     apply_mps_patch()
 
+# ── Key the torch inductor cache by code version ────────────────────────────
+# torch._inductor treats torch.library custom ops (e.g. wgp_nvfp4.gemm) as
+# opaque: its cache key does NOT cover the Python implementation of those
+# ops. After editing shared/qtypes/nvfp4.py (or the lightx2v kernel) inductor
+# can therefore keep replaying graphs compiled against the OLD behavior -- a
+# silent regression that looks like "the fix is not taking effect" (e.g.
+# black video from a baked trace-time empty tensor). Point the inductor cache
+# at a subdir keyed by the source of the code that defines/uses the custom
+# ops, so any code change automatically invalidates stale compiled graphs.
+def _wgp_key_inductor_cache():
+    try:
+        if os.environ.get("TORCHINDUCTOR_CACHE_DIR"):
+            return  # honor an explicit user override
+        import hashlib
+        import getpass
+        import re
+        import tempfile
+        h = hashlib.sha256()
+        nvfp4_src = os.path.join(p, "shared", "qtypes", "nvfp4.py")
+        with open(nvfp4_src, "rb") as f:
+            h.update(f.read())
+        # the lightx2v kernel entry points are also opaque to inductor
+        try:
+            import lightx2v_kernel
+            pkg_dir = os.path.dirname(lightx2v_kernel.__file__)
+            for _name in ("gemm.py", "__init__.py"):
+                _cand = os.path.join(pkg_dir, _name)
+                if os.path.exists(_cand):
+                    with open(_cand, "rb") as f:
+                        h.update(f.read())
+        except Exception:
+            pass
+        # mirror torch._inductor.runtime.cache_dir_utils.default_cache_dir()
+        # without importing torch._inductor at app startup
+        base = os.path.join(
+            tempfile.gettempdir(),
+            "torchinductor_" + re.sub(r'[\\/:*?"<>|]', "_", getpass.getuser()),
+        )
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(base, "wgp-" + h.hexdigest()[:16])
+    except Exception:
+        # never block app startup over a cache-keying nicety
+        pass
+_wgp_key_inductor_cache()
+
 import time
 import threading
 import warnings
