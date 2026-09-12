@@ -46,6 +46,7 @@ tmp/
 deepy_sessions/
 dlss5/
 SpargeAttn-build/
+scripts/dlssg_worker_linux/.cache/
 /settings/
 
 wgp_config.json
