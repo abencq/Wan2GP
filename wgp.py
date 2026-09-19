@@ -74,6 +74,22 @@ def _wgp_key_inductor_cache():
         pass
 _wgp_key_inductor_cache()
 
+# ── Keep torch Inductor's async-compile pool from quiescing mid-run ─────────
+# torch 2.10's SubprocPool (default worker_start_method="subprocess") fires its
+# compiler workers 60s after the last compile job (quiesce_async_compile_pool)
+# and re-forks them for the next job. A re-fork that lands while this process
+# carries a heavy live CUDA state (big model on the GPUs, denoising running) can
+# produce a grandchild worker that deadlocks at birth; Inductor has no liveness
+# check for such workers, so the main process then blocks forever in
+# concurrent.futures.Future.result() -- a silent hang with the GPU idle.
+# Disabling the quiesce timer keeps the pool forked once, in the light early
+# state, for the whole run. See ../inductor-quiesce-refork-deadlock.md.
+def _wgp_disable_inductor_quiesce():
+    if os.environ.get("TORCHINDUCTOR_QUIESCE_ASYNC_COMPILE_POOL"):
+        return  # honor an explicit user override
+    os.environ["TORCHINDUCTOR_QUIESCE_ASYNC_COMPILE_POOL"] = "0"
+_wgp_disable_inductor_quiesce()
+
 import time
 import threading
 from functools import partial
@@ -88,6 +104,10 @@ try:
 except ImportError:
     pass
 from pathlib import Path
+# Safety net against the Inductor sidecar quiesce/re-fork deadlock (see above):
+# turns a stuck compile worker into a fast, diagnosable error instead of a hang.
+from shared.utils.compile_watchdog import start_compile_watchdog
+start_compile_watchdog()
 from datetime import datetime
 import gradio as gr
 from shared.gradio import downloads as gradio_downloads
