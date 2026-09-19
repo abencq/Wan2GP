@@ -14,6 +14,8 @@
 
 - **LoRA paths:** one optional `--lora-config FILE` JSON replaces the model-specific LoRA directory flags. Keys reuse the subfolder names inside `loras/`; default folders keep working unchanged. See the [sample JSON and setup guide](LORAS.md#custom-lora-directories).
 
+- **Various fixes:** a long LTX2 generation can no longer freeze at the start of the first denoise step while kernels are being compiled. If a kernel build ever stalls, the job fails with a clear message instead of hanging the server.
+
 ### 21st of May 2026: WanGP v11.77, I can hear Voices
 It has never been easier to do voice cloning directly in video models:
 
