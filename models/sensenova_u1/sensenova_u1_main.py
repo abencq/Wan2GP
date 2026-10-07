@@ -22,15 +22,6 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "configs", f"{_ARCHITECTU
 _TOKENIZER_FOLDER = "sensenova_u1_5"
 
 
-def _lock_checkpoint_fp32_parameters(model, state_dict):
-    parameters = dict(model.named_parameters())
-    for key, tensor in state_dict.items():
-        parameter = parameters.get(key)
-        if parameter is not None and tensor.dtype == torch.float32:
-            parameter._lock_dtype = torch.float32
-    return state_dict
-
-
 def _as_pil(image) -> Image.Image:
     if isinstance(image, Image.Image):
         return image.convert("RGB")
@@ -56,7 +47,11 @@ class model_factory:
         for module in transformer.modules():
             if isinstance(module, Qwen3RotaryEmbedding):
                 module.reset_inv_freq()
-        offload.load_model_data(transformer, filename, writable_tensors=False, default_dtype=dtype, preprocess_sd=lambda state_dict: _lock_checkpoint_fp32_parameters(transformer, state_dict))
+        # SenseNova's BF16 residual stream can exceed FP16's finite range.
+        # Ignore the shared FP16 setting for loading and MMGP weight conversion.
+        dtype = torch.bfloat16
+        offload.load_model_data(transformer, filename, writable_tensors=False, default_dtype=dtype)
+        transformer._convertWeightsFloatTo = dtype
         transformer.eval().requires_grad_(False)
         transformer._interrupt = False
         if save_quantized:
@@ -83,7 +78,6 @@ class model_factory:
         shift: float = 3.0,
         image_start=None,
         input_ref_images=None,
-        custom_settings=None,
         callback=None,
         loras_slists=None,
         set_progress_status=None,
@@ -98,13 +92,12 @@ class model_factory:
         if image_start is not None and not references:
             references.append(image_start)
         references = [_as_pil(image) for image in references]
-        use_kv_cache = isinstance(custom_settings, dict) and custom_settings.get("sensenova_kv_cache") == "Enabled"
-
-        if callback is not None:
-            callback(-1, None, True, override_num_inference_steps=sampling_steps)
 
         def step_callback(step_idx, image):
             if callback is not None:
+                if step_idx == -1:
+                    callback(-1, None, True, override_num_inference_steps=sampling_steps)
+                    return
                 preview_height = min(200, image.shape[-2])
                 preview_width = max(1, round(image.shape[-1] * preview_height / image.shape[-2]))
                 preview = torch.nn.functional.interpolate(image, size=(preview_height, preview_width), mode="bilinear", align_corners=False) if image.shape[-2:] != (preview_height, preview_width) else image
@@ -124,7 +117,6 @@ class model_factory:
                         num_steps=sampling_steps,
                         batch_size=batch_size,
                         seed=seed or 0,
-                        use_kv_cache=use_kv_cache,
                         callback=step_callback,
                     )
                 else:
@@ -137,7 +129,6 @@ class model_factory:
                         num_steps=sampling_steps,
                         batch_size=batch_size,
                         seed=seed or 0,
-                        use_kv_cache=use_kv_cache,
                         callback=step_callback,
                     )
             except InterruptedError:

@@ -463,7 +463,8 @@ Depending on your configuration, it either:
 | **Florence 2 + Llama Joy 8B** | Produces richer local rewriting than the 3B option but uses more memory. | Use when you prefer this writing style and do not need Deepy Prime. |
 | **Qwen3.5 VL Abliterated 4B** | Handles text and images in one local model with relatively low memory use. | Recommended local starting point for most users. |
 | **Qwen3.5 VL Abliterated 9B** | Better instruction following and richer prompts than 4B, with higher VRAM/RAM use. | Use when quality matters and it fits comfortably beside your generation model. |
-| **Qwen3.8 VL Uncensored 27B** | Strongest local understanding and rewriting, but much heavier to load and run. It is also the required local engine for Deepy Prime. | Use for quality-first work and complex visual instructions on high-memory systems. |
+| **Qwen3.8 VL Uncensored 9B** | Instruction following close to the 27B in about a third of its memory, with less general knowledge, longer thinking and weaker image understanding. It supports Deepy Prime. | Use for Deepy Prime or quality prompts on GPUs with about 8 to 12 GB of VRAM. |
+| **Qwen3.8 VL Uncensored 27B** | Strongest local understanding and rewriting, but much heavier to load and run. It supports Deepy Prime. | Use for quality-first work and complex visual instructions on high-memory systems. |
 | **Codex** | Uses the selected external Codex model and does not occupy WanGP's local GPU memory. | Use when you already have Codex configured and want strong remote instruction following. |
 | **Claude Code** | Uses the selected external Claude model and does not occupy WanGP's local GPU memory. | Use when Claude is your preferred writing/reasoning provider. |
 | **OpenCode** | Connects through OpenCode to its configured provider, including supported cloud or local OpenAI-compatible services. | Use when you need provider flexibility or already manage models through OpenCode. |
@@ -507,6 +508,16 @@ She steps onto the dimly lit stage, spotlight cutting through haze. "Welcome guy
 - Pros: best for strict prompt formats, edits, lyrics, or dialogue where you want manual control
 - Cons: one more step in the workflow
 - Cons: with multiple `Start Image`s, it only works cleanly when `Multiple Images as Texts Prompts` is set to `Match images and text prompts`, and the number of images matches the number of prompt lines
+
+### Images And Window Commands During Enhancement
+
+Local Qwen enhancement can use all Reference Images together with the current Start Image, End Image, and Control Image where supported. You can refer to them in your prompt as `Image reference no 1`, `start image`, `end image`, and `Control Image`. When the first reference is selected as the main image, it is named `Main Ref. Image`; subsequent references keep their numbers. Injected references also have a time label, such as `Image reference no 2 (Frame 2s/15s)`; a reference at the window's endpoint is identified as `end image`. Florence-based enhancers use one image caption per prompt.
+
+When continuing a video, its last retained frame (after source trimming) is available to the enhancer as `start image`. `[/new_shot]` omits this visual anchor.
+
+In Sliding Window prompt modes, write each prompt for that window's references and End Image. The previous window's end image supplies the next start image, unless a new shot is requested. `[/no_end_image]` omits the gallery End Image for that window, leaving it available for the next window. For injected references, `X` skips a window's end-frame slot without consuming a reference, and `L` places a reference at the window's last kept frame, respecting duration changes and tail trimming.
+
+Window commands such as `[/duration=10s]` survive enhancement, and the enhanced action takes the window's duration into account. Commands appear before the enhanced text: on the same line in one-prompt-per-line modes, or on their own line in paragraph and whole-text modes. Edit commands in the visible prompt, outside the `#!PROMPT!:` history line; re-enhancement uses those current commands, including changes or removals.
 
 ### Qwen Backend Choices
 

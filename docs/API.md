@@ -363,7 +363,9 @@ Useful `GeneratedArtifact` fields:
 - `artifact.side_files`
   - Companion filenames mapped to their file contents as `bytes`, such as `{"song.abc": b"...", "song.mid": b"..."}`. Python session calls return these in memory by default, while the main media is still saved for the gallery. Set `_api={"return_side_files": False}` to save the companions beside the media instead. They are not separate gallery entries.
 
-For YuE2, set `custom_settings={"save_score": 1}` to export both the ABC and MIDI composition. This works with automatic planning, a supplied score or source-audio scoring; direct generation has no score. These describe the composition used to generate the song, not an exact transcription of the finished audio. Wan Alpha returns its transparent PNG-frame ZIP through the same `side_files` field.
+For YuE2, set `custom_settings={"save_score": 1}` to export both the ABC and MIDI composition. This works with automatic planning, a supplied score or source-audio scoring; direct generation has no score. These describe the composition used to generate the song, not an exact transcription of the finished audio.
+
+Wan Alpha and LTX Alpha Gen return their transparent output through the same `side_files` field. **Configuration / Outputs / RGBA Video Output** selects lossless RGBA PNG frames in a `.zip` (default) or a ProRes 4444 `_rgba.mov` for video editors. The shared `wgp_config.json` key is `rgba_video_output`, with values `png_zip` and `prores_4444`. Wan Alpha's gallery video is a checkerboard preview; LTX Alpha Gen's is the grayscale matte. This choice is independent of the gallery codec and container. Transparent still images are saved as PNG. Deepy model search accepts the `alpha output` speciality (alias `RGBA`); each matching model describes how to enable its alpha output.
 
 To supply a YuE2 score, set `custom_guide` to the path of a UTF-8 `.abc` file and use `audio_prompt_type=""` with composition mode 0 or 1. Source-audio scoring (`audio_prompt_type="A"`) hides and ignores this optional file. The former pasted `custom_settings.abc` value is ignored; upload a file instead.
 
@@ -379,41 +381,7 @@ Create the destination directory before writing. Companion names follow the fina
 
 ### MCP authentication and HTTPS
 
-Network MCP supports optional OAuth 2.1 authorization, separate from the Gradio/Deepy browser login. Use it when external MCP clients can reach WanGP over an untrusted network. Local `stdio` connections do not use OAuth. Keep an unauthenticated network MCP server restricted to localhost or a trusted VPN.
-
-Update the project dependencies first with `python -m pip install -r requirements.txt`. The network authentication uses the maintained MCP 1.x SDK; the MCP protocol version is independent of WanGP's API v1/v2 tool selection.
-
-For direct HTTPS with a generated MCP approval passphrase:
-
-```powershell
-python wgp.py --mcp --mcp-transport streamable-http --mcp-host 0.0.0.0 --mcp-port 7866 --mcp-auth --mcp-auth-url https://wangp.example.com:7866 --ssl-certfile C:\certs\wangp.pem --ssl-keyfile C:\certs\wangp-key.pem
-```
-
-Connect your OAuth-capable MCP client to `https://wangp.example.com:7866/mcp`. `--mcp-auth-url` is the externally reachable **origin**, including a non-default port, without `/mcp`, other paths or query parameters. The certificate must cover that hostname and be trusted by the client. HTTPS is required for non-loopback OAuth origins.
-
-The client discovers authorization settings, registers, then opens the **Authorize MCP Access** page. Check the client name and callback address, and enter the separate MCP passphrase printed at startup only if you initiated the connection. Approval gives that client access to the WanGP tools and media permitted by the server's configuration. The shared `wangp` scope is full server access, not a read-only or per-tool permission. OAuth does not expand filesystem permissions: the existing `--mcp-allow-read-file-system` option remains separate.
-
-Use `--mcp-auth-password "your separate long passphrase"` with `--mcp-auth` for a fixed passphrase, or set `WANGP_MCP_AUTH_PASSWORD` in the launch environment. An explicit CLI passphrase takes precedence. Generated passphrases change at restart; supplied passphrases are not printed. Web `--auth` passwords and browser sessions do not authorize MCP requests.
-
-For an HTTPS reverse proxy on the same PC:
-
-```powershell
-python wgp.py --mcp --mcp-transport streamable-http --mcp-host 127.0.0.1 --mcp-port 7866 --mcp-auth --mcp-auth-url https://wangp.example.com
-```
-
-The proxy handles the certificate. Forward the whole origin, including authorization and discovery endpoints, preserve the original Host header, and forward the correct scheme. Keep the backend private. Hosting under a URL subpath is not supported. For local development only, an origin such as `http://127.0.0.1:7866` is accepted without a certificate.
-
-The same certificate flags work with `python -m shared.mcp_server`; use that entry point's `--transport`, `--host` and `--port` names. `--https-port` optionally adds HTTPS while redirecting the main HTTP port. Legacy SSE transport uses `/sse` and the same OAuth protection; Streamable HTTP is recommended for new client connections.
-
-Client requirements and session behavior:
-
-- Authorization-code flow with S256 PKCE, authorization-server and protected-resource discovery, and dynamic client registration are supported. Registration accepts public clients and clients using `client_secret_post` or `client_secret_basic`. Redirects must use HTTPS or loopback HTTP. URL-based client metadata documents and private-key client authentication are not supported.
-- Clients send the issued access token in `Authorization: Bearer ...` on **every** MCP request and direct media upload/download. Never put a token or passphrase in a URL. A browser login cookie or the passphrase itself is not a bearer token.
-- Authorization approvals expire after ten minutes and issued codes after two minutes. Access tokens expire after one hour. Refresh tokens rotate and expire at most seven days after the original approval. Reusing an old refresh token revokes that approval; reconnect the client. Clients can also revoke tokens through the advertised revocation endpoint.
-- Server restart invalidates registered clients, approvals and tokens, even with a fixed passphrase. Reconnect or remove and re-add the server in clients that retain stale registration details. Unapproved registrations expire after ten minutes; approved registrations expire after 30 days.
-- MCP password checks use the same [progressive delay rules](DEEPY.md#protect-network-access) as the web login, with a separate global counter. Existing authorized clients continue working during a login cooldown. Only one MCP password check runs at a time.
-
-For NAT port forwarding, expose only trusted HTTPS with authentication enabled. See [HTTPS setup](DEEPY.md#set-up-https) for certificate and VPN guidance.
+See [MCP Authentication and HTTPS](AUTHENTICATION.md#mcp-authentication-and-https) for OAuth setup, passphrases, client approval, token lifetimes, certificates, and reverse proxy hosting. MCP authorization is separate from the Gradio/Deepy browser login.
 
 ### MCP API v2 and migration
 
@@ -427,43 +395,43 @@ python -m shared.mcp_server --mcp-api-version 1
 
 V1 preserves historical names, schemas, defaults, results, errors and execution behavior. V2 uses compact toolbox definitions and deferred action contracts. Underlying operations are shared; aliases are normalized internally rather than advertising both syntaxes. Deepy Prime pins v2 independently of this external-server setting; Deepy Zero keeps its historical internal API.
 
-V2 toolboxes use progressive discovery for advanced operations: omit `action` and `arguments` to list actions; supply `action` with absent/null `arguments` to read its contract; supply an `arguments` object to execute. `{}` executes an action with defaults. Arguments without an action are rejected. Declared shortcuts and known contracts execute directly without repeated discovery. `wangp_model` additionally requires `model_type`; `wangp_postprocess` requires `media` (image/video/audio or a concrete Gallery ID/authorized path). Post-processing execution requires concrete media.
+V2 toolboxes use progressive discovery for advanced operations: omit `action` and `arguments` to list actions; supply `action` with absent/null `arguments` to read its contract; supply an `arguments` object to execute. `{}` executes an action with defaults. Arguments without an action are rejected. Declared shortcuts and known contracts execute directly without repeated discovery. `wangp_model` additionally requires `model_type`; `wangp_postprocess` requires `media` (image/video/audio or a concrete Gallery ID/authorized path). Post-processing execution requires concrete media. Deepy Prime's V2 media toolbox exposes `remux_media` in place of `replace_audio`: pass `audio_ids` and optionally `video_id`. One audio input plus a video replaces its soundtrack; multiple inputs mix by default. `mode="multitrack"` retains separate selectable streams. To add selectable subtitles, pass `video_id` and `subtitle_tracks`, each with an authorized SRT/VTT/ASS/SSA file `path` and optional ISO 639 `language`, `title`, and `default`. With no `audio_ids`, existing audio streams are copied when compatible with the output container; incompatible streams use the configured video audio codec. Existing video subtitles are retained by default; `include_video_subtitles=false` removes them. MP4/MOV use `mov_text`; MKV copies compatible subtitle streams or converts unsupported ones. Audio-only mixes use the configured standalone WAV or MP3 format by default. When requested, `output_extension` can select WAV, MP3, FLAC or M4A for a mix, or MP4, MOV or MKV for a video output. Audio-only multitrack files use M4A because WAV and MP3 cannot hold separate streams. M4A copies AAC/ALAC streams and converts other streams to lossless ALAC; multitrack video uses MKV and copies audio streams. Video soundtrack replacement copies compatible audio streams and otherwise uses the configured video audio codec. Mixing re-encodes the combined result. External MCP V1 and V2 retain `replace_audio`.
 
 For a named model, use `wangp_models(query="SenseNova")` directly. The case-insensitive substring search covers name, ID, family and description; it needs no wildcard. Omit all arguments for discovery. For advanced filters, use `action="search", arguments={"query":"SenseNova","filters":{"main_output":"image"}}`; do not combine the shortcut with action/arguments. String filters match whole values, with optional `*` and `?` globs. An incomplete shortcut result includes a `next_call` recipe for continuation.
 
-For contract discovery, `null` replaces the entire `arguments` object: `{"action":"deepy_template_settings","arguments":null}`. Partial objects and null values inside them are execution attempts. Validation errors reject them and explain how to retrieve the contract. Action lists are compact name-to-description maps. Template discovery additionally returns `tool_ids`, a map of Deepy usages to descriptions, and the complete call recipe for reading a configured default directly. A known call recipe can be executed without another contract request.
+For contract discovery, `null` replaces the entire `arguments` object: `{"action":"capabilities","arguments":null}`. Partial objects and null values inside them are execution attempts. Validation errors reject them and explain how to retrieve the contract. Action lists are compact name-to-description maps. A known call recipe can be executed without another contract request.
 
 V2 rejects unknown top-level tool parameters instead of discarding them. Single-path IO actions use `path`, including `read_text`, `write_text`, `append_text` and `edit`; `file_path` remains accepted as a compatibility alias. `info` also accepts the historical `source` alias. Ripgrep uses `wangp_io(action="rg", arguments={"command":"-n pattern -- @workspace/file.txt"})`; its former inner `arguments` name remains accepted. Conflicting alias values are rejected. Action contracts contain complete call examples. Markdown appends return a compact `structure` receipt with heading count, headings added, last heading and its occurrence count. This can replace routine heading searches; it does not establish semantic consistency. V1 and Deepy Zero retain their existing call formats and append receipts.
 
-Discovery also gives direct execution syntax for actions with no parameters and for ordinary generation. The model `capabilities` result includes `input_guidance` for available input instructions (`infos`) and `prompt_guidance` for available prompt instructions (`prompt_infos`); reuse the same `model_type` with each recipe. These properties can also be read directly through `definition` without a capabilities query. Shared setting meanings belong to `wangp://docs/settings`. Workflow resources include `wangp://guides/workflows` and `wangp://guides/long-video`; writable-workspace servers also expose the long-story and long-generation-prompt skills on demand.
+Discovery also gives direct execution syntax for actions with no parameters. Generation needs no discovery: `wangp_generate(settings={...})` takes one flat settings object with `model_type` and a non-empty `prompt` (or a list of them for a batch). Keys in `custom_settings` must be custom settings declared by the model. The earlier `wangp_generate(action="generate", arguments={"source": ...})` form remains accepted. The model `capabilities` result includes `input_guidance` for available input instructions (`infos`) and `prompt_guidance` for available prompt instructions (`prompt_infos`); reuse the same `model_type` with each recipe. These properties can also be read directly through `definition` without a capabilities query. Shared setting meanings belong to `wangp://docs/settings`. Workflow resources include `wangp://guides/workflows` and `wangp://guides/long-video`; writable-workspace servers also expose the long-story and long-generation-prompt skills on demand.
 
 V2 accepts two exact model-query aliases: `definition` with `property="defaults"` or `property="capabilities"` reads the corresponding action when no actual declaration has that name. Other unknown properties return a complete call for reading available properties. For `wangp_toolbox(action="inspect_media", arguments={...})`, `media` is accepted as an alias for `media_id` when a string, or `media_ids` when a list. Conflicting values or multiple input forms are rejected before inspection. All inspection inputs belong inside `arguments`; a single video reference still inspects frame 0 by default, while `inspect_video` samples a time range. V1 and Deepy Zero retain their existing contracts.
 
 In Deepy Prime's in-process model definitions, optional `deepy_infos` and `deepy_prompt_infos` replace the corresponding `infos` and `prompt_infos` values. Each override is independent; absent overrides retain the standard help. Responses expose only the canonical names, and `prompt_guidance` reads the selected `prompt_infos`. Root definitions retain their 256-character previews; requesting a property returns its complete text. This does not add startup context. The UI, Python API, external MCP servers and MCP v1 keep the full standard help.
 
-`deepy_templates` is only for browsing alternatives and requires one `tool_id`. It returns `tool_id` and `default_template` once, a `deepy_templates` array of names, and `labels` only where display labels differ. Small lists have no pagination metadata. Large lists are bounded by the usual page limits and return `next_call`; repeat the same toolbox with that object to continue the stored snapshot. The ordinary listing contract omits paging controls; the continuation supplies the cursor when needed. Existing explicit `limit`, `cursor` and `summary_only` arguments remain accepted. The fixed usage map itself is never paginated.
+Deepy templates and the Gallery need no discovery. `wangp_deepy_templates(tool_id="gen_image")` returns the configured default template's settings, the model's supported `media_inputs`, and a `templates` array naming the usage's templates, with `labels` only where display labels differ; the tool schema lists every `tool_id` with its meaning. Pass `template` only to choose an alternative. A catalog longer than one page returns `next_call`; call the tool with that object to continue the stored snapshot. `wangp_list_gallery(media_type="video", selected_only=true)` takes its filters and paging options directly. The earlier `action`/`arguments` forms of both tools remain accepted.
 
 | Historical capability | V2 owner / action |
 |---|---|
 | Model search | `wangp_models` / `search` |
 | Model schema, definition, defaults | `wangp_model` / `capabilities`, `definition`, `defaults` |
-| Saved settings, profiles, presets, LoRAs | `wangp_model` / `saved_settings`, `loras` |
-| Deepy templates and merged settings | `wangp_deepy_templates` / `deepy_templates`, `deepy_template_settings` |
-| Gallery inventory / selections | `wangp_list_gallery` / `list` |
-| Generation | `wangp_generate` / `generate` |
+| Accelerator profiles, presets, user settings, LoRAs | `wangp_model` / `profiles` (with the recommended profile's settings), `presets`, `user_settings`, `loras` |
+| Deepy templates and merged settings | `wangp_deepy_templates(tool_id=..., template="default")` |
+| Gallery inventory / selections | `wangp_list_gallery(media_type=..., selected_only=...)` |
+| Generation | `wangp_generate(settings=...)`: one settings object, or a list for a batch |
 | Post-processing | `wangp_postprocess` / discovered processor ID |
 | Media utilities / previous generation settings | `wangp_toolbox` / discovered action or `media_settings` |
 | File navigation, search, text edits, archives | `wangp_io` / `list`, `rg`, `read_text`, `info`, `edit`, `append_text`, `write_text`, etc. |
-| Jobs, notifications, HTTP Gallery transfers | `wangp_session` / `get_job`, `cancel_job`, `notify`, `create_gallery_upload`, `create_gallery_download` |
+| Jobs, notifications, HTTP Gallery transfers | `wangp_session` / `get_job`, `cancel_job`, `list_queue`, `cancel_queue_task`, `notify`, `create_gallery_upload`, `create_gallery_download` (`list_queue` and `cancel_queue_task` are external-only) |
 | Documentation | Standard MCP resources; Prime exposes `mcp_resource` |
 
 Example v2 calls:
 
 ```python
-wangp_deepy_templates()
-wangp_deepy_templates(action="deepy_template_settings", arguments={"tool_id": "gen_image", "template": "default"})
-wangp_generate(action="generate")
-wangp_generate(action="generate", arguments={"source": prepared_settings})
+wangp_deepy_templates(tool_id="gen_image")
+wangp_list_gallery(selected_only=True)
+wangp_generate(settings=prepared_settings)
+wangp_generate(settings=[first_settings, second_settings])
 wangp_io(action="info", arguments={"path": "@outputs/example.png"})
 wangp_io(action="info", arguments={"paths": ["@outputs/clip.mp4", "@outputs/voice.wav"]})
 ```
@@ -476,7 +444,7 @@ On the external MCP server, generation and post-processing retain `wait`, `timeo
 
 Deepy Prime manages synchronous waiting itself, including with remote LLMs. Its generation and post-processing contracts omit `wait` and `timeout_s`; Prime accepts but ignores these two controls at the top level or inside action arguments and reports this in the result. Other unknown arguments remain errors. `event_limit` still controls the returned event count. External MCP v1/v2 and Deepy Zero keep their existing behavior.
 
-Batch generation is preserved: `source` accepts a settings list, a task list, or a manifest containing `tasks`. The entire batch is passed in one submission to the existing WanGP queue, with its order and per-task settings intact. V2 does not split it into separate jobs or alter queue scheduling.
+Batch generation is preserved: `settings` accepts a settings list, a task list, or a manifest containing `tasks`. The entire batch is passed in one submission to the existing WanGP queue, with its order and per-task settings intact. V2 does not split it into separate jobs or alter queue scheduling.
 
 V2 checks the required model field before submitting any part of a generation batch. Each settings object, supplied directly or wrapped in `params` / `settings`, needs a non-empty `model_type`; legacy `base_model_type` is accepted when `model_type` is absent. Existing `edit_*` post-processing tasks need no model. A missing/invalid model field or malformed task container rejects the whole call with its exact location (for example `source.tasks[1].params.model_type`) and creates no job. V1 and Deepy Zero retain their existing validation paths.
 
@@ -891,6 +859,39 @@ Example:
 job = session.submit(Path(r"C:\WanGP\my_queue.zip"))
 ```
 
+## Inspecting and Cancelling Queue Tasks
+
+The Python API can list the connected session's entire generation queue, including tasks added through the WebUI when the session is bound to its live `webui_state`:
+
+```python
+queue = session.list_queue()
+print(queue["queued_count"])   # Waiting tasks, excluding the running task.
+print(queue["running_count"])  # Includes a running task that is being cancelled.
+for task in queue["tasks"]:
+    print(task["queue_id"], task["status"], task["model_type"], task["prompt"])
+
+# Use the queue_id of the specific task you want to cancel.
+session.cancel_queue_task(queue_id)
+```
+
+The result contains `total_count`, `queued_count`, `running_count`, and `tasks` in queue order. Each task includes an opaque `queue_id`, one-based `position`, original `task_id`, optional `client_id` (empty for ordinary UI tasks), `model_type`, a prompt preview of up to 320 characters, and `status`: `queued`, `running`, or `cancelling`. Completed tasks are omitted. Counts are per queue task, not per output image, repeat, or batch submission.
+
+Cancelling a waiting task removes it immediately and returns `status="cancelled"`. Cancelling a running task requests its normal abort and returns `status="cancelling"`; poll a fresh list until it disappears. Other tasks in the batch remain queued. Cancelling an unknown or finished ID raises an error without aborting another task. Use the returned `queue_id`, not the displayed numeric `task_id`, which can be reused when a new queue is loaded.
+
+External **MCP v2** exposes the same operations through `wangp_session`:
+
+```python
+wangp_session(action="list_queue", arguments={})
+wangp_session(action="list_queue", arguments={"summary_only": True})
+wangp_session(action="cancel_queue_task", arguments={"queue_id": "<queue_id from list_queue>"})
+```
+
+MCP lists use the standard `limit` / `cursor` pagination. `count` is the number of tasks on that page; the three queue counts cover the entire snapshot. Continuations preserve that snapshot. Omit `cursor` to get current counts after a cancellation or completion. `summary_only=true` returns counts without task details.
+
+These two MCP actions are **not exposed to Deepy** or MCP v1. Existing `get_job` / `cancel_job` continue to operate on a submitted MCP job, which can contain multiple queue tasks; `cancel_queue_task` targets just one of those tasks.
+
+Queue access is scoped to the connected session, not every WanGP process on the machine. A standalone MCP server owns its headless session and does not inspect a separately running WebUI. A WebUI-bound Python API reads that UI's admitted generation queue; submissions still waiting for UI admission are not yet queue entries. HTTP MCP clients call these tools through `/mcp`; there is no separate REST queue route.
+
 ## Streaming Events
 
 Each job exposes `job.events`, a `SessionStream`.
@@ -912,7 +913,7 @@ Known `kind` values:
 - `progress`
   - Structured progress update.
 - `preview`
-  - RGB preview update.
+  - Generation preview update, using the configured RGB or Tiny VAE mode.
 - `stream`
   - One stdout/stderr line.
 - `status`
@@ -1052,7 +1053,9 @@ PreviewUpdate(
 Fields:
 
 - `image: PIL.Image.Image | None`
-  - RGB preview image generated from WanGP's latent preview payload.
+  - The frame strip or image preview. For video previews, this is the first frame, so existing image consumers keep working.
+- `video: bytes | None`
+  - A complete, silent MP4 preview when Generation Preview uses Tiny VAE video mode; otherwise `None`. Save these bytes with an `.mp4` extension or play them as `video/mp4`.
 - `phase`, `status`, `progress`, `current_step`, `total_steps`
   - Same interpretation as `ProgressUpdate`.
 
@@ -1106,8 +1109,8 @@ Supported callback methods:
   - Use this for progress bars, step counters, and status text.
 
 - `on_preview(preview_update)`
-  - Called when a preview image is available.
-  - Use this when you want live RGB preview frames during inference.
+  - Called when a generation preview is available.
+  - Use `image` for still previews or `video` for animated Tiny VAE previews during inference.
 
 - `on_stream(stream_message)`
   - Called for every redirected stdout/stderr line.
@@ -1205,4 +1208,4 @@ Cancellation is cooperative and forwards WanGP's normal abort signal to the acti
 
 ---
 
-> Applies to: Python integrations and external MCP clients. Examples identify the applicable interface and version; the connected MCP server supplies its current tool contracts.
+> Applies to: Python integrations, Deepy Prime, and external MCP clients. Examples identify the applicable interface and version; the connected MCP server supplies its current tool contracts.

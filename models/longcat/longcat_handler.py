@@ -33,6 +33,8 @@ class family_handler:
     @staticmethod
     def query_model_def(base_model_type, model_def):
         extra_model_def = {
+            "device_explicit": base_model_type == "longcat_avatar_v1_5",
+            "tiny_vae_architecture": "t2v",
             "frames_minimum": 5,
             "frames_steps": 4,
             "sliding_window": True,
@@ -138,13 +140,8 @@ class family_handler:
                 }
             )
         else:
-            download_def.append(
-                {
-                    "repoId": "DeepBeepMeep/Wan2.1",
-                    "sourceFolderList": ["chinese-wav2vec2-base"],
-                    "fileList": [["config.json", "preprocessor_config.json", "pytorch_model.bin", "readme.txt"]],
-                }
-            )
+            from models.wan.multitalk.assets import query_download_def
+            download_def.append(query_download_def(include_readme=True))
         download_def += [
             {
                 "repoId": "DeepBeepMeep/Wan2.1",

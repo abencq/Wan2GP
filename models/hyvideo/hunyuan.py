@@ -448,6 +448,10 @@ class Inference(object):
             wav2vec._model_dtype = torch.float32
             wav2vec.requires_grad_(False)
         if avatar:
+            from models.hyvideo.data_kits.assets import query_download_def
+            from shared.utils.download import process_files_def_if_needed
+
+            process_files_def_if_needed(query_download_def())
             align_instance = AlignImage("cuda", det_path= fl.locate_file("det_align/detface.pt"))
             align_instance.facedet.model.to("cpu")
             adapt_model(model, "audio_adapter_blocks")
@@ -721,7 +725,8 @@ class HunyuanVideoSampler(Inference):
             use_real=True,
             theta_rescale_factor=1,
             L_test = (video_length - 1) // 4 + 1,
-            enable_riflex = enable_riflex
+            enable_riflex = enable_riflex,
+            device = self.device,
         )
         return freqs_cos, freqs_sin
 

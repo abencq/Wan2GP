@@ -35,7 +35,7 @@ class family_handler():
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
-        extra_model_def = {}
+        extra_model_def = {"device_explicit": base_model_type in ("hunyuan_1_5_t2v", "hunyuan_1_5_i2v"), "tiny_vae_architecture": "hunyuan_1_5_t2v" if test_hunyuan_1_5(base_model_type) else "hunyuan"}
         if base_model_type != "hunyuan_avatar":
             extra_model_def["riflex"] = True
 
@@ -203,14 +203,15 @@ class family_handler():
         else:   
             download_def= {  
             "repoId" : "DeepBeepMeep/HunyuanVideo", 
-            "sourceFolderList" :  [ "llava-llama-3-8b", "clip_vit_large_patch14",  "whisper-tiny" , "det_align", ""  ],
+            "sourceFolderList" :  [ "llava-llama-3-8b", "clip_vit_large_patch14",  "whisper-tiny" , ""  ],
             "fileList" :[ ["config.json", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "preprocessor_config.json"],
                             ["text_config.json", "merges.txt", "model.safetensors", "preprocessor_config.json", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.json"],
                             ["config.json", "model.safetensors", "preprocessor_config.json", "special_tokens_map.json", "tokenizer_config.json"],
-                            ["detface.pt"],
                             [ "hunyuan_video_720_quanto_int8_map.json", "hunyuan_video_custom_VAE_fp32.safetensors", "hunyuan_video_custom_VAE_config.json", "hunyuan_video_VAE_fp32.safetensors", "hunyuan_video_VAE_config.json" , "hunyuan_video_720_quanto_int8_map.json"   ]  
                             ]
             }
+            from .data_kits.assets import query_download_def
+            download_def = [download_def, query_download_def()]
         return download_def 
 
     @staticmethod

@@ -158,6 +158,9 @@ def infer_media_inputs(model_def):
         },
         "audio": {
             "prompt": bool(model_def.get("any_audio_prompt", False)),
+            "reference": bool(model_def.get("reference_audio_enabled", False)),
+            # A control audio drives the output and is kept as its soundtrack.
+            "control": bool(model_def.get("output_audio_is_input_audio", False)) or _choice_values_contain(model_def.get("audio_prompt_type_sources", None), "S"),
             "output": bool(model_def.get("audio_only", False) or model_def.get("returns_audio", False)),
         },
     }
@@ -171,7 +174,7 @@ def infer_capabilities(model_def, main_outputs, outputs, inputs, media_inputs):
         "text_to_video": "video" in main_outputs and "text" in inputs,
         "image_to_video": "video" in main_outputs and image_inputs["start"],
         "video_to_video": "video" in main_outputs and (video_inputs["continue"] or video_inputs["control"] or video_inputs["reference"]),
-        "text_to_image": "image" in main_outputs and "text" in inputs,
+        "text_to_image": "image" in main_outputs and "text" in inputs and not model_def.get("one_image_ref_needed", False),
         "image_to_image": "image" in main_outputs and (image_inputs["start"] or image_inputs["reference"] or image_inputs["control"]),
         "text_to_audio": "audio" in main_outputs and "text" in inputs,
         "audio_to_audio": "audio" in main_outputs and audio_inputs["prompt"],
@@ -188,10 +191,14 @@ def infer_capabilities(model_def, main_outputs, outputs, inputs, media_inputs):
         "video_continuation": video_inputs["continue"],
         "sliding_window": bool(model_def.get("sliding_window", False)),
         "lora": not bool(model_def.get("no_lora", False)),
+        # Specialized workflows can narrow capabilities inferred from shared controls.
+        **model_def.get("capability_overrides", {}),
     }
 
 
 def infer_setting_values(model_def):
+    from shared.prompt_enhancer.labels import resolve_definition
+
     image_prompt_types_allowed = str(model_def.get("image_prompt_types_allowed", "") or "")
     image_prompt_choices = [{"label": _IMAGE_PROMPT_LABELS.get("", ""), "value": ""}]
     for letter in image_prompt_types_allowed:
@@ -217,7 +224,7 @@ def infer_setting_values(model_def):
         },
         "model_mode": normalize_choice_def(model_def.get("model_modes", None)),
         "sample_solver": normalize_choice_def({"choices": model_def.get("sample_solvers", [])}) if model_def.get("sample_solvers", None) is not None else None,
-        "prompt_enhancer": normalize_choice_def(model_def.get("prompt_enhancer_def", None)),
+        "prompt_enhancer": normalize_choice_def(resolve_definition(model_def)),
     }
 
 
