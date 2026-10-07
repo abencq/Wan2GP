@@ -16,12 +16,14 @@ import re
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from PIL import Image
+from shared.tinyvae.media import VideoPreview
 
 from shared.utils.frame_scheduler import normalize_output_frame_count
 from shared.utils.process_locks import set_main_generation_running
@@ -97,8 +99,9 @@ def apply_media_flag_defaults(settings: dict[str, Any], model_def: dict[str, Any
     audio_prompt_type = str(settings.get("audio_prompt_type", "") or "")
     has_audio_guide = _has_media_setting(settings.get("audio_guide"))
     has_audio_guide2 = _has_media_setting(settings.get("audio_guide2"))
-    if has_audio_guide or has_audio_guide2:
-        required_flag = "B" if has_audio_guide2 else "A"
+    has_audio_guide3 = _has_media_setting(settings.get("audio_guide3"))
+    if has_audio_guide or has_audio_guide2 or has_audio_guide3:
+        required_flag = "D" if has_audio_guide3 else "B" if has_audio_guide2 else "A"
         audio_mode = next((value for value in _declared_choice_values(model_def.get("audio_prompt_type_sources")) if required_flag in value), "")
         if audio_mode and required_flag not in audio_prompt_type:
             audio_prompt_type = _add_unique_flags(audio_prompt_type, audio_mode)
@@ -194,6 +197,7 @@ class PreviewUpdate:
     progress: int
     current_step: int | None
     total_steps: int | None
+    video: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -861,6 +865,55 @@ class WanGPSession:
         if job is not None:
             job.cancel()
 
+    def _queue_lock(self):
+        return self._ensure_runtime().module.lock if self._use_webui_queue else self._job_lock
+
+    def list_queue(self) -> dict[str, Any]:
+        """List all pending/running tasks in this session's generation queue, including UI tasks."""
+        gen = self._state["gen"]
+        with self._queue_lock():
+            entries = []
+            for index, task in enumerate(gen.get("queue", [])):
+                queue_id = task.setdefault("_api_queue_id", uuid.uuid4().hex)
+                params = self._get_task_settings(task)
+                running = gen.get("api_active_queue_task") is task
+                cancelling = running and bool(gen.get("abort", False))
+                entries.append({
+                    "queue_id": queue_id, "position": index + 1, "task_id": task.get("id"),
+                    "client_id": str(params.get("client_id", "") or ""),
+                    "model_type": str(params.get("model_type", "") or ""),
+                    "prompt": str(params.get("prompt", "") or "")[:320],
+                    "status": "cancelling" if cancelling else "running" if running else "queued",
+                })
+            running_count = sum(entry["status"] != "queued" for entry in entries)
+            return {"tasks": entries, "total_count": len(entries), "queued_count": len(entries) - running_count, "running_count": running_count}
+
+    def cancel_queue_task(self, queue_id: str) -> dict[str, Any]:
+        """Cancel one task identified by list_queue(), leaving the rest of its batch queued."""
+        if not isinstance(queue_id, str) or not queue_id.strip():
+            raise ValueError("queue_id must be a non-empty ID returned by list_queue().")
+        gen = self._state["gen"]
+        with self._queue_lock():
+            queue = gen.get("queue", [])
+            index = next((i for i, task in enumerate(queue) if task.get("_api_queue_id") == queue_id), None)
+            if index is None:
+                raise KeyError(f"Unknown or finished queue_id: {queue_id}")
+            task = queue[index]
+            task["_api_queue_cancel_requested"] = True
+            running = gen.get("api_active_queue_task") is task
+            if running:
+                self._request_cancel_unlocked(self._ensure_runtime().module)
+            else:
+                del queue[index]
+                if self._use_webui_queue:
+                    wgp = self._ensure_runtime().module
+                    wgp.record_queue_error(self._state, [task], "Generation was cancelled", abort=True)
+                    if "prompts_max" in gen:
+                        gen["prompts_max"] = max(0, gen["prompts_max"] - 1)
+                    # The UI autosave mirrors the live queue under the same lock.
+                    wgp.global_queue_ref = queue[:]
+            return {"queue_id": queue_id, "status": "cancelling" if running else "cancelled"}
+
     @property
     def active_job(self) -> SessionJob | None:
         with self._job_lock:
@@ -912,6 +965,8 @@ class WanGPSession:
             )
             job._bind_thread(thread)
             self._active_job = job
+            if not self._use_webui_queue:
+                self._state["gen"]["queue"] = prepared_tasks[:]
             thread.start()
             return job
 
@@ -1041,7 +1096,8 @@ class WanGPSession:
             model_type = str(self._get_task_settings(queue_tasks[0]).get("model_type", ""))
         image = wgp.generate_preview(model_type, payload) if model_type else None
         return PreviewUpdate(
-            image=image,
+            image=image.image if isinstance(image, VideoPreview) else image,
+            video=image.video if isinstance(image, VideoPreview) else None,
             phase=progress.phase,
             status=progress.status,
             progress=progress.progress,
@@ -1084,7 +1140,6 @@ class WanGPSession:
 
     def _prepare_state_for_run(self, tasks: list[dict[str, Any]]) -> None:
         gen = self._state["gen"]
-        gen["queue"] = tasks
         set_main_generation_running(self._state, True)
         gen["process_status"] = "process:main"
         gen["progress_status"] = ""
@@ -1100,7 +1155,9 @@ class WanGPSession:
 
     def _reset_state_after_run(self) -> None:
         gen = self._state["gen"]
-        gen["queue"] = []
+        with self._job_lock:
+            gen["queue"] = []
+            gen.pop("api_active_queue_task", None)
         set_main_generation_running(self._state, False)
         gen["process_status"] = "process:main"
         gen["progress_status"] = ""
