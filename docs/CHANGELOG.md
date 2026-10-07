@@ -2,6 +2,14 @@
 
 ### Unreleased
 
+- **Save Latents:** the new config option makes Wan, LongCat, LTX2 and MiniMax H3 save the latent right before the final decode, as a `*_latent.pt` companion file next to each video. Sliding-window videos save one latent per window, and LTX2 and MiniMax H3 also save their audio latent, so the file holds the video the way the model saw it.
+
+- **Latent Decode:** the new process in *Media Flow* takes a video, finds its `*_latent.pt` companion file, and turns the file back into video without loading the diffusion model. For LTX2 and MiniMax H3 it also rebuilds the soundtrack and puts it back into the video.
+
+- **From WanGP latent file:** a new option in *Continue Video* and *Continue Last Video* starts the job from the saved latent file instead of re-encoding the part you keep. The latent file is the input: you pick it with the new file picker, and WanGP checks it before any model load. If you pick a video instead, the file is found next to the video, or in the extra folders the settings can list. The video the file was saved from becomes an optional companion, used for preview only. WanGP finds it next to the file, and if several match you pick one. If none is found, the branch goes ahead from the frames recorded in the file, so it works on a machine that no longer has the video. The *keep frames* field becomes the branch point, and the part you keep comes out at the quality of the original generation. You can keep branching from the same file. If the length recorded in the file ever disagrees with the video, the file is saved flagged: *Latent Decode* still works, but a branch asks you to re-run the original job first. When the saved file cannot be used for the job, WanGP falls back to the classic continuation and the job log says so.
+
+- **Not covered:** the older LTX (0.9 / 1.0) builds its video in two stages, and its decode may add noise, so a re-decode would only be an approximation of the original. Hunyuan is not covered, because a branch on its image-driven models would not keep the starting image exactly.
+
 - **CLI cleanup:** legacy Wan model-selection shortcuts are deprecated and hidden from command help. Existing launch scripts using them continue to work.
 
 - **LoRA paths:** one optional `--lora-config FILE` JSON replaces the model-specific LoRA directory flags. Keys reuse the subfolder names inside `loras/`; default folders keep working unchanged. See the [sample JSON and setup guide](LORAS.md#custom-lora-directories).
