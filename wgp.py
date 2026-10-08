@@ -7567,6 +7567,32 @@ def _branch_prefix_advisory(model_type):
     return ""
 
 
+def _runtime_model_def(model_type, model_def, config_id):
+    """The model definition as the job's model load resolves it (mirrors
+    ``load_models``): the raw definition with the selected config-group
+    values merged in, then the family's ``resolve_runtime_model_def``
+    applied (the *Auto* choices resolve from the runtime settings — the H3
+    Video VAE follows the transformer quantization). The branch VAE
+    identity checks must use this form: the sidecar recorded the VAE the
+    original job actually loaded, and comparing it against the raw
+    definition's default would refuse the branch on a VAE both runs use.
+    """
+    resolved = dict(model_def) if isinstance(model_def, dict) else {}
+    if config_id is not None and len(str(config_id)):
+        config_groups = get_model_config_groups(model_type, resolved)
+        for _, _, current_config in model_config_groups.selected_model_configs(config_groups, config_id):
+            resolved.update(current_config)
+    base_model_type = get_base_model_type(model_type)
+    handler = model_types_handlers.get(base_model_type) if base_model_type is not None else None
+    resolver = getattr(handler, "resolve_runtime_model_def", None) if handler is not None else None
+    if resolver is not None:
+        resolved = resolver(resolved, dict(server_config, transformer_quantization=transformer_quantization,
+                                           text_encoder_quantization=text_encoder_quantization,
+                                           mixed_precision=server_config.get("mixed_precision", "0"),
+                                           vae_precision=server_config.get("vae_precision", "16")))
+    return resolved
+
+
 def _ltx2_video_vae_identity(model_def, base_model_type):
     """The job's LTX2 video VAE identity: (checkpoint filename, sha256).
 
@@ -7588,16 +7614,27 @@ def _ltx2_video_vae_identity(model_def, base_model_type):
     return vae_file, vae_sha
 
 
-def _h3_video_vae_identity(model_def, base_model_type):
-    """The job's MiniMax H3 video VAE identity: (checkpoint filename, sha256).
+def _h3_video_vae_identity(model_def, base_model_type, vae_upsampling=None):
+    """The job's MiniMax H3 video VAE identity: (checkpoint basename, sha256).
 
-    The sha is empty when the checkpoint cannot be located (the fit check
-    then falls back to the filename comparison); the filename comes from
-    the model definition's Video VAE setting (the fp16 default or the
-    fp8-mixed variant).
+    The file is the one this job's pipeline decodes with: the model
+    definition's Video VAE (the caller passes the runtime-resolved
+    definition, so the *Auto* choice already follows the transformer
+    quantization), or the X2 decoder's ``x2_vae_file`` when the X2 VAE
+    upscaling replaces it — the same file the pipeline records in its
+    latent companion. The sha is empty when the checkpoint cannot be
+    located (the fit check then falls back to the filename comparison);
+    the returned name is the basename the sidecar records (the int8 and
+    X2 checkpoints live in a subfolder the raw setting carries).
     """
     from models.minimax_h3.minimax_h3_main import VIDEO_VAE_FILE
-    vae_file = str((model_def or {}).get("video_vae_file") or VIDEO_VAE_FILE)
+    from models.minimax_h3.vae_upsampler import X2_VAE_FILE, X2_VAE_VALUE
+    model_def = model_def or {}
+    if vae_upsampling == X2_VAE_VALUE:
+        # the X2 decoder of the selected Video VAE replaces it for the decode
+        vae_file = str(model_def.get("x2_vae_file") or X2_VAE_FILE)
+    else:
+        vae_file = str(model_def.get("video_vae_file") or VIDEO_VAE_FILE)
     vae_sha = ""
     path = fl.locate_file(vae_file, error_if_none=False)
     if path is not None and os.path.isfile(str(path)):
@@ -7605,7 +7642,7 @@ def _h3_video_vae_identity(model_def, base_model_type):
             vae_sha = latent_io.sha256_file(str(path))
         except Exception:
             vae_sha = ""
-    return vae_file, vae_sha
+    return os.path.basename(vae_file), vae_sha
 
 
 def _wan_video_vae_identity(model_def, base_model_type):
@@ -9730,14 +9767,22 @@ def generate_media(
             print(f"From latent: the kept windows could not be carried into the job's latent file ({exc}); the new latent file holds the job's windows only.")
         if branch_carried is not None:
             _branch_vae_file = _branch_vae_sha = ""
+            # The identity is the VAE this job actually loads: the runtime
+            # model definition (the config-group selection merged in, the
+            # *Auto* Video VAE resolved from the transformer quantization —
+            # the same resolution the model load applies) and, for MiniMax
+            # H3, the X2 decoder when the upscaling replaces the Video VAE.
+            # The raw definition would compare the sidecar against the
+            # family default and refuse the branch on a VAE both runs use.
+            _job_model_def = _runtime_model_def(model_type, model_def, config)
             if str(base_model_type or "").startswith("ltx2"):
-                _branch_vae_file, _branch_vae_sha = _ltx2_video_vae_identity(model_def, base_model_type)
+                _branch_vae_file, _branch_vae_sha = _ltx2_video_vae_identity(_job_model_def, base_model_type)
             elif _is_wan_family(base_model_type, model_def):
-                _branch_vae_file, _branch_vae_sha = _wan_video_vae_identity(model_def, base_model_type)
+                _branch_vae_file, _branch_vae_sha = _wan_video_vae_identity(_job_model_def, base_model_type)
             elif _is_longcat_family(base_model_type, model_def):
-                _branch_vae_file, _branch_vae_sha = _longcat_video_vae_identity(model_def, base_model_type)
+                _branch_vae_file, _branch_vae_sha = _longcat_video_vae_identity(_job_model_def, base_model_type)
             elif _is_h3_family(base_model_type, model_def):
-                _branch_vae_file, _branch_vae_sha = _h3_video_vae_identity(model_def, base_model_type)
+                _branch_vae_file, _branch_vae_sha = _h3_video_vae_identity(_job_model_def, base_model_type, vae_upsampling=new_model_vae_upsampling)
             # Step 2: the kept region is a fresh decode of the source
             # sidecar's kept windows, whenever the job's VAE can decode
             # them on the job's canvas (the fit check's VAE-identity and
