@@ -7232,16 +7232,25 @@ def _h3_window_commit(entry, model_def, window):
 KEEP_FRAMES_VIDEO_SOURCE_LABEL = "Truncate Video beyond this number of resampled Frames (empty=Keep All, negative truncates from End)"
 BRANCH_FRAMES_VIDEO_SOURCE_LABEL = "Branch after this number of resampled Frames (empty=Branch at the End, negative counts from the End); the latent containing the frame is regenerated, the latents before it are kept unchanged"
 BRANCH_FIT_LATENT_LABEL = "Round branch frame up to a latent boundary"
-# The video picker's label switches with the *From latent* mode: off (the
-# classic flow) it is the continuation source; on, it is the companion of
-# the latent file (selected automatically when found next to the file, used
-# to preview the cut — the branch reads the latent file, so it is optional).
+# The pickers' labels switch with the *From latent* mode and with the
+# value's *origin*: off (the classic flow) the video is the continuation
+# source; on, the two pickers are the same pair seen from either end —
+# the latent file is the branch source (the primary input) and the video
+# is its companion (a preview of the cut; the branch reads the latent
+# file, so it is optional). Whichever picker the app itself filled (the
+# companion video of a picked latent file, or the latent file matched to
+# a selected video) carries the "Detected..." variant; a value the user
+# selected keeps the plain one.
 VIDEO_SOURCE_LABEL = "Video to Continue"
-COMPANION_VIDEO_LABEL = "Detected companion video file (used for preview only)"
+COMPANION_VIDEO_LABEL = "Companion video file (used for preview only)"
+DETECTED_COMPANION_VIDEO_LABEL = "Detected companion video file (used for preview only)"
 # The latent file's picker is the primary input of the *From latent* mode:
 # the file names the branch source on its own (its companion video, when
-# found, is only a preview aid), so the label says so.
+# found, is only a preview aid), so the label says so. The "Detected"
+# variant is the mirror of the companion video's: the file the app
+# matched to a selected video (the backward direction of the operation).
 BRANCH_LATENT_FILE_LABEL = "Select *_latent.pt file"
+DETECTED_LATENT_FILE_LABEL = "Detected latent file (matched to the selected video)"
 # The *From latent* checkbox's tooltip: which families the mode applies to
 # and the one re-compression caveat (the full support table is in
 # docs/SETTINGS.md).
@@ -7296,15 +7305,21 @@ def resolve_latent_branch(image_prompt_type, video_source, state, model_type, ke
     the file's recorded windows alone, so the companion video (
     ``video_source``) is only a preview / cross-check aid — the branch
     works when the companion video is gone (deleted, moved, on another
-    machine). Without a file the classic flow applies: the sidecar is
-    found next to the selected video (or by name across the save
-    directories), and the video is then required.
+    machine). A named file that is no longer on disk (moved, deleted, or
+    an auto-detected value persisted from a previous session) is not a
+    hard error when a video is present: the classic video-based lookup
+    applies instead (the same sidecar, next to the video or by name).
+    Without a file the classic flow applies: the sidecar is found next to
+    the selected video (or by name across the save directories), and the
+    video is then required.
 
     Returns ``(info, error)``: on success ``info`` carries the latent file
     ``path`` and ``sidecar_obj``, the resolved branch point (see
     :func:`latent_io.branch_point_for_frame`), the ``branch_frame`` the user
-    asked for, ``video_present`` (whether the companion video is resolvable
-    — the advisory frame-count cross-check runs only then), the
+    asked for, the effective ``video`` (in *Continue Last Video* the
+    auto-resolved last video when the picker is empty),
+    ``video_present`` (whether the companion video is resolvable — the
+    advisory frame-count cross-check runs only then), the
     ``prefill_prompt``/``prefill_seed`` the form should pick up and the
     identity ``warnings``; on failure ``info`` is None and ``error`` is a
     user-facing message.
@@ -7319,22 +7334,26 @@ def resolve_latent_branch(image_prompt_type, video_source, state, model_type, ke
         else:
             video_files = glob.glob(os.path.join(save_path, "*.mp4")) + glob.glob(os.path.join(save_path, "*.mov")) + glob.glob(os.path.join(save_path, "*.mkv"))
             video_source = max(video_files, key=os.path.getmtime) if video_files else ""
-    # The latent file is the primary input: an explicitly picked file
+    # The latent file is the primary input: an explicitly named file
     # resolves the branch on its own, so it is looked up before the
-    # companion-video gate (a missing file the user picked is a hard error
-    # either way; a missing video is not, once the file is resolved).
+    # companion-video gate (a missing video is not an error once the file
+    # is resolved). A named file that is no longer on disk (moved,
+    # deleted, or an auto-detected value persisted from a previous session)
+    # is not a hard error when a video is present: the classic video-based
+    # lookup applies (the same sidecar, next to the video or by name).
     explicit_latent = str(latent_file or "").strip()
     sidecar_path = None
-    if len(explicit_latent) > 0:
-        if media_source_exists(explicit_latent):
-            sidecar_path = latent_io.find_latent_file(explicit_latent)
-        if sidecar_path is None:
-            return None, f"the selected latent file could not be found ({os.path.basename(explicit_latent)})"
-    elif not media_source_exists(video_source):
-        return None, "no source video was found for the branch job"
+    if len(explicit_latent) > 0 and media_source_exists(explicit_latent):
+        sidecar_path = latent_io.find_latent_file(explicit_latent)
     if sidecar_path is None:
-        # No explicit file: the classic flow, the sidecar is the video's
-        # own companion, found next to it.
+        if len(explicit_latent) > 0:
+            if not media_source_exists(video_source):
+                return None, f"the selected latent file could not be found ({os.path.basename(explicit_latent)}) and no source video is present to look its sidecar up"
+            print(f"From latent: the latent file {os.path.basename(explicit_latent)} is no longer present; looking up the saved latent file of the selected video instead.", flush=True)
+        elif not media_source_exists(video_source):
+            return None, "no source video was found for the branch job"
+        # No explicit file (or the named one is gone): the classic flow,
+        # the sidecar is the video's own companion, found next to it.
         sidecar_path = latent_io.find_latent_file(video_source)
         if sidecar_path is None:
             # The video was selected from outside the save path: its
@@ -7345,7 +7364,8 @@ def resolve_latent_branch(image_prompt_type, video_source, state, model_type, ke
             if sidecar_path is None:
                 search_dirs = _branch_latent_search_dirs()
                 print(f"From latent: no saved latent file matched {os.path.basename(video_source)} in {[os.path.abspath(d) for d in search_dirs if os.path.isdir(d)]}.", flush=True)
-                return None, (f"no saved latent file was found for {os.path.basename(video_source)}; the original job must have been run with the 'Save Latents' option enabled, "
+                missing_file_clause = f"the selected latent file {os.path.basename(explicit_latent)} is no longer present, and " if len(explicit_latent) > 0 else ""
+                return None, (f"{missing_file_clause}no saved latent file was found for {os.path.basename(video_source)}; the original job must have been run with the 'Save Latents' option enabled, "
                               f"and if the video was selected from outside the app save directory its *_latent.pt file can be picked with the 'Latent file' option "
                               f"or its folder added to the 'branch_latent_search_dirs' setting")
     try:
@@ -7416,6 +7436,7 @@ def resolve_latent_branch(image_prompt_type, video_source, state, model_type, ke
         warnings = list(warnings) + [f"no companion video was found for the latent file; the branch point is positioned from the {int(total_frames)} frames recorded in the file"]
     info = {
         "path": str(sidecar_path),
+        "video": video_source,
         "sidecar_obj": sidecar_obj,
         "entry": entry,
         "branch": branch_point,
@@ -9380,10 +9401,16 @@ def generate_media(
         _pre_branch = _pre_info["branch"]
         for _pre_warning in _pre_info["warnings"]:
             print(f"From latent: {_pre_warning}", flush=True)
+        # The video the branch was resolved from is reported with the file
+        # (in *Continue Last Video* it is the auto-resolved last video, not
+        # necessarily the picker's value), so the pair is traceable in the
+        # job log whatever direction the match was determined from.
+        _pre_video = str(_pre_info.get("video") or "").strip()
+        _pre_video_part = f" for {_pre_video}" if len(_pre_video) > 0 else ""
         if _pre_branch.get("mid_latent"):
-            print(f"From latent: using saved latent file {_pre_info['path']} ({_pre_branch['total_frames']} frames recorded; you asked for frame {_pre_info['branch_frame']}, the cut lands at frame {_pre_branch['kept_frames']}).", flush=True)
+            print(f"From latent: using saved latent file {_pre_info['path']}{_pre_video_part} ({_pre_branch['total_frames']} frames recorded; you asked for frame {_pre_info['branch_frame']}, the cut lands at frame {_pre_branch['kept_frames']}).", flush=True)
         else:
-            print(f"From latent: using saved latent file {_pre_info['path']} ({_pre_branch['total_frames']} frames recorded; cut at frame {_pre_branch['kept_frames']}).", flush=True)
+            print(f"From latent: using saved latent file {_pre_info['path']}{_pre_video_part} ({_pre_branch['total_frames']} frames recorded; cut at frame {_pre_branch['kept_frames']}).", flush=True)
     # LTX2 / Wan / LongCat / MiniMax H3 + Save Latents: the sidecar is the
     # sole content source, so a continuation job that would record latents
     # must also source its kept region from the source video's sidecar
@@ -9411,10 +9438,12 @@ def generate_media(
         _pre_branch = _pre_info["branch"]
         for _pre_warning in _pre_info["warnings"]:
             print(f"From latent: {_pre_warning}", flush=True)
+        _pre_video = str(_pre_info.get("video") or "").strip()
+        _pre_video_part = f" for {_pre_video}" if len(_pre_video) > 0 else ""
         if _pre_branch.get("mid_latent"):
-            print(f"Save Latents: the source latent file {_pre_info['path']} is the branch source ({_pre_branch['total_frames']} frames recorded; you asked for frame {_pre_info['branch_frame']}, the cut lands at frame {_pre_branch['kept_frames']}).", flush=True)
+            print(f"Save Latents: the source latent file {_pre_info['path']}{_pre_video_part} is the branch source ({_pre_branch['total_frames']} frames recorded; you asked for frame {_pre_info['branch_frame']}, the cut lands at frame {_pre_branch['kept_frames']}).", flush=True)
         else:
-            print(f"Save Latents: the source latent file {_pre_info['path']} is the branch source ({_pre_branch['total_frames']} frames recorded; cut at frame {_pre_branch['kept_frames']}).", flush=True)
+            print(f"Save Latents: the source latent file {_pre_info['path']}{_pre_video_part} is the branch source ({_pre_branch['total_frames']} frames recorded; cut at frame {_pre_branch['kept_frames']}).", flush=True)
     from preprocessing.processors import prepare_generation_assets
     prepare_generation_assets(model_def, base_model_type, locals(), server_config, process_map_video_guide, process_map_outside_mask)
     download_requested_postprocessing_assets(
@@ -14183,7 +14212,7 @@ def refresh_image_prompt_type_radio(state, image_prompt_type, image_prompt_type_
     # The branch mode persists across every Location change: the latent
     # file works with either Continue location, and the mode / file the
     # user picked are not a Location setting — so the components' values
-    # are never written here, only their visibility (re-writing the
+    # are never written here, only their visibility and labels (re-writing the
     # checkbox's value or clearing the file would silently lose the
     # picked mode, and the next validation would then run the classic
     # video-to-sidecar flow on a different file than the one the user
@@ -14198,18 +14227,53 @@ def refresh_image_prompt_type_radio(state, image_prompt_type, image_prompt_type_
     # the mode does not apply.
     branch_available = any_video_source and _is_all_latent_family(get_base_model_type(get_state_model_type(state)), model_def)
     branch_on = branch_available and bool(branch_from_latent)
-    video_base = COMPANION_VIDEO_LABEL if branch_on else VIDEO_SOURCE_LABEL
+    # The label bases switch with the value's origin (the "Detected..."
+    # variant names the value the app itself selected): this handler never
+    # writes values, so it only reads the origin markers the branch
+    # handlers maintain.
+    _vsrc = str(video_source or "").strip()
+    _video_auto = isinstance(state, dict) and len(_vsrc) > 0 and state.get("branch_video_origin") == "auto"
+    video_base = (DETECTED_COMPANION_VIDEO_LABEL if _video_auto else COMPANION_VIDEO_LABEL) if branch_on else VIDEO_SOURCE_LABEL
+    _fsrc = str(branch_latent_file or "").strip()
+    _file_auto = isinstance(state, dict) and len(_fsrc) > 0 and state.get("branch_latent_origin") == "auto"
     if branch_available:
         branch_checkbox_update = gr.update(visible = True)
         branch_fit_update = gr.update(visible = branch_on)
-        branch_file_update = gr.update(visible = branch_on)
+        branch_file_update = gr.update(visible = branch_on, label = DETECTED_LATENT_FILE_LABEL if (branch_on and _file_auto) else BRANCH_LATENT_FILE_LABEL)
     else:
         branch_checkbox_update = gr.update(visible = False)
         branch_fit_update = gr.update(visible = False)
-        branch_file_update = gr.update(visible = False)
+        branch_file_update = gr.update(visible = False, label = BRANCH_LATENT_FILE_LABEL)
     return image_prompt_type, gr.update(visible = "S" in image_prompt_type ), gr.update(visible = end_visible and ("E" in image_prompt_type) ), gr.update(visible = "V" in image_prompt_type, label = video_input_label_with_info(video_base, video_source)) , gr.update(visible = input_strength_visible), gr.update(visible = any_video_source), branch_checkbox_update, branch_fit_update, branch_file_update, gr.update(visible = end_visible)
 
-def _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, prompt, seed, no_companion=False, advisory="", state=None):
+def _branch_video_label_base(state, video_value):
+    """The video picker's label base in the *From latent* mode: the
+    "Detected companion..." variant when the picker's current value is
+    the one the app itself selected (the origin marker the latent-file
+    handler sets when it auto-selects the companion), the plain
+    "Companion..." base whenever the user selected it (or nothing is
+    selected yet — nothing selected is never "detected")."""
+    _src = str(video_value or "").strip()
+    if len(_src) == 0:
+        return COMPANION_VIDEO_LABEL
+    auto = isinstance(state, dict) and state.get("branch_video_origin") == "auto"
+    return DETECTED_COMPANION_VIDEO_LABEL if auto else COMPANION_VIDEO_LABEL
+
+
+def _branch_latent_label_base(state, latent_value):
+    """The latent file picker's label base: the mirror of
+    :func:`_branch_video_label_base` for the backward direction — the
+    "Detected latent file..." variant when the picker's value is the one
+    the app matched to a selected video, the plain "Select..." base
+    whenever the user picked it (or nothing is picked yet)."""
+    _src = str(latent_value or "").strip()
+    if len(_src) == 0:
+        return BRANCH_LATENT_FILE_LABEL
+    auto = isinstance(state, dict) and state.get("branch_latent_origin") == "auto"
+    return DETECTED_LATENT_FILE_LABEL if auto else BRANCH_LATENT_FILE_LABEL
+
+
+def _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, prompt, seed, no_companion=False, advisory="", state=None, selected_video=""):
     """The common success tail of the *From latent* handlers (the checkbox
     and the latent-file picker): snaps the field up to the latent boundary
     when *Round branch frame* is on (the empty field is the field's own
@@ -14225,7 +14289,12 @@ def _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, p
     only when the resolved message actually changes: repeated
     re-validations (the companion picker's reapplications included) are
     deduplicated with a per-session memo, cleared when the mode turns
-    off. Returns the (possibly snapped) field value and the pre-filled
+    off. ``selected_video`` (the effective source video in the backward
+    direction — the video is the input and no explicit file was picked)
+    adds a console-only direction note naming the video the latent file
+    was matched from (the merged box already names the file); it is part
+    of the memo, so it prints once per resolved state like the box.
+    Returns the (possibly snapped) field value and the pre-filled
     prompt / seed."""
     branch = info["branch"]
     total = int(branch["total_frames"])
@@ -14267,10 +14336,15 @@ def _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, p
     # candidates may have been listed after the fact).
     warnings = tuple(f"From latent: {warning}" for warning in info["warnings"]
                      if not str(warning).startswith("no companion video was found"))
-    if isinstance(state, dict) and state.get("branch_success_memo") == (merged, warnings):
+    _sv = str(selected_video or "").strip()
+    direction_note = f"From latent: source video {_sv}; matched saved latent file {info['path']} ({total} frames)." if len(_sv) > 0 else ""
+    memo_key = (merged, warnings, direction_note)
+    if isinstance(state, dict) and state.get("branch_success_memo") == memo_key:
         return new_keep, new_prompt, new_seed
     if isinstance(state, dict):
-        state["branch_success_memo"] = (merged, warnings)
+        state["branch_success_memo"] = memo_key
+    if len(direction_note) > 0:
+        print(direction_note, flush=True)
     gr.Info(merged)
     print(merged, flush=True)
     for note in warnings:
@@ -14280,31 +14354,42 @@ def _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, p
 
 
 def refresh_branch_from_latent(state, image_prompt_type, image_prompt_type_radio, video_source, branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file):
-    """The *From latent* checkbox change handler: validates the branch job
-    (latent file present / same model family / branch point in range),
-    pre-fills the prompt and seed from the latent file (only when the boxes
-    are empty / -1) and relabels the branch-point field. The branch point
-    resolves to the latent boundary before the latent containing the entered
-    frame (that latent is the branch's first new latent) by default, or to
-    the boundary after it with the *Round branch frame* checkbox, which also
-    snaps the field up front so the value it shows is the exact cut. With
-    the mode on the video picker is relabelled as the companion of the
-    latent file (selected automatically when found, optional). The soft
+    """The *From latent* checkbox / video-picker change handler: validates
+    the branch job (latent file present / same model family / branch point
+    in range), pre-fills the prompt and seed from the latent file (only
+    when the boxes are empty / -1) and relabels the branch-point field.
+    The branch point resolves to the latent boundary before the latent
+    containing the entered frame (that latent is the branch's first new
+    latent) by default, or to the boundary after it with the *Round
+    branch frame* checkbox, which also snaps the field up front so the
+    value it shows is the exact cut. With the mode on the two pickers'
+    labels switch with the value's origin (the "Detected..." variant
+    names the picker the app itself filled; see the label constants). In
+    the backward direction (a selected video, no explicit file) the
+    resolved sidecar is mirrored into the file picker and a console note
+    names the pair, so the detection shows up in the UI as it does in the
+    forward direction (a picked file finds its companion video). The soft
     note (validation pending, not an error) is shown only when neither a
     source video nor a latent file is selected yet — the branch point
     resolves from the latent file's recorded frames, so a picked file
     validates the branch on its own. Raises a visible error when the
     combination is invalid."""
+    _vsrc = str(video_source or "").strip()
+    _fsrc = str(branch_latent_file or "").strip()
     if len(filter_letters(str(image_prompt_type or ""), "VL")) == 0 or not branch_from_latent:
-        # Mode off: drop the companion re-assert marker so re-enabling the mode
-        # pushes the picker's value once more (see the success path below),
-        # and the success-report memo so a later selection reports again.
+        # Mode off: drop the origin / re-assert markers so re-enabling the
+        # mode re-detects and pushes the pickers' values once more (see
+        # the success path below), and the success-report memo so a later
+        # selection reports again.
         if isinstance(state, dict):
-            state.pop("branch_companion_asserted", None)
+            state.pop("branch_video_asserted", None)
+            state.pop("branch_latent_asserted", None)
+            state.pop("branch_video_origin", None)
+            state.pop("branch_latent_origin", None)
             state.pop("branch_success_memo", None)
         if len(filter_letters(str(image_prompt_type or ""), "VL")) == 0:
-            return gr.update(value = False, visible = False), gr.update(label = KEEP_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = False), prompt, seed, gr.update(visible = False), gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source))
-        return gr.update(value = False, visible = True), gr.update(label = KEEP_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = False), prompt, seed, gr.update(visible = False), gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source))
+            return gr.update(value = False, visible = False), gr.update(label = KEEP_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = False), prompt, seed, gr.update(visible = False, label = BRANCH_LATENT_FILE_LABEL), gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source))
+        return gr.update(value = False, visible = True), gr.update(label = KEEP_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = False), prompt, seed, gr.update(visible = False, label = BRANCH_LATENT_FILE_LABEL), gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source))
     model_type = get_state_model_type(state)
     model_def = get_model_def(model_type)
     if not _is_all_latent_family(get_base_model_type(model_type), model_def):
@@ -14313,31 +14398,67 @@ def refresh_branch_from_latent(state, image_prompt_type, image_prompt_type_radio
         # preserved (no value write), the classic labels stay, and
         # nothing is resolved (never a refusal).
         if isinstance(state, dict):
-            state.pop("branch_companion_asserted", None)
+            state.pop("branch_video_asserted", None)
+            state.pop("branch_latent_asserted", None)
+            state.pop("branch_video_origin", None)
+            state.pop("branch_latent_origin", None)
             state.pop("branch_success_memo", None)
-        return gr.update(visible = False), gr.update(label = KEEP_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = False), prompt, seed, gr.update(visible = False), gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source))
+        return gr.update(visible = False), gr.update(label = KEEP_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = False), prompt, seed, gr.update(visible = False, label = BRANCH_LATENT_FILE_LABEL), gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source))
+    # The origin of the incoming video value: a change event carrying the
+    # value the server itself pushed (the retrigger of the latent-file
+    # handler's companion auto-select) keeps the "auto" origin; any other
+    # value is a user selection.
+    _was_asserted = isinstance(state, dict) and len(_vsrc) > 0 and state.get("branch_video_asserted") == _vsrc
+    if isinstance(state, dict):
+        if len(_vsrc) > 0:
+            state["branch_video_origin"] = "auto" if _was_asserted else "user"
+        else:
+            state.pop("branch_video_origin", None)
     info, error = resolve_latent_branch(image_prompt_type, video_source, state, model_type, keep_frames=keep_frames_video_source, fit=bool(branch_fit_latent), base_model_type=get_base_model_type(model_type), model_def=model_def, latent_file=branch_latent_file)
     if error:
-        if error == "no source video was found for the branch job" and len(str(video_source or "").strip()) == 0 and len(str(branch_latent_file or "").strip()) == 0:
+        if error == "no source video was found for the branch job" and len(_vsrc) == 0 and len(_fsrc) == 0:
             note = "From latent: select a source video or a latent file first; the branch point is validated once one is selected"
             gr.Info(note)
             print(note, flush=True)
-            return gr.update(value = True, visible = True), gr.update(label = BRANCH_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = True), prompt, seed, gr.update(visible = True), gr.update(label = video_input_label_with_info(COMPANION_VIDEO_LABEL, video_source))
+            return gr.update(value = True, visible = True), gr.update(label = BRANCH_FRAMES_VIDEO_SOURCE_LABEL), gr.update(visible = True), prompt, seed, gr.update(visible = True, label = BRANCH_LATENT_FILE_LABEL), gr.update(label = video_input_label_with_info(COMPANION_VIDEO_LABEL, video_source))
         raise gr.Error(f"From latent: {error}")
-    new_keep, new_prompt, new_seed = _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, prompt, seed, no_companion=not bool(info.get("video_present")), advisory=_branch_prefix_advisory(model_type), state=state)
-    # Re-assert the picker's value alongside the label (once per file per session):
-    # the value update originates in the latent file handler, and when it is lost in
-    # client-side event processing this retrigger (picker change) resends it through
-    # the same pipeline. Gradio caches files by content hash, so re-postprocessing the
-    # same file converges to the identical payload and cannot loop.
-    video_label = video_input_label_with_info(COMPANION_VIDEO_LABEL, video_source)
+    entry = info.get("entry")
+    # The backward direction (a selected video, no explicit file): the
+    # direction note (console only) names the video the match was
+    # determined from. In *Continue Last Video* the video is an implicit
+    # queue reference, so the mirror and the note stay off — the
+    # job-start log reports the resolved pair instead.
+    _v_mode = "V" in str(image_prompt_type or "")
+    new_keep, new_prompt, new_seed = _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, prompt, seed, no_companion=not bool(info.get("video_present")), advisory=_branch_prefix_advisory(model_type), state=state, selected_video=info.get("video", "") if (_v_mode and len(_fsrc) == 0) else "")
+    # Re-assert the picker's value alongside the label (once per value per
+    # session): the value update may originate in the latent-file handler,
+    # and when it is lost in client-side event processing this retrigger
+    # (picker change) resends it through the same pipeline. Gradio caches
+    # files by content hash, so re-postprocessing the same file converges
+    # to the identical payload and cannot loop.
+    video_label = video_input_label_with_info(_branch_video_label_base(state, video_source), video_source)
     video_update = gr.update(label = video_label)
-    _src = str(video_source or "").strip()
-    if len(_src) > 0 and (not isinstance(state, dict) or state.get("branch_companion_asserted") != _src):
+    if len(_vsrc) > 0 and (not isinstance(state, dict) or not _was_asserted):
         if isinstance(state, dict):
-            state["branch_companion_asserted"] = _src
+            state["branch_video_asserted"] = _vsrc
         video_update = gr.update(value = video_source, label = video_label)
-    return gr.update(value = True, visible = True), gr.update(label = BRANCH_FRAMES_VIDEO_SOURCE_LABEL, value = new_keep), gr.update(visible = True), new_prompt, new_seed, gr.update(visible = True), video_update
+    # The latent file picker: with no explicit file the resolved sidecar
+    # is mirrored into it (the backward direction — the video is the
+    # input and the file is what the app detected), labelled "Detected"
+    # so the user sees which side of the pair the app filled. A picked
+    # file keeps its value; its label picks up the origin-aware base and
+    # the file's own recorded info.
+    if _v_mode and len(_fsrc) == 0:
+        if isinstance(state, dict):
+            state["branch_latent_asserted"] = info["path"]
+            state["branch_latent_origin"] = "auto"
+        file_update = gr.update(value = info["path"], label = latent_file_label_with_info(DETECTED_LATENT_FILE_LABEL, entry))
+    else:
+        # The label's info comes from the resolved file, but is only shown
+        # when the picker actually holds a file (in *Continue Last Video*
+        # the picker stays empty, so the label stays plain there).
+        file_update = gr.update(label = latent_file_label_with_info(_branch_latent_label_base(state, branch_latent_file), entry if len(_fsrc) > 0 else None))
+    return gr.update(value = True, visible = True), gr.update(label = BRANCH_FRAMES_VIDEO_SOURCE_LABEL, value = new_keep), gr.update(visible = True), new_prompt, new_seed, file_update, video_update
 
 
 def refresh_branch_frame_fit(state, image_prompt_type, video_source, branch_from_latent, branch_fit_latent, keep_frames_video_source, branch_latent_file):
@@ -14385,34 +14506,66 @@ def refresh_branch_from_latent_file(state, image_prompt_type, branch_latent_file
     input of the *From latent* mode, so with the mode on and a file picked
     this validates the branch from the file alone (the same validation as
     the checkbox handler — the companion video is optional) and then looks
-    the companion video up in the other direction (
-    :func:`latent_io.find_video_for_latent`): exactly one candidate is
-    auto-selected into the video picker (a programmatic set does not
-    re-fire the video's .change, so there is no loop) with the path
-    reported in the note; several candidates are listed and the user picks
-    through the normal video control (no auto-select); none is merged into
-    the branch-point detail (the branch proceeds from the file's records). The success tail
-    (prompt / seed pre-fill, field relabel, fit snap, branch-point
-    details) is the shared helper. With the mode off or no file the video
-    label is restored and everything else is left unchanged (no error)."""
-    # Mode off (or no file): drop the companion re-assert marker and the
-    # success-report memo so a later (re)selection reports again.
+    the companion video up in the other direction
+    (:func:`latent_io.find_video_for_latent`): exactly one candidate that
+    is not already selected is auto-selected into the video picker (the
+    retrigger that follows is recognised by the re-assert marker and
+    skipped, so there is no loop) with the path reported in the note;
+    several candidates are listed and the user picks through the normal
+    video control (no auto-select); none is merged into the branch-point
+    detail (the branch proceeds from the file's records). A change event
+    carrying back the file the video handler just mirrored (the retrigger
+    of the backward direction) is recognised the same way and does
+    nothing — no re-report, no re-resolution, no value re-push. On the
+    success path the file's label picks up its origin-aware base and the
+    file's own recorded info; the success tail (prompt / seed pre-fill,
+    field relabel, fit snap, branch-point details) is the shared helper.
+    With the mode off or no file the video and file labels are restored
+    and everything else is left unchanged (no error)."""
+    # The success-report memo is dropped so a (re)selection reports again;
+    # the origin markers survive (the labels depend on them).
     if isinstance(state, dict):
-        state.pop("branch_companion_asserted", None)
         state.pop("branch_success_memo", None)
     if len(filter_letters(str(image_prompt_type or ""), "VL")) == 0:
-        return video_source, keep_frames_video_source, branch_fit_latent, prompt, seed
+        if isinstance(state, dict):
+            state.pop("branch_video_asserted", None)
+            state.pop("branch_latent_asserted", None)
+            state.pop("branch_video_origin", None)
+            state.pop("branch_latent_origin", None)
+        return video_source, keep_frames_video_source, branch_fit_latent, prompt, seed, gr.update()
     if not branch_from_latent or len(str(branch_latent_file or "").strip()) == 0:
+        # Mode off, or the file was cleared: drop the origin / re-assert
+        # markers so a later (re)selection re-detects, and the labels go
+        # back to the plain ones.
+        if isinstance(state, dict):
+            state.pop("branch_video_asserted", None)
+            state.pop("branch_latent_asserted", None)
+            state.pop("branch_video_origin", None)
+            state.pop("branch_latent_origin", None)
         # The label switches with the mode (not with the file): the mode
         # is on, so the video picker stays labelled as the (optional)
         # companion video whatever the file picker holds.
         base = COMPANION_VIDEO_LABEL if branch_from_latent else VIDEO_SOURCE_LABEL
-        return gr.update(label = video_input_label_with_info(base, video_source)), keep_frames_video_source, branch_fit_latent, prompt, seed
+        return gr.update(label = video_input_label_with_info(base, video_source)), keep_frames_video_source, branch_fit_latent, prompt, seed, gr.update(label = BRANCH_LATENT_FILE_LABEL)
     model_type = get_state_model_type(state)
     if not _is_all_latent_family(get_base_model_type(model_type), get_model_def(model_type)):
         # Dormant family: no resolution; the video keeps its classic
         # label and the field / fit stay untouched (never a refusal).
-        return gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source)), keep_frames_video_source, branch_fit_latent, prompt, seed
+        return gr.update(label = video_input_label_with_info(VIDEO_SOURCE_LABEL, video_source)), keep_frames_video_source, branch_fit_latent, prompt, seed, gr.update()
+    _fsrc = str(branch_latent_file or "").strip()
+    # The origin of the incoming file value: a change event carrying the
+    # value the server itself pushed (the retrigger of the video handler's
+    # backward auto-fill) is not a user selection — the branch was already
+    # reported there, so nothing is re-resolved or re-pushed (the labels
+    # stay).
+    _was_asserted = isinstance(state, dict) and len(_fsrc) > 0 and state.get("branch_latent_asserted") == _fsrc
+    if isinstance(state, dict):
+        state["branch_latent_origin"] = "auto" if _was_asserted else "user"
+    if _was_asserted:
+        # The label switches with the mode (not with the file): the mode
+        # is on, so the video picker stays labelled as the (optional)
+        # companion video whatever the file picker holds.
+        return gr.update(label = video_input_label_with_info(_branch_video_label_base(state, video_source), video_source)), keep_frames_video_source, branch_fit_latent, prompt, seed, gr.update()
     info, error = resolve_latent_branch(image_prompt_type, video_source, state, model_type, keep_frames=keep_frames_video_source, fit=bool(branch_fit_latent), base_model_type=get_base_model_type(model_type), model_def=get_model_def(model_type), latent_file=branch_latent_file)
     if error:
         raise gr.Error(f"From latent: {error}")
@@ -14420,22 +14573,37 @@ def refresh_branch_from_latent_file(state, image_prompt_type, branch_latent_file
     # search directories (the same construction resolve_latent_branch
     # uses) are probed for the video the file was saved from.
     found = latent_io.find_video_for_latent(info["path"], _branch_latent_search_dirs())
-    if len(found) == 1:
+    _vsrc = str(video_source or "").strip()
+    if len(found) == 1 and _vsrc != found[0]:
+        # A new companion: select it and mark it auto-detected (the video
+        # handler's retrigger recognises this through the re-assert marker
+        # and skips the re-report).
         note = f"From latent: companion video selected: {found[0]}"
         gr.Info(note)
         print(note, flush=True)
-        video_update = gr.update(value = found[0], label = video_input_label_with_info(COMPANION_VIDEO_LABEL, found[0]))
-    elif len(found) > 1:
-        note = f"From latent: several companion videos match the latent file ({', '.join(os.path.basename(p) for p in found)}); select one with the video control."
-        gr.Info(note)
-        print(note, flush=True)
-        video_update = gr.update(label = video_input_label_with_info(COMPANION_VIDEO_LABEL, video_source))
+        if isinstance(state, dict):
+            state["branch_video_asserted"] = found[0]
+            state["branch_video_origin"] = "auto"
+        video_update = gr.update(value = found[0], label = video_input_label_with_info(DETECTED_COMPANION_VIDEO_LABEL, found[0]))
     else:
-        # No companion: the shared tail merges the note into the
-        # branch-point box (one box instead of two).
-        video_update = gr.update(label = video_input_label_with_info(COMPANION_VIDEO_LABEL, video_source))
+        # The companion is already the selected video (the backward flow
+        # resolved the same pair) — kept without re-selecting or noting —
+        # or several / no candidates (the user picks through the normal
+        # video control); the video's origin is then left to the next
+        # user selection.
+        if len(found) > 1:
+            note = f"From latent: several companion videos match the latent file ({', '.join(os.path.basename(p) for p in found)}); select one with the video control."
+            gr.Info(note)
+            print(note, flush=True)
+        if isinstance(state, dict):
+            state.pop("branch_video_asserted", None)
+            state.pop("branch_video_origin", None)
+        # The label switches with the mode (not with the file): the mode
+        # is on, so the video picker stays labelled as the (optional)
+        # companion video whatever the file picker holds.
+        video_update = gr.update(label = video_input_label_with_info(_branch_video_label_base(state, video_source), video_source))
     new_keep, new_prompt, new_seed = _branch_success_updates(info, keep_frames_video_source, branch_fit_latent, prompt, seed, no_companion=len(found) == 0, advisory=_branch_prefix_advisory(model_type), state=state)
-    return video_update, gr.update(label = BRANCH_FRAMES_VIDEO_SOURCE_LABEL, value = new_keep), gr.update(visible = True), new_prompt, new_seed
+    return video_update, gr.update(label = BRANCH_FRAMES_VIDEO_SOURCE_LABEL, value = new_keep), gr.update(visible = True), new_prompt, new_seed, gr.update(label = latent_file_label_with_info(_branch_latent_label_base(state, branch_latent_file), info.get("entry")))
 
 def refresh_image_prompt_type_endcheckbox(state, image_prompt_type, image_prompt_type_radio, end_checkbox, video_prompt_type):
     image_prompt_type = del_in_sequence(image_prompt_type, "E")
@@ -14877,6 +15045,29 @@ def video_input_label_with_info(base_label, video_path):
         info += [f"{frames_count} {'frame' if frames_count == 1 else 'frames'}"]
     return f"{base_label} ({', '.join(info)})"
 
+def latent_file_label_with_info(base_label, entry):
+    """The latent file picker's label info suffix: the same
+    (width x height, fps, frame count) shape as
+    :func:`video_input_label_with_info`, but taken from the latent file's
+    own records (the sidecar stores the video's resolution / fps / frame
+    count), so the suffix works with no companion video present."""
+    entry = entry or {}
+    try:
+        width = int(entry.get("width") or 0)
+        height = int(entry.get("height") or 0)
+        fps = float(entry.get("fps") or 0)
+        frames = int(entry.get("frames") or 0)
+    except (TypeError, ValueError):
+        return base_label
+    if width <= 0 or height <= 0:
+        return base_label
+    info = [f"{width}x{height}"]
+    if fps > 0:
+        info += [f"{fps:g} fps"]
+    if frames > 0:
+        info += [f"{frames} {'frame' if frames == 1 else 'frames'}"]
+    return f"{base_label} ({', '.join(info)})"
+
 def refresh_video_input_label(video_path, base_label):
     return gr.update(label=video_input_label_with_info(base_label, video_path))
 
@@ -15232,7 +15423,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                 # (never a refusal).
                 branch_family_ok = _is_all_latent_family(str(base_model_type or ""), model_def)
                 branch_from_latent = gr.Checkbox(value= branch_from_latent_value , visible= len(filter_letters(image_prompt_type_value, "VL"))>0 and branch_family_ok , scale = 2, label= "From WanGP latent file", info= BRANCH_LATENT_TOOLTIP )
-                branch_latent_file = gr.File(file_types=[".pt"], type="filepath", value=ui_get("branch_latent_file", None), visible= len(filter_letters(image_prompt_type_value, "VL"))>0 and branch_from_latent_value and branch_family_ok , scale = 2, label= BRANCH_LATENT_FILE_LABEL )
+                branch_latent_file = gr.File(file_types=[".pt"], type="filepath", value=ui_get("branch_latent_file", None), visible= len(filter_letters(image_prompt_type_value, "VL"))>0 and branch_from_latent_value and branch_family_ok , scale = 2, label= BRANCH_LATENT_FILE_LABEL, elem_id="branch_latent_file_input")
                 image_start_row, image_start, image_start_extra = get_image_gallery(label= "Images as starting points for new Videos in the Generation Queue" + (" (None for Black Frames)" if model_def.get("black_frame", False) else ''), value = ui_defaults.get("image_start", None), visible= "S" in image_prompt_type_value )
                 video_source_label = COMPANION_VIDEO_LABEL if (branch_from_latent_value and branch_family_ok) else VIDEO_SOURCE_LABEL
                 video_source_value = ui_defaults.get("video_source", None)
@@ -16552,7 +16743,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
             # The latent file is the primary input: picking it (or dropping
             # it on the zone) validates the branch from the file alone and
             # auto-selects the companion video when exactly one is found.
-            branch_latent_file.change(fn=refresh_branch_from_latent_file, inputs=[state, image_prompt_type, branch_latent_file, video_source, branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed], outputs=[video_source, keep_frames_video_source, branch_fit_latent, prompt, seed], show_progress="hidden")
+            branch_latent_file.change(fn=refresh_branch_from_latent_file, inputs=[state, image_prompt_type, branch_latent_file, video_source, branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed], outputs=[video_source, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file], show_progress="hidden")
             image_prompt_type_endcheckbox.change(fn=refresh_image_prompt_type_endcheckbox, inputs=[state, image_prompt_type, image_prompt_type_radio, image_prompt_type_endcheckbox, video_prompt_type], outputs=[image_prompt_type, image_end_row, input_video_strength] ) 
             video_prompt_type_image_refs.input(fn=refresh_video_prompt_type_image_refs, inputs = [state, video_prompt_type, video_prompt_type_image_refs,image_mode, image_prompt_type], outputs = [video_prompt_type, image_refs_row, remove_background_images_ref,  image_refs_relative_size, frames_positions,video_guide_outpainting_col, input_video_strength, custom_settings_visibility_trigger], show_progress="hidden")
             enhancer_label_inputs = [image_mode, video_prompt_type, image_prompt_type, image_start, image_end, image_refs, image_guide, image_mask_guide, video_source]
