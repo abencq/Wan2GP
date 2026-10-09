@@ -7256,7 +7256,9 @@ DETECTED_LATENT_FILE_LABEL = "Detected latent file (matched to the selected vide
 # docs/SETTINGS.md).
 BRANCH_LATENT_TOOLTIP = ("Branch from a saved latent file (written by the 'Save Latents' option). "
                          "LTX2 / Wan / LongCat / MiniMax H3 only. Some models keep the pre-cut section "
-                         "by re-compression, not bit-identically (see docs/SETTINGS.md).")
+                         "by re-compression, not bit-identically (see docs/SETTINGS.md). The frame count is "
+                         "the new segment added after the kept part, as in the classic continuation; the job "
+                         "log prints the planned total before generation.")
 
 
 def _branch_family_mismatch_error(entry, model_type, base_model_type):
@@ -7837,8 +7839,6 @@ def _prepare_branch_prefix(entry, branch_point, carried, *, base_model_type, vid
         if is_h3 and not head["clean_window_end"] or not is_h3 and (tail_trim_k > 0 or head_trim_k > 1):
             return None, f"the branch point ends a window trimmed by {head_trim_k} head / {tail_trim_k} tail frame(s); the prefix substitution only supports clean window ends"
         decoded_window = int(head["decoded_window"])
-        if int(video_length or 0) < decoded_window:
-            return None, f"the requested new segment ({int(video_length or 0)} frames) is shorter than the carried window's {decoded_window} decoded frames"
         if is_h3:
             # The plan's Case B values: the overlap and the guide are the
             # window's committed kept region (the fresh standard window
@@ -10158,12 +10158,13 @@ def generate_media(
                         "requested_output_frames": _request,
                     })
                     scheduled_windows_template[0] = _w0
-                    # The request is the total final video length: the kept
-                    # region (the verbatim prefix) plus the head window's
-                    # new frames already cover it, so the remaining windows
-                    # generate only what is still short (zero collapses the
-                    # plan to the head window alone).
-                    _remaining = max(0, int(_request) - int(branch_prefix["kept_frames"]) - int(_w0["output_frames"]))
+                    # The request is the new segment after the kept region
+                    # (the classic continuation's reading of the frame
+                    # count): the head window's new frames consume the first
+                    # part of it, the remaining windows make up the rest,
+                    # and the kept region is on top of the request (zero
+                    # collapses the plan to the head window alone).
+                    _remaining = max(0, int(_request) - int(_w0["output_frames"]))
                     if _remaining <= 0:
                         scheduled_windows_template = [_w0]
                     else:
@@ -10185,17 +10186,18 @@ def generate_media(
                         )
                         scheduled_windows_template = [_w0] + _sub
                     frame_scheduler["predicted_total_frames"] = int(branch_prefix["kept_frames"]) + sum(int(w.get("output_frames") or 0) for w in scheduled_windows_template)
-                    print(f"From latent: the window containing the cut contributes {int(_w0['output_frames'])} new frames (requested: {_request}, kept: {int(branch_prefix['kept_frames'])}); the remaining {max(0, len(scheduled_windows_template) - 1)} window(s) make up the rest.")
+                    print(f"From latent: the window containing the cut contributes {int(_w0['output_frames'])} new frames of the requested {_request}; the remaining {max(0, len(scheduled_windows_template) - 1)} window(s) make up the rest (the kept {int(branch_prefix['kept_frames'])} frames are on top).")
             elif any_sliding_window:
-                # The request is the total final video length: the kept
-                # region (the verbatim prefix) plus the head window's new
-                # frames already cover it, so the remaining windows
-                # generate only what is still short (zero collapses the
-                # plan to the head window alone).
-                _remaining = max(0, int(_request) - int(branch_prefix["kept_frames"]) - int(_head_window["output_frames"]))
+                # The request is the new segment after the kept region
+                # (the classic continuation's reading of the frame count):
+                # the head window's new frames consume the first part of
+                # it, the remaining windows make up the rest, and the kept
+                # region is on top of the request (zero collapses the plan
+                # to the head window alone).
+                _remaining = max(0, int(_request) - int(_head_window["output_frames"]))
                 if _remaining <= 0:
                     default_windows_template = [_head_window]
-                    print(f"From latent: the window containing the cut completes the request ({int(_request)} frames: {int(branch_prefix['kept_frames'])} kept + {int(_head_window['output_frames'])} new); no further windows.")
+                    print(f"From latent: the window containing the cut covers the whole request ({int(_request)} new frames) after the {int(branch_prefix['kept_frames'])} kept frames; no further windows.")
                 else:
                     _sub = build_default_window_plan(
                         total_frames=_remaining,
@@ -10214,16 +10216,20 @@ def generate_media(
                         output_frame_policy=model_def.get("frame_scheduler_output_policy"),
                     )
                     default_windows_template = [_head_window] + _sub
-                    print(f"From latent: the window containing the cut contributes {int(_head_window['output_frames'])} new frames (requested: {_request}, kept: {int(branch_prefix['kept_frames'])}); the remaining {len(_sub)} window(s) make up the rest.")
+                    print(f"From latent: the window containing the cut contributes {int(_head_window['output_frames'])} new frames of the requested {_request}; the remaining {len(_sub)} window(s) make up the rest (the kept {int(branch_prefix['kept_frames'])} frames are on top).")
             else:
                 default_windows_template = [_head_window]
             default_windows = [dict(window) for window in default_windows_template]
             if not scheduler_active:
                 sliding_window = len(default_windows) > 1 or default_windows[0]["overlap_frames"] > 0
         else:
-            # Case B: the standard first window keeps its geometry; only its
-            # source overlap becomes the frozen prefix's decoded length (the
-            # fit check already required the window to hold the kept run).
+            # Case B: the standard first window keeps its geometry; its
+            # overlap becomes the frozen prefix's decoded length, so its
+            # new share is the small sliver left in the window's budget
+            # (the fit check already required the window to hold the kept
+            # run). The request is the new segment after the kept region
+            # (the classic continuation's reading of the frame count), so
+            # the tail windows make up the rest of it.
             def _branch_case_b_window(w, discard):
                 _w = dict(w)
                 _w["overlap_frames"] = int(branch_prefix["assembly_overlap"])
@@ -10231,6 +10237,26 @@ def generate_media(
                 _w["output_frames"] = max(1, int(_w.get("frame_num") or 0) - int(_w["overlap_frames"]) - int(_w["discard_last_frames"]))
                 _w["new_shot"] = False
                 return _w
+            def _branch_case_b_tail(w0):
+                _remaining = max(0, int(_request) - int(w0["output_frames"]))
+                if _remaining <= 0:
+                    return []
+                return build_default_window_plan(
+                    total_frames=_remaining,
+                    window_size=sliding_window_size,
+                    default_overlap=default_reuse_frames,
+                    discard_last_frames=sliding_window_discard_last_frames,
+                    minimum=frames_minimum,
+                    step=frames_steps,
+                    frame_offset=frames_offset,
+                    overlap_offset=sliding_window_defaults.get("overlap_offset", 1),
+                    max_overlap=sliding_window_defaults.get("overlap_max"),
+                    first_window_overlap=default_reuse_frames,
+                    first_window_available_overlap=None,
+                    initial_shared_frames=0,
+                    preserve_exact_output_frames=model_def.get("image_end_frame_position", False),
+                    output_frame_policy=model_def.get("frame_scheduler_output_policy"),
+                )
             _case_b_ok = True
             if _is_h3_family(base_model_type, model_def):
                 # The piecewise 5/17 H3 layout decodes the kept run to
@@ -10245,12 +10271,14 @@ def generate_media(
                     _case_b_ok = False
                 else:
                     scheduled_windows_template[0] = _branch_case_b_window(scheduled_windows_template[0], _head_discard)
-                    frame_scheduler["predicted_total_frames"] = sum(int(w.get("output_frames") or 0) for w in scheduled_windows_template)
+                    scheduled_windows_template = [scheduled_windows_template[0]] + _branch_case_b_tail(scheduled_windows_template[0])
+                    frame_scheduler["predicted_total_frames"] = int(branch_prefix["kept_frames"]) + sum(int(w.get("output_frames") or 0) for w in scheduled_windows_template)
             elif any_sliding_window:
                 if len(default_windows_template) == 0 or int(default_windows_template[0].get("frame_num") or 0) < _prefix_decoded_frames:
                     _case_b_ok = False
                 else:
                     default_windows_template[0] = _branch_case_b_window(default_windows_template[0], _head_discard)
+                    default_windows_template = [default_windows_template[0]] + _branch_case_b_tail(default_windows_template[0])
             else:
                 if len(default_windows_template) == 0 or int(default_windows_template[0].get("frame_num") or 0) < _prefix_decoded_frames:
                     _case_b_ok = False
@@ -10258,7 +10286,7 @@ def generate_media(
                     default_windows_template[0] = _branch_case_b_window(default_windows_template[0], _head_discard)
             if not _case_b_ok:
                 branch_prefix = None
-                print("From latent: the first window is too small to hold the carried prefix plus the requested segment, so it uses a fresh encode for this run (the pre-cut part of the output video is rebuilt from the kept windows of the source latent file).")
+                print("From latent: the first window is too small to hold the carried prefix, so it uses a fresh encode for this run (the pre-cut part of the output video is rebuilt from the kept windows of the source latent file).")
             else:
                 print(f"From latent: the first {_prefix_latent_count} latents of the first window keep the values of the source latent file unchanged (the branch point is the committed end of the contained window).")
             default_windows = [dict(window) for window in default_windows_template]
@@ -10278,6 +10306,29 @@ def generate_media(
         _refusal_reason = str(prefix_error or "").strip() or str(_branch_decode_reason or "").strip() or "the branch cannot use the kept region of the source latent file"
         _option = ", or run the job without the latent file" if (branch_latent_info or {}).get("video_present", True) else ""
         raise gr.Error(f"From latent: {_refusal_reason} The kept region cannot be reproduced from the latent file with this job's settings, so the branch is refused; change the setting{_option}.")
+    # The plan receipt: what this job will produce, in one line. Printed
+    # only for jobs with a kept prefix (continuation and branch):
+    # "From latent:" when the kept region comes from the sidecar,
+    # "From video:" when it comes from the source video (including the
+    # latent-file fallback, whose reason the line above announced). The
+    # final length is the kept prefix plus the new frames the windows
+    # generate (the plan's output totals).
+    if video_source is not None or branch_prefix is not None or branch_decode is not None:
+        if branch_prefix is not None:
+            _plan_prefix = "From latent"
+            _plan_kept = int(branch_prefix["kept_frames"])
+            _plan_kept_part = f"kept {_plan_kept} (verbatim)"
+        elif branch_decode is not None:
+            _plan_prefix = "From latent"
+            _plan_kept = int(branch_decode[1])
+            _plan_kept_part = f"kept {_plan_kept} (from the latent file)"
+        else:
+            _plan_prefix = "From video"
+            _plan_kept = int(estimate_first_window_overlap_frames(None, video_source, parsed_keep_frames_video_source, fps))
+            _plan_kept_part = f"{_plan_kept} source"
+        _plan_windows = scheduled_windows_template if scheduler_active else default_windows_template
+        _plan_new = sum(int(w.get("output_frames") or 0) for w in _plan_windows)
+        print(f"{_plan_prefix}: plan: {_plan_kept_part} + {_plan_new} new ({len(_plan_windows)} window(s)) = {_plan_kept + _plan_new} frames")
     seed = set_seed(seed)
 
     torch.set_grad_enabled(False) 
