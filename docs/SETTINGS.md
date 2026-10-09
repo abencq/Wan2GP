@@ -34,7 +34,7 @@ The baseline schema lives in `models/_settings.json`. Model defaults in `default
 | `image_mode` | integer | `0` for video/audio-generation mode, `1` for image mode, `2` for image inpainting mode. The available tabs depend on `image_outputs`, `v2i_switch_supported`, and `inpaint_support` in the model definition. Deepy omits a fixed normal-image value from image-only model defaults, templates, and profiles; mode `2` remains explicit. |
 | `resolution` | string | Output size as `WIDTHxHEIGHT`, for example `1280x720`. WanGP rounds each dimension down to a multiple of the model's block size, so any size can be requested. |
 | `batch_size` | integer | Number of images for image-output models. For some special image models this may have model-specific meaning. Video and audio paths usually force one sample per repeat. |
-| `video_length` | integer or seconds string | Requested output frames. Settings files, queue imports, and API/MCP requests may use a value such as `"10s"`; WanGP converts it using numeric `force_fps` when supplied, otherwise the model FPS, then selects the nearest frame count valid for the model. For audio-only models this is usually `0`; duration may come from `duration_seconds`. |
+| `video_length` | integer or seconds string | Requested output frames. Settings files, queue imports, and API/MCP requests may use a value such as `"10s"`; WanGP converts it using numeric `force_fps` when supplied, otherwise the model FPS, then selects the nearest frame count valid for the model. For audio-only models this is usually `0`; duration may come from `duration_seconds`. In a continuation or branch job this is the length of the new segment generated after the kept prefix, not the total output length: the final video is the kept part plus this many frames (the job log prints the planned total before generation). |
 | `duration_seconds` | number | Requested duration for audio models or models exposing `duration_slider`. |
 | `pause_seconds` | number | Pause inserted between multi-speaker or multi-sentence audio segments when supported. |
 | `force_fps` | string | Output FPS policy. Empty uses the model default. Accepts `auto`, `control`, `source`, or a numeric string such as `24`. |
@@ -279,6 +279,8 @@ Two caveats apply whenever the pre-cut part of the output video comes from the l
 - **Canvas**: the kept latents decode on the grid the file recorded, so the branch job's canvas must match the file's; a canvas-resizing sizing mode or a different resolution is named in the refusal.
 
 When the latent file cannot be decoded for the new job (VAE mismatch, canvas resize, or an unreadable file), the run falls back to the classic continuation: the pre-cut part of the output video is copied from the source video, the new branch is generated from the cut frame of the source video, and the job log says so.
+
+In a branch job the frame count keeps the classic continuation's meaning: it is the new segment generated after the cut, and the final video is the kept part plus that many frames. The part before the cut is on top of the count, not inside it. Before the first window generates, the job log prints the planned result as one line — `From latent: plan: kept 65 (verbatim) + 80 new (2 window(s)) = 145 frames` for a branch, `From video: plan: 210 source + 80 new (1 window(s)) = 290 frames` for a classic continuation (including a latent-file fallback) — so the final length is never a guess.
 
 ### `audio_prompt_type`
 
