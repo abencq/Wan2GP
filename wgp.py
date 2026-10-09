@@ -7187,6 +7187,31 @@ def _is_all_latent_family(base_model_type, model_def):
             or _is_h3_family(base_model_type, model_def))
 
 
+# The *Misc.* tab's *Save Latents* choice (per generation): it overrides
+# the *Configuration* option's *Save Latents* for that one job.
+SAVE_LATENT_CHOICES = [
+    ("Configuration (global default)", 0),
+    ("On", 1),
+    ("Off", 2),
+]
+
+
+def effective_save_latents(choice, default):
+    """The *Save Latents* decision for one generation.
+
+    ``choice`` is the per-generation *Misc.* tab radio (0 follows the
+    *Configuration* option, 1 writes the companion file, 2 skips it).
+    ``None`` — a setting saved before the choice existed, or a Deepy /
+    API job, which has no such control — follows the *Configuration*
+    option as well.
+    """
+    try:
+        choice = int(choice)
+    except (TypeError, ValueError):
+        choice = 0
+    return bool(default) if choice <= 0 else choice == 1
+
+
 # The dtype string a sidecar records for its VAE, mapped to the torch dtype
 # the decode jobs use (the app writes "16"/"32" for the VAE precision); the
 # server config's vae_precision is the fallback for sidecars that do not
@@ -9323,6 +9348,7 @@ def generate_media(
     plugin_data=None,
     spatial_upsampler_parameters=None,
     branch_latent_file=None,
+    save_latents_choice=None,
 ):
     wait_for_model_unload()
 
@@ -9421,6 +9447,12 @@ def generate_media(
     width, height = resolution.split("x")
     width, height = int(width) // block_size * block_size, int(height) // block_size * block_size
 
+    # The job's effective *Save Latents* decision: the *Misc.* tab
+    # choice for this generation when it is set to *On* or *Off*,
+    # otherwise the *Configuration* option's *Save Latents* — which is
+    # also the rule for Deepy and API jobs (they pass no choice).
+    save_latents_enabled = effective_save_latents(save_latents_choice, server_config.get("save_latents", False))
+
     # Latent Branch: fail fast, before the model load. The branch's latent
     # file is resolved from the selected video's name (the mangled upload
     # temp name included) and its path reported in the job log; the
@@ -9463,13 +9495,14 @@ def generate_media(
     # started in any other location runs as a plain job whatever a
     # previous job left in the pickers. Fail fast here, before the model
     # load, when the sidecar chain is missing or unusable: the alternative
-    # would be to write a sidecar the current version cannot decode.
+    # would be to write a sidecar the current version cannot decode. The
+    # check uses the job's effective *Save Latents* decision (above).
     if (branch_latent_info is None and not is_image and _is_all_latent_family(str(base_model_type or ""), model_def)
-            and bool(server_config.get("save_latents", False))
+            and save_latents_enabled
             and len(filter_letters(str(image_prompt_type or ""), "VL")) > 0):
         _pre_info, _pre_error = resolve_latent_branch(image_prompt_type, video_source, state, model_type, keep_frames=keep_frames_video_source, fit=False, base_model_type=base_model_type, model_def=model_def, latent_file=branch_latent_file)
         if _pre_error:
-            raise gr.Error(f"Save Latents: {_pre_error} (disable the 'Save Latents' option to run this job from the source video pixels instead)")
+            raise gr.Error(f"Save Latents: {_pre_error} (disable 'Save Latents' for this job to run it from the source video pixels instead)")
         branch_latent_info = _pre_info
         branch_from_latent = True
         _pre_branch = _pre_info["branch"]
@@ -9755,7 +9788,7 @@ def generate_media(
         # falls back to a fresh encode over the kept region's fresh
         # decode (Step 2) instead of the source video — the job is
         # refused only when that decode is impossible (Gate 1).
-        _all_latent_job = _is_all_latent_family(str(base_model_type or ""), model_def) and bool(server_config.get("save_latents", False))
+        _all_latent_job = _is_all_latent_family(str(base_model_type or ""), model_def) and save_latents_enabled
         # The kept windows/latents carry over into this job's sidecar
         # (Phase 0) whatever the fit below decides; Phase 1 goes further
         # and hands the kept latents to the model as a frozen prefix.
@@ -11117,7 +11150,7 @@ def generate_media(
                 if image_mode == 0:
                     latent_gen_kwargs["app_version"] = WanGP_version
                     latent_gen_kwargs["latent_model_type"] = model_type
-                    if server_config.get("save_latents", False):
+                    if save_latents_enabled:
                         latent_gen_kwargs["save_latents"] = True
                 if branch_prefix is not None and window_no == 1:
                     # Phase 1: the head window takes the sidecar's kept
@@ -13936,6 +13969,7 @@ def save_inputs(
             self_refiner_f_uncertainty,
             self_refiner_certain_percentage,
             output_filename,
+            save_latents_choice,
             config,
             mode,
             state,
@@ -16577,6 +16611,13 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                     with gr.Column():
                         gr.Markdown('<B>Customize the Output Filename using Settings Values (<I>date, seed, model, resolution, width, height, video_length, fps, scale, steps, prompt, flow_shift, guidance_scale, teacache, sliding_window_size, sliding_window_overlap, temporal_upsampling, spatial_upsampling</I>). Each placeholder can take a Python format spec, e.g. <I>{scale:.2f}</I> (full list and examples in <I>docs/GETTING_STARTED.md</I>). For Instance:<BR>"<I>{date(YYYY-MM-DD_HH-mm-ss)}_{seed}_{prompt(50)}, {num_inference_steps}</I>"</B>')
                         output_filename = gr.Text( label= " Output Filename (Leave Blank for Auto Naming)", value= ui_get("output_filename"))
+                    with gr.Column(visible=_is_all_latent_family(base_model_type, model_def)) as save_latents_col:
+                        gr.Markdown("<B>For this Generation only, choose whether the companion Latent File is written. *Configuration* follows the *Save Latents* option of the *Configuration* tab</B>")
+                        save_latents_choice = gr.Dropdown(
+                            choices=SAVE_LATENT_CHOICES,
+                            value=ui_get("save_latents_choice", 0),
+                            label="Save Latents"
+                        )
 
                     config_groups = get_model_config_groups(model_type, model_def)
                     grouped_model_configs = [model_config_groups.get_config_items(configs) for configs in config_groups]
