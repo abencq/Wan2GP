@@ -13,6 +13,12 @@ this output.
 Output written straight to the descriptors -- ffmpeg's own stderr, a C library warning -- never
 reaches the wrapper, so it keeps the console's own shape: no stamp, no reordering.
 
+A line that carries text is stamped at its start; a line carrying nothing -- a bare ``print()``, a
+padded status line closing on a carriage return, a line of spaces -- is echoed unstamped. In a
+terminal, the newline written when an interrupt arrives puts the shutdown lines on a line of their
+own: the terminal echoes ``^C`` on the very line the app is about to print on, and a stamp written
+there would sit inside that echo.
+
 The default format is the fixed-width wall clock (``2026-10-12 15:06:41``) followed by a
 pipe, because WanGP already uses square brackets for its own tags (``[50/50]``, ``[ERROR]``,
 ``[INFO]``, tqdm's ``[00:41<00:00, 1.21it/s]``) and syslog reads a bracketed number as a
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -61,6 +68,7 @@ _STATE = {
     "stderr": None,
     "streams": [],
     "started": 0.0,
+    "interrupt_handler": None,
 }
 
 def _safe_write(stream, text):
@@ -115,6 +123,16 @@ def resolve_separator(value):
 
 _STAMP_CACHE = [-1, "", ""]
 
+_LINE_BLANK = " \t\r\x08\n"
+
+def _carries_text(text, start, stop):
+    """True when this line has a character that prints.
+
+    Spaces, tabs, carriage returns, backspaces and the closing newline carry no text, so an empty
+    console line stays empty: no stamp goes in front of it, and a padded line echoes untouched.
+    """
+    return any(one not in _LINE_BLANK for one in text[start:stop])
+
 def render_stamp(fmt=None):
     """One rendered stamp, cached per wall-clock second (bars write many lines per second)."""
     fmt = resolve_format(fmt) if fmt is not None else _STATE["format"]
@@ -145,7 +163,9 @@ class _LineStamper:
     ``write`` chunks are echoed verbatim, so a bar keeps redrawing exactly as it does today, its
     ``ljust`` padding intact, and the terminal receives every byte it expects -- colour codes
     included. One stamp is written per line, at its start: a carriage return continues the same
-    line, so a bar is stamped once, and a closing newline is what asks for the next stamp.
+    line, so a bar is stamped once, and a closing newline is what asks for the next stamp. A line
+    that carries nothing -- a bare ``print()``, a padded status line closing on a carriage return,
+    a line of spaces -- is echoed unstamped, and a line split across writes keeps its one stamp.
     """
 
     def __init__(self, console):
@@ -157,16 +177,16 @@ class _LineStamper:
             return
         position = 0
         while position < len(text):
-            if self._need_stamp:
-                self._need_stamp = False
+            index = text.find("\n", position)
+            stop = index if index >= 0 else len(text)
+            if self._need_stamp and _carries_text(text, position, stop):
                 stamp = render_stamp()
                 if stamp:
                     _safe_write(self._console, f"{stamp}{_STATE['separator_resolved']}")
-            index = text.find("\n", position)
+                self._need_stamp = False
+            _safe_write(self._console, text[position:stop + (1 if index >= 0 else 0)])
             if index < 0:
-                _safe_write(self._console, text[position:])
                 return
-            _safe_write(self._console, text[position:index + 1])
             position = index + 1
             self._need_stamp = True
 
@@ -301,6 +321,58 @@ def _restore_streams():
     _STATE["streams"] = []
 
 
+_INTERRUPT_NEWLINE = b"\n"
+
+def _interrupt_newline():
+    """One newline straight to the terminal when the interrupt lands.
+
+    Ctrl+C is echoed by the terminal itself, on the line the app is about to print on, so a
+    shutdown message starts glued to it (``^C2026-10-13 15:50:10 | Keyboard interruption ...``)
+    and the stamp ends up inside that echo. A newline written to the descriptor -- not to the
+    stamped stream, a stamped empty line would defeat the point -- puts the message on its own
+    line. A process with no parent of its own (the forked probes) has no terminal to tidy.
+    """
+    try:
+        if os.getpid() == os.getppid():
+            return
+    except OSError:
+        return
+    for descriptor in (1, 2):
+        try:
+            if os.isatty(descriptor):
+                os.write(descriptor, _INTERRUPT_NEWLINE)
+        except OSError:
+            continue
+        break            # one newline is enough: the first console descriptor that is a terminal
+
+def _chain_interrupt(signum, frame, previous):
+    """Write the newline, then run the handler the interrupt had before the stamps existed."""
+    _interrupt_newline()
+    if previous is signal.SIG_DFL:
+        raise KeyboardInterrupt                       # what the default handler means to Python
+    if previous is signal.SIG_IGN:
+        return
+    if callable(previous):
+        previous(signum, frame)
+        return
+    raise KeyboardInterrupt
+
+def _arm_interrupt_newline():
+    """Chain onto the SIGINT handler in force, terminals only; called when the stamps install."""
+    previous = signal.getsignal(signal.SIGINT)
+    if callable(previous) and getattr(previous, "__wgp_interrupt_chain__", False):
+        return                                        # the stamps are already chained
+    def handler(signum, frame):
+        _chain_interrupt(signum, frame, previous)
+    handler.__wgp_interrupt_chain__ = True
+    try:
+        signal.signal(signal.SIGINT, handler)
+    except (ValueError, OSError, RuntimeError, AttributeError):
+        return                                        # not the main thread, or no signal handling
+    _STATE["interrupt_handler"] = handler
+    return handler
+
+
 def _apply_environment(argv):
     env_stamp = _on_off_value(os.environ.get("WAN2GP_LOG_TIMESTAMP", ""))
     return {
@@ -354,6 +426,8 @@ def install_console_stamps(argv=None, *, fmt=None, separator=None, quiet=False):
         return False
 
     _wrap_streams()
+    if _STATE["streams"] and all(one.isatty() for one in _STATE["streams"]):
+        _arm_interrupt_newline()       # terminals only: the interrupt gets a clean line
     if not quiet:
         mode = str(_STATE.get("format") or DEFAULT_FORMAT)
         detail = ("time of day" if "uptime" not in mode

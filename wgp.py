@@ -25,8 +25,11 @@ if os.name == "nt":
 if sys.platform.startswith("linux") and "NUMBA_THREADING_LAYER" not in os.environ:
     os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
 # Console stamps: put the time of day at the start of every line the console prints. Bar redraws
-# are echoed untouched, so a bar is stamped once, where its line starts. Nothing is written to a
-# file: pipe the output ('wgp.py ... 2>&1 | tee job.log') when you want a stamped log.
+# are echoed untouched, so a bar is stamped once, where its line starts, and a line carrying no
+# text at all -- a bare print(), a status line closing on a carriage return -- is stamped nowhere.
+# Nothing is written to a file: pipe the output ('wgp.py ... 2>&1 | tee job.log') when you want a
+# stamped log. In a terminal, Ctrl+C writes one newline so the shutdown lines start on a clean
+# line, clear of the ^C the terminal echoes.
 # Installed before torch / mmgp so the model loading output is stamped too.
 # Off by default in every mode: --log-timestamp=on stamps this run, WAN2GP_LOG_TIMESTAMP=1 stamps
 # every run, and a plain run keeps the output it produced before, byte for byte.
