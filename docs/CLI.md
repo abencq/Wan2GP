@@ -510,7 +510,16 @@ Progress rules, since they are what decides how a console reads:
 - A self-overwriting line (the CLI queue status line, `tqdm`, the download bars) is
   echoed untouched, so a bar is stamped once where its line starts and its redraws -- colour
   codes included -- reach the terminal exactly as they are written.
+- A line with nothing on it is echoed unstamped -- a bare `print()`, a padded status line closing
+  on a carriage return, a line of spaces -- so an empty console line stays empty, with no stamp
+  sitting on it.
 - stdout is never stamped in MCP stdio mode: that stream carries JSON-RPC.
+
+Shutting the server down: in a terminal, Ctrl+C writes one newline of its own, so the shutdown
+lines read `2026-10-13 15:50:10 | Keyboard interruption in main thread... closing server.` on a
+line that is theirs, clear of the `^C` the terminal echoes. It is the interrupt as it reaches the
+app that adds the newline, so a run whose output is a pipe is untouched, and a component that
+installs an interrupt handler of its own after the stamps keeps its own shape.
 
 ### Reading a Stamped Console Log
 
