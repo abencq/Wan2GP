@@ -455,6 +455,59 @@ python wgp.py --lora-preset anime_style.lset
 python wgp.py --loras /shared/loras --lora-preset mystyle.lset
 ```
 
+## Console Log Stamps (`--log-timestamp`)
+
+The console lines WanGP prints can carry the time of day at their start:
+`2026-10-12 15:06:41 | Model loaded: ...`. The feature is off by default: a run without the flag
+prints exactly what it printed before, and `--log-timestamp=on` -- or the flag on its own -- stamps
+the console of a single run; `WAN2GP_LOG_TIMESTAMP=1` stamps every run. The MCP server over stdio
+refuses the stamps in any case: its stdout carries JSON-RPC frames.
+The stamps ride on stdout, so `python wgp.py --process my_queue.zip --log-timestamp=on 2>&1 | tee
+job.log` stores them in a file. Progress bars are never disturbed: a bar is stamped once, where
+its line starts, and every redraw reaches the output byte for byte, colour codes included.
+
+```bash
+# No flags: the console prints exactly as it always has - the stamps are off
+python wgp.py --process my_queue.zip
+
+# Stamp the console of this run: the flag on its own, =on, and a separate 'on' all mean the same
+python wgp.py --process my_queue.zip --log-timestamp
+python wgp.py --process my_queue.zip --log-timestamp=on
+
+# Keep the log of a run: the stamps are on stdout, so tee them
+python wgp.py --process my_queue.zip --log-timestamp=on 2>&1 | tee job.log
+
+# Stamp the Deepy chat, the MCP server or any other mode
+python wgp.py --ask-deepy --log-timestamp=on
+python wgp.py --process my_queue.zip --log-timestamp=off
+```
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--log-timestamp` (`on` / `off`) | off in every mode | Stamp the console lines WanGP prints. The flag on its own means on, and `off` leaves the console exactly as it prints today |
+| `--log-timestamp-format` | `full` | `full` (`YYYY-MM-DD HH:MM:SS`), `clock` (`HH:MM:SS`), `date`, `ms`, `uptime` (`+1h23m45s`), `clock+uptime`, any strftime pattern, or a token mix such as `{time}.{ms} +{uptime}` |
+| `--log-timestamp-sep` | `pipe` (`\|`) | Text between the stamp and the message: `pipe`, `space`, `dash`, `none`, or a literal (`">"`). It is padded to one trailing space, so the next stamp never glues to the text before it |
+
+The stamp is the plain text `2026-10-12 15:06:41 | `, with no brackets: WanGP already uses
+`[50/50]`, `[ERROR]` and tqdm's `[00:41<00:00, 1.21it/s]`, and syslog reads a bracketed
+number as a process id. Brackets are available by writing them into the pattern:
+`--log-timestamp-format "[%H:%M:%S]"`.
+
+Progress rules, since they are what decides how a console reads:
+
+- A *complete* console line gets exactly one stamp, at its start, using the time of day.
+- A self-overwriting line (the CLI queue status line, `tqdm`, the download bars) is
+  echoed untouched, so a bar is stamped once where its line starts and its redraws -- colour
+  codes included -- reach the terminal exactly as they are written.
+- stdout is never stamped in MCP stdio mode: that stream carries JSON-RPC.
+
+### Reading a Stamped Console Log
+
+```bash
+python wgp.py --process q.zip --log-timestamp=on 2>&1 | tee job.log
+grep -E 'Finished|finished|ERROR' job.log           # what happened, and when
+```
+
 ## Environment Variables
 
 While not command line options, these environment variables can affect behavior:
@@ -463,6 +516,9 @@ While not command line options, these environment variables can affect behavior:
 - `TRITON_CACHE_DIR` - Triton cache directory (for Sage attention) 
 - `WAN2GP_DEEPY_TELEMETRY=1` - Enable detailed Deepy decode, MTP, CUDA-memory, and GPU telemetry when verbose level 2 is active (disabled by default)
 - `WAN2GP_FFMPEG_TIMEOUT` - Timeout in seconds when finalizing ffmpeg containers or merging continuation segments in Media Flow (default: `300.0`)
+- `WAN2GP_LOG_TIMESTAMP=1` - Turn the console log stamps on in every mode, the Deepy chat and the MCP server included (the default is off everywhere; the per-run `--log-timestamp=on|off` decides one run)
+- `WAN2GP_LOG_TIMESTAMP_FORMAT` - Default stamp pattern when `--log-timestamp-format` is left out (`full`, `clock`, `uptime`, or a pattern)
+- `WAN2GP_LOG_TIMESTAMP_SEP` - Default separator when `--log-timestamp-sep` is left out (`pipe`, `space`, `dash`, `none`, or a literal)
 
 ---
 

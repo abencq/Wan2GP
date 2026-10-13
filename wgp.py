@@ -24,6 +24,15 @@ if os.name == "nt":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 if sys.platform.startswith("linux") and "NUMBA_THREADING_LAYER" not in os.environ:
     os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
+# Console stamps: put the time of day at the start of every line the console prints. Bar redraws
+# are echoed untouched, so a bar is stamped once, where its line starts. Nothing is written to a
+# file: pipe the output ('wgp.py ... 2>&1 | tee job.log') when you want a stamped log.
+# Installed before torch / mmgp so the model loading output is stamped too.
+# Off by default in every mode: --log-timestamp=on stamps this run, WAN2GP_LOG_TIMESTAMP=1 stamps
+# every run, and a plain run keeps the output it produced before, byte for byte.
+from shared.utils import console_stamps as _console_stamps
+_console_stamps.install_console_stamps(sys.argv)
+
 from shared.asyncio_utils import silence_proactor_connection_reset
 silence_proactor_connection_reset()
 
@@ -2649,6 +2658,7 @@ attention_modes_supported = get_supported_attention_modes()
 override_attention_modes_installed = get_override_attention_modes()
 override_attention_modes_supported = get_supported_override_attention_modes()
 args = parse_wgp_args(CONFIG_FILENAME)
+_console_stamps.configure_console_stamps(args, sys.argv)
 if args.prevent_power_throttling: prevent_power_throttling()
 migrate_loras_layout()
 
