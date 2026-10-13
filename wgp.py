@@ -178,7 +178,6 @@ from shared.lora_paths import resolve_lora_dir
 from shared.utils.wgp_config_migration import migrate_extension_defaults
 from shared.utils import files_locator as fl
 from shared.utils import latent_io 
-from shared.gradio.audio_gallery import AudioGallery  
 from shared.gradio.strip_gallery import StripGallery, STRIP_GALLERY_CLASSES
 from shared.utils.gallery_sources import GALLERY_SOURCES, STRIP_SOURCES, VIDEO, MESH, gallery_source, source_index, source_for_path, gallery_state_defaults
 from shared.utils.self_refiner import normalize_self_refiner_plan, ensure_refiner_list, add_refiner_rule, remove_refiner_rule
