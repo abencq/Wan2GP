@@ -514,6 +514,9 @@ Progress rules, since they are what decides how a console reads:
   on a carriage return, a line of spaces -- so an empty console line stays empty, with no stamp
   sitting on it.
 - stdout is never stamped in MCP stdio mode: that stream carries JSON-RPC.
+- A `Traceback (most recent call last)` line is the last line the console is ever stamped on:
+  the crash dump under it, and the prompt that returns after the crash, are echoed exactly as
+  they are -- a stamped backtrace is noise to read through.
 
 Shutting the server down: in a terminal, Ctrl+C writes one newline of its own, so the shutdown
 lines read `2026-10-13 15:50:10 | Keyboard interruption in main thread... closing server.` on a

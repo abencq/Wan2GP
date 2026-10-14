@@ -19,6 +19,11 @@ terminal, the newline written when an interrupt arrives puts the shutdown lines 
 own: the terminal echoes ``^C`` on the very line the app is about to print on, and a stamp written
 there would sit inside that echo.
 
+A ``Traceback (most recent call last)`` line is the last line a stream is stamped on: the
+crash dump under it, and the console prompt that returns after the crash, reach the console
+exactly as they are -- a stamped backtrace is noise, and the prompt after a crash wants a
+clean line of its own.
+
 The default format is the fixed-width wall clock (``2026-10-12 15:06:41``) followed by a
 pipe, because WanGP already uses square brackets for its own tags (``[50/50]``, ``[ERROR]``,
 ``[INFO]``, tqdm's ``[00:41<00:00, 1.21it/s]``) and syslog reads a bracketed number as a
@@ -125,6 +130,8 @@ _STAMP_CACHE = [-1, "", ""]
 
 _LINE_BLANK = " \t\r\x08\n"
 
+_TRACEBACK_MARK = "Traceback (most recent call last)"
+
 def _carries_text(text, start, stop):
     """True when this line has a character that prints.
 
@@ -166,11 +173,14 @@ class _LineStamper:
     line, so a bar is stamped once, and a closing newline is what asks for the next stamp. A line
     that carries nothing -- a bare ``print()``, a padded status line closing on a carriage return,
     a line of spaces -- is echoed unstamped, and a line split across writes keeps its one stamp.
+    A ``Traceback (most recent call last)`` line is the last stamp the stream writes: a crash
+    dump and the prompt that returns after it read clean.
     """
 
     def __init__(self, console):
         self._console = console
         self._need_stamp = True
+        self._stamps_stopped = False
 
     def feed(self, text):
         if not text:
@@ -179,11 +189,13 @@ class _LineStamper:
         while position < len(text):
             index = text.find("\n", position)
             stop = index if index >= 0 else len(text)
-            if self._need_stamp and _carries_text(text, position, stop):
+            if self._need_stamp and not self._stamps_stopped and _carries_text(text, position, stop):
                 stamp = render_stamp()
                 if stamp:
                     _safe_write(self._console, f"{stamp}{_STATE['separator_resolved']}")
                 self._need_stamp = False
+                if text[position:stop].lstrip(" \t").startswith(_TRACEBACK_MARK):
+                    self._stamps_stopped = True   # the last stamp this stream writes
             _safe_write(self._console, text[position:stop + (1 if index >= 0 else 0)])
             if index < 0:
                 return
