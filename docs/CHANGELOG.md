@@ -12,7 +12,7 @@
 
 - **LoRA paths:** one optional `--lora-config FILE` JSON replaces the model-specific LoRA directory flags. Keys reuse the subfolder names inside `loras/`; default folders keep working unchanged. See the [sample JSON and setup guide](LORAS.md#custom-lora-directories).
 
-- **Various fixes:** a long LTX2 generation can no longer freeze at the start of the first denoise step while kernels are being compiled. If a kernel build ever stalls, the job fails with a clear message instead of hanging the server.
+- **Various fixes:** a long LTX2 generation can no longer freeze at the start of the first denoise step while kernels are being compiled. If a kernel build ever stalls, the job fails with a clear message instead of hanging the server. Saving audio that came out empty no longer crashes the save, so a job that ends up with no audio keeps its video.
 
 - **Console Log Stamps:** WanGP puts the time of day at the start of the console lines it prints, for instance, `2026-10-12 15:06:41 | Model loaded: Wan 2.2 14B`. Added a new `--log-timestamp` option to stamp a run (default: off), a new `--log-timestamp-format` option for the format of the stamp (default: the full date and clock), and a new `--log-timestamp-sep` option for the separator between the stamp and the line (default: the pipe). Denoise, download and queue bars keep redrawing on the screen as they always did, with one stamp where each bar line starts. The stamps cover only lines that carry text, and in a terminal the line printed after Ctrl+C starts on its own line. A traceback takes the stamps off for good, so a crash dump and the prompt after it read clean. *Command Line Reference* in `docs/CLI.md` covers the rest.
 
