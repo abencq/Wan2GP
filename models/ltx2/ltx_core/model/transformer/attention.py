@@ -8,7 +8,7 @@ from shared import attention_kit
 from shared.attention import pay_attention
 from .rope import LTXRopeType, RopeCache, apply_rotary_emb_inplace, apply_rope_cache_heads_inplace
 from .sol_attention import SOL_ATTN_HEAD_DIM, sol_attention
-from ....denoiser_kernels import project_many
+from shared.kernels.ops import project_many
 
 memory_efficient_attention = None
 flash_attn_interface = None
@@ -264,9 +264,11 @@ class Attention(torch.nn.Module):
         cross_attn = context is not None
         if cross_attn:
             q = self.to_q(x)
-            k, v = project_many((self.to_k, self.to_v), context)
+            context_list, context, x = [context], None, None
+            k, v = project_many((self.to_k, self.to_v), context_list)
         else:
-            q, k, v = project_many((self.to_q, self.to_k, self.to_v), x)
+            x_list, x = [x], None
+            q, k, v = project_many((self.to_q, self.to_k, self.to_v), x_list)
         x = None
         context = None
         self.q_norm(q)
