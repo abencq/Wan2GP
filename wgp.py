@@ -146,7 +146,7 @@ import importlib
 from models import model_metadata
 from shared import notifications
 from shared.utils import notification_sound
-from shared.utils.setting_names import unknown_settings_error
+from shared.utils.setting_names import settings_error
 from shared.utils.loras_mutipliers import preparse_loras_multipliers, parse_loras_multipliers
 from shared.utils.utils import convert_tensor_to_image, convert_video_tensor_to_uint8_chunked, save_image, get_video_info, get_file_creation_date, convert_image_to_video, calculate_new_dimensions, convert_image_to_tensor, calculate_dimensions_and_resize_image, rescale_and_crop, get_video_frame, resize_and_remove_background, rgb_bw_to_rgba_mask, image_editor_layer_to_rgb_mask, to_rgb_tensor, get_resampled_video_transparent, get_video_summary_extras
 from shared.utils.utils import calculate_new_dimensions, get_outpainting_dims, get_outpainting_frame_location, get_outpainting_full_area_dimensions, resolve_outpainting_dims
@@ -159,7 +159,7 @@ from shared.utils.media_recording import record_file_metadata as shared_record_f
 from shared.utils.settings_bundle import is_wangp_settings_filename
 from shared.utils.video_decode import decode_video_frames_ffmpeg, probe_video_stream_metadata
 from shared.utils.virtual_media import get_virtual_image, get_virtual_media_entry, get_virtual_media_vsource, media_source_exists, parse_virtual_media_path, replace_virtual_media_source, strip_virtual_media_suffix
-from shared.utils.frame_scheduler import SLASH_BLOCK_RE, build_default_window_plan, build_extension_window, build_frame_scheduler, floor_frame_count, has_slash_commands, normalize_frame_count, prepare_loras_mult_windows, resolve_window_geometry
+from shared.utils.frame_scheduler import SLASH_BLOCK_RE, build_default_window_plan, build_extension_window, build_frame_scheduler, fit_video_length, floor_frame_count, has_slash_commands, normalize_frame_count, set_video_length_rounding, prepare_loras_mult_windows, resolve_window_geometry
 from shared.match_archi import match_nvidia_architecture
 from shared.attention import ATTENTION_MODE_AVAILABILITY, get_attention_modes, get_supported_attention_modes, get_default_attention_mode, get_override_attention_modes, get_supported_override_attention_modes
 from shared.utils.utils import truncate_for_filesystem, sanitize_file_name, process_images_multithread, get_default_workers, resize_lanczos_frames, expand_or_shrink_mask, prepare_binary_mask_frame
@@ -187,6 +187,7 @@ from shared.utils.gallery_sources import GALLERY_SOURCES, STRIP_SOURCES, VIDEO, 
 from shared.utils.self_refiner import normalize_self_refiner_plan, ensure_refiner_list, add_refiner_rule, remove_refiner_rule
 from shared.deepy import controller as deepy_controller
 from shared.deepy.hybrid import HybridService, SharedState, service_for
+from shared.utils.generation_state import set_generation_state
 from shared.utils.gallery_view import gallery_window
 from shared.gradio.import_files import ImportFiles
 from shared.deepy import filesystem as deepy_filesystem
@@ -261,7 +262,9 @@ AUTOSAVE_ERROR_FILENAME = "error_queue.zip"
 AUTOSAVE_TEMPLATE_PATH = AUTOSAVE_FILENAME
 CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
-WanGP_version = "18.05"
+WanGP_version = "18.12"
+VIDEO_LENGTH_ROUNDING = "ceil"  # how a requested video length is fitted to the model's frame steps: "floor", "ceil" (never shorter than requested) or "nearest"
+set_video_length_rounding(VIDEO_LENGTH_ROUNDING)
 settings_version = 2.80
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
@@ -301,6 +304,7 @@ _HANDLER_MODULES = [
     "shared.qtypes.nunchaku_fp4",
     "shared.qtypes.asym_w4a8_int8",
     "shared.qtypes.int8_convrot",
+    "shared.qtypes.gptq_int4",
     "shared.qtypes.gguf",
 ]
 for handler in _HANDLER_MODULES:
@@ -344,6 +348,7 @@ def clear_gen_cache():
         del offload.shared_state["_cache"]
 
 
+_deepy_hybrid = None
 
 def release_model():
     global wan_model, offloadobj, reload_needed
@@ -359,6 +364,8 @@ def release_model():
     gc.collect()
     torch.cuda.empty_cache()
     reload_needed = True
+    if _deepy_hybrid is not None:
+        _deepy_hybrid.host_changed()
     if released is not None:  # the debug reports of a release that freed a model: what it left in RAM and VRAM
         write_vram_debug_report(save_path, f"model_release_{released}")
         write_ram_debug_report(save_path, f"model_release_{released}", census_label=f"after the release of {released}")
@@ -416,12 +423,13 @@ def pil_to_base64_uri(pil_image, format="png", quality=75):
             # Audio or unknown file type - can't convert to image
             return None
 
+    if format.lower() == "jpeg" and (pil_image.mode in ("RGBA", "LA", "PA") or "transparency" in pil_image.info):
+        format = "png"
+
     buffer = io.BytesIO()
     try:
         img_to_save = pil_image
-        if format.lower() == 'jpeg' and pil_image.mode == 'RGBA':
-            img_to_save = pil_image.convert('RGB')
-        elif format.lower() == 'png' and pil_image.mode not in ['RGB', 'RGBA', 'L', 'P']:
+        if format.lower() == 'png' and pil_image.mode not in ['RGB', 'RGBA', 'L', 'P']:
              img_to_save = pil_image.convert('RGBA')
         elif pil_image.mode == 'P':
              img_to_save = pil_image.convert('RGBA' if 'transparency' in pil_image.info else 'RGB')
@@ -1122,7 +1130,7 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
             gr.Info(error)
         return None, None, None, None, error
 
-    unknown_error = unknown_settings_error(inputs)
+    unknown_error = settings_error(inputs)
     if unknown_error:
         return err(unknown_error)
     model_def = get_model_def(model_type)
@@ -1157,7 +1165,9 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
 
     prompts = prompt_parser.split_prompt_units(prompt, multi_prompts_gen_type)
     if len(prompts) == 0:
-        return err("Prompt cannot be empty.")
+        if not model_def.get("prompt_optional", False):
+            return err("Prompt cannot be empty.")
+        prompts = [""]  # the prompt only names the output files
     if single_prompt and multi_prompts_gen_type in {"G", "PG"} and len(prompts) > 1:
         return err(f"multi_prompts_gen_type='{multi_prompts_gen_type}' parses this prompt into {len(prompts)} separate generation requests, but this submission accepts one generation task. Submit separate tasks or use 'FG' if the line breaks belong to one prompt.")
     window_boundary_error = prompt_parser.validate_sliding_window_prompt_boundaries(prompts, multi_prompts_gen_type, inputs.get("image_end"))
@@ -2427,7 +2437,7 @@ def clear_queue_action(state):
             gen["resume"] = True
             gen["abort"] = True
             gen["extra_orders"] = 0
-            gen["status"] = "Processing Request to abort Current Generation"
+            set_generation_state(gen, status="Processing Request to abort Current Generation")
             if wan_model is not None:
                 wan_model._interrupt = True
             aborted_current = True
@@ -2513,7 +2523,8 @@ def finalize_generation_with_state(current_state):
 
 def generate_queue_html(queue):
     if len(queue) <= 1:
-        return "<div style='text-align: center; color: grey; padding: 20px;'>Queue is empty.</div>"
+        message = "Generation in progress. No additional items queued." if len(queue) == 1 and is_generation_in_progress() else "Queue is empty."
+        return f"<div style='text-align: center; color: grey; padding: 20px;'>{message}</div>"
 
     top_button_html = ""
     bottom_button_html = ""
@@ -2656,6 +2667,8 @@ def update_generation_status(html_content):
 
 family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx2.ltx_audio_tts_handler", "models.longcat.longcat_handler", "models.minimax_h3.minimax_h3_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.ming_image.ming_handler", "models.kandinsky5.kandinsky_handler", "models.kandinsky6.kandinsky6_handler",  "models.z_image.z_image_handler", "models.hidream.hidream_handler", "models.ideogram4.ideogram4_handler", "models.krea2.krea2_handler", "models.magi_human.magi_human_handler", "models.sensenova_u1.sensenova_u1_handler", "models.hunyuan3d.hunyuan3d_handler", "models.trellis2.trellis2_handler", "models.triposg.triposg_handler", "models.animate_any_mesh.animate_any_mesh_handler", "models.triposplat.triposplat_handler", "models.worldmirror.worldmirror_handler", "models.recon3d.recon3d_handler",  "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.index_tts2_handler", "models.TTS.stable_audio3_handler", "models.TTS.omnivoice_handler", "models.TTS.minimax_music3.minimax_music3_handler", "models.TTS.auk.auk_handler", "models.TTS.yue2.yue2_handler"]
 family_handlers.append("models.prism.prism_handler")
+family_handlers.append("models.flux3.flux3_handler")
+family_handlers.append("models.TTS.fish_audio.fish_audio_handler")
 DEFAULT_LORA_ROOT = "loras" #"models.cosmos3.cosmos3_handler",
 
 def get_lora_root():
@@ -2794,7 +2807,7 @@ if not Path(config_load_filename).is_file():
         "profile" : profile_type.LowRAM_LowVRAM,
         "video_profile": profile_type.LowRAM_LowVRAM,
         "image_profile": profile_type.LowRAM_LowVRAM,
-        "audio_profile": 3.5,
+        "audio_profile": 3,
         "preload_model_policy": [],
         "UI_theme": "default",
         "floating_generate_button": True,
@@ -2881,7 +2894,7 @@ def _normalize_profile_defaults(config):
     base_profile = config.get("profile", profile_type.LowRAM_LowVRAM)
     config.setdefault("video_profile", base_profile)
     config.setdefault("image_profile", base_profile)
-    config.setdefault("audio_profile", 3.5)
+    config.setdefault("audio_profile", 3)
     return config["video_profile"], config["image_profile"], config["audio_profile"]
 
 def _normalize_output_paths(config):
@@ -3847,7 +3860,7 @@ def save_model(model, model_type, dtype,  config_file,  submodel_no = 1,  is_mod
         with open(finetune_file, "w", encoding="utf-8") as writer:
             writer.write(json.dumps(saved_finetune_def, indent=4))
 
-def save_quantized_model(model, model_type, model_filename, dtype, config_file, submodel_no=1, convrot_layout=None):
+def save_quantized_model(model, model_type, model_filename, dtype, config_file, submodel_no=1, convrot_layout=None, convrot_prefixes=None):
     if "quanto" in model_filename or "convrot" in model_filename: return
     source_filename = model_filename
     model_def = get_model_def(model_type)
@@ -3882,7 +3895,7 @@ def save_quantized_model(model, model_type, model_filename, dtype, config_file, 
         if args.convrot:
             from shared.convert.convrot import save_convrot_model
             source_path = source_filename if os.path.isfile(source_filename) else fl.locate_file(source_filename)
-            save_convrot_model(model, source_path, model_filename_path, layout=convrot_layout, verboseLevel=verbose_level)
+            save_convrot_model(model, source_path, model_filename_path, layout=convrot_layout, verboseLevel=verbose_level, prefixes=convrot_prefixes)
         else:
             offload.save_model(model, model_filename_path, do_quantize=True, config_file_path=config_file)
         print(f"New quantized file '{model_filename}' had been created for finetune Id '{model_type}'.")
@@ -4236,13 +4249,14 @@ def init_pipe(pipe, kwargs, profile, output_type="video"):
     if preload == 0 and preload_mode(output_type) == "manual": # the VRAM preload of this kind of output, also when a generation overrides its memory profile
         preload = server_config.get(f"{_normalize_output_type(output_type)}_preload_in_VRAM", 0)
     kwargs["readAhead"] = server_config.get("read_ahead", False)
+    kwargs["preloadExperts"] = preload > 0
     kwargs["perc_reserved_mem_max"] = args.perc_reserved_mem_max or server_config.get("perc_reserved_mem_max", 0) / 100 # 0: mmgp's environment variable or default
 
     kwargs["extraModelsToQuantize"]=  None
     source_budgets = kwargs.get("budgets", None)
     if source_budgets is None:  kwargs["budgets"] = source_budgets = {}
     mmgp_profile = int(profile)
-    if mmgp_profile in (2, 4, 5):
+    if mmgp_profile in (1, 2, 3, 4, 5):
         default_transformer_budget = default_transformer2_budget= kwargs.get("budgets", 100) 
         if isinstance(default_transformer_budget, dict):
             default_transformer_budget = default_transformer_budget.get("transformer", 100) 
@@ -4252,8 +4266,6 @@ def init_pipe(pipe, kwargs, profile, output_type="video"):
         if "transformer2" in pipe:
             budgets["transformer2"] = default_transformer2_budget if preload  == 0 else preload
         source_budgets.update(budgets)
-    elif mmgp_profile == 3:
-        source_budgets.update({ "*" : "80%" }) # a model larger than 80% of the VRAM is processed block by block
 
     if "transformer2" in pipe:
         if profile in [3,4]:
@@ -4468,8 +4480,8 @@ def load_models(model_type, override_profile = -1, output_type="video", config_i
     check_download_cancelled(gen)
     profile = compute_profile(override_profile, output_type)
     lm_decoder_engine_obtained = resolve_lm_decoder_engine(lm_decoder_engine, model_def.get("lm_engines", []) )
-    if lm_decoder_engine_obtained in ("cg", "vllm") and int(profile) not in [ 1, 3]:
-        _load_models_info(f"Unable to use LM Engine '{lm_decoder_engine_obtained}' as it requires a Memory Profile such as 1,3 or 3+ that loads entirely the Main Models in VRAM. Switching to Legacy LM Engine...")
+    if lm_decoder_engine_obtained in ("cg", "vllm") and int(profile) not in [ 1, 3] and not model_def.get("lm_engine_supports_offload", False):
+        _load_models_info(f"LM Engine '{lm_decoder_engine_obtained}' has no declared support for this model with Memory Profiles 2/4/5. Switching to Legacy LM Engine...")
         lm_decoder_engine_obtained = "legacy"
     preview_mode = server_config.get("generation_preview", "rgb")
     preview_name = preview_path = preview_decoder = None
@@ -4504,7 +4516,7 @@ def load_models(model_type, override_profile = -1, output_type="video", config_i
             pipe["tiny_vae"] = preview_decoder
             kwargs["coTenantsMap"]["tiny_vae"] = "*"
         mmgp_profile = init_pipe(pipe, kwargs, profile, output_type)
-        if mmgp_profile in (2, 4, 5) and preload_mode(output_type) == "dynamic":
+        if mmgp_profile in (1, 3) or mmgp_profile in (2, 4, 5) and preload_mode(output_type) == "dynamic":
             kwargs["autoPreload"] = auto_preload_store(model_type)
         loras_transformer = kwargs.pop("loras", [])
         if "transformer" in pipe:
@@ -4651,7 +4663,7 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
             process_status = gen.get("process_status", None)
             pause_msg = None
             if isinstance(process_status, str) and process_status.startswith("request:"):
-                gen["process_status"] = "process:" + process_status[len("request:"):]
+                set_generation_state(gen, process_status="process:" + process_status[len("request:"):])
                 offloadobj.unload_all()
                 pause_msg = gen.get("pause_msg", "Unknown Pause")
                 in_pause = True
@@ -4663,7 +4675,7 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
                 with gen_lock:
                     process_status = gen.get("process_status", None)
                     if isinstance(process_status, str) and process_status.startswith("request:"):
-                        gen["process_status"] = "process:" + process_status[len("request:"):]
+                        set_generation_state(gen, process_status="process:" + process_status[len("request:"):])
                         continue
                     if process_status == "process:main": break
             force_refresh = True
@@ -4785,26 +4797,35 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
     callback.tiny_vae = tiny_preview is not None
     return callback
 
+_pause_generation_lock = threading.Lock()
+
+
 def pause_generation(state):
+    # Concurrent pages must not queue a second pause behind the first resume.
+    if not _pause_generation_lock.acquire(blocking=False):
+        return
+    try:
+        _pause_generation(state)
+    finally:
+        _pause_generation_lock.release()
+
+
+def _pause_generation(state):
     gen = get_gen_info(state)
     process_id = "pause"
     GPU_process_running = any_GPU_process_running(state, process_id, ignore_main= True )
     if GPU_process_running:
         gr.Info("Unable to pause, a PlugIn is using the GPU")
-        yield gr.update(), gr.update()
         return
     gen["resume"] = False
-    yield gr.Button(interactive= False), gr.update()
     pause_msg = "Generation on Pause, click Resume to Restart Generation"
     acquire_GPU_ressources(state, process_id , "Pause", gr= gr, custom_pause_msg= pause_msg, custom_wait_msg= "Please wait while the Pause Request is being Processed...")      
     gr.Info(pause_msg)
-    yield gr.Button(visible= False, interactive= True), gr.Button(visible= True)
     while not gen.get("resume", False):
         time.sleep(0.5)
 
     release_GPU_ressources(state, process_id )
     gen["resume"] = False
-    yield gr.Button(visible= True, interactive= True), gr.Button(visible= False)
 
 def resume_generation(state):
     gen = get_gen_info(state)
@@ -4846,7 +4867,7 @@ def abort_generation(state, client_id="", notify = True):
             wan_model._interrupt= True
         gen["abort"] = True            
         msg = "Processing Request to abort Current Generation"
-        gen["status"] = msg
+        set_generation_state(gen, status=msg)
         if service is not None:
             service._generation_aborting = True
             service._generation_event("status", "Aborting generation…")
@@ -4873,7 +4894,7 @@ def early_stop_generation(state):
         gen["early_stop"] = True
         gen["early_stop_forwarded"] = False
     msg = "Early Stop Requested"
-    gen["status"] = msg
+    set_generation_state(gen, status=msg)
     gr.Info(msg)
     return gr.Button(interactive=False)
 
@@ -9741,7 +9762,7 @@ def generate_media(
     audio_sampling_rate = 16000
 
     prompt_has_history = str(prompt or "").startswith(prompt_parser.PROMPT_UNIT_PREFIX)
-    prompts = prompt_parser.split_prompt_units(prompt, multi_prompts_gen_type)
+    prompts = prompt_parser.split_prompt_units(prompt, multi_prompts_gen_type) or [""]  # an empty optional prompt (validated by validate_settings)
     display_prompts = prompts.copy()
     display_original_prompts = prompt_parser.split_prompt_units(prompt, multi_prompts_gen_type, originals=True) if prompt_has_history else display_prompts.copy()
     alt_prompt_inherits = bool(model_def.get("alt_prompt_inherits_prompt_paragraphs", False))
@@ -9810,7 +9831,7 @@ def generate_media(
     model_filename = get_model_filename(base_model_type)  
 
     frames_offset = model_def.get("frames_offset", 1)
-    video_length = floor_frame_count(video_length, frames_minimum, latent_size, frames_offset)
+    video_length = fit_video_length(video_length, frames_minimum, latent_size, frames_offset)
     if sliding_window_size !=0:
         sliding_window_size = floor_frame_count(sliding_window_size, frames_minimum, latent_size, frames_offset)
     sliding_window_defaults = model_def.get("sliding_window_defaults", {})
@@ -11033,11 +11054,12 @@ def generate_media(
                             w, h = image_refs[0].size
                             if outpainting_dims != None:
                                 h, w = get_outpainting_full_area_dimensions(h, w, outpainting_dims, video_guide_outpainting_ratio)
-                            image_size = calculate_new_dimensions(height, width, h, w, fit_canvas, block_size=block_size)
+                            image_size = calculate_new_dimensions(height, width, h, w, fit_canvas, block_size=block_size, max_width=model_def.get("max_width"), max_height=model_def.get("max_height"))
                             sample_fit_canvas = None 
                             ref_pose_tensor  = resize_and_remove_background(image_refs[nb_frames_positions:nb_frames_positions+1], image_size[1], image_size[0],
                                                                                             False, True, 
                                                                                             fit_into_canvas= model_def.get("fit_into_canvas_image_refs", 1),
+                                                                                            max_width=model_def.get("max_width"), max_height=model_def.get("max_height"),
                                                                                             block_size=block_size,
                                                                                             outpainting_dims =outpainting_dims,
                                                                                             outpainting_ratio = video_guide_outpainting_ratio,
@@ -11090,7 +11112,7 @@ def generate_media(
                     w, h = image_refs[0].size
                     if outpainting_dims != None:
                         h, w = get_outpainting_full_area_dimensions(h, w, outpainting_dims, video_guide_outpainting_ratio)
-                    image_size = calculate_new_dimensions(height, width, h, w, fit_canvas, block_size=block_size)
+                    image_size = calculate_new_dimensions(height, width, h, w, fit_canvas, block_size=block_size, max_width=model_def.get("max_width"), max_height=model_def.get("max_height"))
                 sample_fit_canvas = None
                 if repeat_no == 1:
                     if fit_crop:
@@ -11129,6 +11151,7 @@ def generate_media(
                         src_ref_images, src_ref_masks  = resize_and_remove_background(src_ref_images , image_size[1], image_size[0],
                                                                                         remove_background_images_ref > 0, any_background_ref, 
                                                                                         fit_into_canvas= model_def.get("fit_into_canvas_image_refs", 1),
+                                                                                        max_width=model_def.get("max_width"), max_height=model_def.get("max_height"),
                                                                                         block_size=block_size,
                                                                                         outpainting_dims =outpainting_dims,
                                                                                         outpainting_ratio = video_guide_outpainting_ratio,
@@ -11801,7 +11824,8 @@ def generate_media(
                     # Configuration > Outputs default, then the default auto naming
                     file_name = resolve_stored_output_filename(model_type, inputs)
                     if file_name is None:
-                        file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(truncate_for_filesystem(save_prompt)).strip()}.{extension}"
+                        prompt_name = sanitize_file_name(truncate_for_filesystem(save_prompt)).strip()
+                        file_name = f"{time_flag}_seed{seed}{'_' + prompt_name if prompt_name else ''}.{extension}"
                     else:
                         file_name = f"{sanitize_file_name(truncate_for_filesystem(os.path.splitext(os.path.basename(file_name))[0])).strip()}.{extension}"
                         file_name = os.path.basename(get_available_filename(output_dir, file_name))
@@ -12187,7 +12211,7 @@ def _process_tasks(state):
     progress = None
 
     if len(queue) == 0:
-        gen["status_display"] =  False
+        set_generation_state(gen, status_display=False)
         return
     # Gallery limits apply only to rendered views. Workspaces retain every output.
     set_main_generation_running(state, True)
@@ -12198,9 +12222,9 @@ def _process_tasks(state):
         with gen_lock:
             process_status = gen.get("process_status", None)
             if isinstance(process_status, str) and process_status.startswith("request:"):
-                gen["process_status"] = "process:" + process_status[len("request:"):]
+                set_generation_state(gen, process_status="process:" + process_status[len("request:"):])
             else:
-                gen["process_status"] = None
+                set_generation_state(gen, process_status=None)
 
     start_time = time.time()
     notification_run = notifications.start_queue(gen, len(queue))
@@ -12209,7 +12233,7 @@ def _process_tasks(state):
     gen_in_progress = True
     gen["in_progress"] = True
     gen["preview"] = None
-    gen["status"] = get_task_status_text(queue[0])
+    set_generation_state(gen, status=get_task_status_text(queue[0]))
     gen["header_text"] = ""    
 
     yield time.time(), time.time(), gr.update()
@@ -12341,12 +12365,12 @@ def _process_tasks(state):
             update_global_queue_ref(queue)
             gen["prompts_max"] = 0
             gen["prompt"] = ""
-            gen["status_display"] =  False
+            set_generation_state(gen, status_display=False)
             notifications.finish_queue(server_config, gen, notification_run, time.time() - start_time)
             release_gen()
             raise gr.Error(data, print_exception= False, duration = 0)
         elif cmd == "status":
-            gen["status"] = data
+            set_generation_state(gen, status=data)
             status_text = str(data or "").strip()
             gen["last_progress_args"] = [0, status_text] if len(status_text) > 0 else None
         elif cmd == "output":
@@ -12392,8 +12416,7 @@ def _process_tasks(state):
         except Exception as e:
             print(f"Error playing notification sound: {e}")
     notifications.finish_queue(server_config, gen, notification_run, end_time - start_time)
-    gen["status"] = status
-    gen["status_display"] =  False
+    set_generation_state(gen, status=status, status_display=False)
     release_gen()
 
 
@@ -14334,7 +14357,7 @@ def preload_model_when_switching(state):
         model_type = get_state_model_type(state) 
         if  model_type !=  transformer_type:
             gen = get_gen_info(state)
-            gen["model_preloading"] = True
+            set_generation_state(gen, model_preloading=True)
             try:
                 release_model()
                 progress = WangpProgress()
@@ -14347,7 +14370,7 @@ def preload_model_when_switching(state):
                 )
                 reload_needed = False
             finally:
-                gen.pop("model_preloading", None)
+                set_generation_state(gen, model_preloading=False)
             yield render_idle_generation_status(state)
         return   
     return gr.Text()
@@ -15298,7 +15321,7 @@ def change_resolution_picker(state):
 
 def preview_resolution_mp(state, megapixels, ratio):
     model_def = get_model_def(get_state_model_type(state))
-    resolution = resolution_utils.megapixels_to_resolution(megapixels, ratio, model_def.get("vae_block_size", 16))
+    resolution = resolution_utils.megapixels_to_resolution(megapixels, ratio, model_def.get("vae_block_size", 16), model_def)
     return gr.update(label=resolution_mp_label(resolution))
 
 
@@ -15306,10 +15329,11 @@ def commit_resolution_mp(state, megapixels, ratio):
     model_def = get_model_def(get_state_model_type(state))
     if model_def.get("lock_resolutions"):
         return gr.update(), gr.update(), gr.update()
-    resolution = resolution_utils.megapixels_to_resolution(megapixels, ratio, model_def.get("vae_block_size", 16))
+    resolution = resolution_utils.megapixels_to_resolution(megapixels, ratio, model_def.get("vae_block_size", 16), model_def)
     choices, resolution = get_resolution_choices(resolution, model_def)
     groups, selected, group = resolution_utils.group_resolution_choices(choices, resolution)
-    return gr.update(choices=selected, value=resolution), gr.update(choices=[(resolution_utils.GROUP_LABELS.get(item, item), item) for item in groups], value=group), gr.update(label=resolution_mp_label(resolution))
+    values = resolution_utils.megapixel_controls(resolution, choices, model_def, server_config.get("enable_4k_resolutions", 0) == 1)
+    return gr.update(choices=selected, value=resolution), gr.update(choices=[(resolution_utils.GROUP_LABELS.get(item, item), item) for item in groups], value=group), gr.update(value=values["value"], minimum=values["minimum"], maximum=values["maximum"], label=resolution_mp_label(resolution))
 
 
 def get_max_frames(nb):
@@ -15336,10 +15360,10 @@ def change_guidance_phases(state, guidance_phases, video_prompt_type):
     return gr.update(visible= guidance_phases >=3 and visible_phases >=3 and multiple_submodels) , gr.update(visible=phase_controls_visible), gr.update(visible=phase_controls_visible and switch_threshold_def.visible, label=switch_threshold_def.label), gr.update(visible= guidance_phases >=3 and visible_phases >=3), gr.update(visible= guidance_phases >=2 and visible_phases >=2), gr.update(visible= guidance_phases >=3 and visible_phases >=3), video_prompt_type, gr.update(visible=phase_2_steps_def.visible)
 
 
-memory_profile_choices= [   ("Profile 1, HighRAM_HighVRAM: each model loaded whole in VRAM, all models kept in Reserved RAM. The fastest generations and model switches, needs the most RAM and VRAM", 1),
+memory_profile_choices= [   ("Profile 1, HighRAM_HighVRAM: Profile 2 with Dynamic Preload. All models kept in Reserved RAM; as many layers as fit stay in VRAM, the rest are streamed", 1),
                             ("Profile 2, HighRAM_LowVRAM: all models kept in Reserved RAM, sent to the GPU part by part. Runs models larger than your VRAM, leaves VRAM for long videos or large images and switches models fast, needs a lot of RAM", 2),
-                            ("Profile 3, LowRAM_HighVRAM: each model loaded whole in VRAM, only the main models kept in Reserved RAM. Fast generations with less RAM, needs enough VRAM for the whole model", 3),
-                            ("Profile 3+, VeryLowRAM_HighVRAM (Recommended for Audio): Profile 3 without any Reserved RAM. Audio models are small enough to fit whole in VRAM, where their language models run much faster; models load more slowly", 3.5),
+                            ("Profile 3, LowRAM_HighVRAM (Recommended for Audio): Profile 4 with Dynamic Preload. Only the main models kept in Reserved RAM; as many layers as fit stay in VRAM, the rest are streamed", 3),
+                            ("Profile 3+, VeryLowRAM_HighVRAM: Profile 3 without any Reserved RAM. Dynamic Preload keeps as much of each model in VRAM as fits; models load more slowly", 3.5),
                             ("Profile 4, LowRAM_LowVRAM (Recommended): only the main models kept in Reserved RAM, sent to the GPU part by part. The most versatile: runs models larger than your VRAM and leaves VRAM for long videos or large images", 4),
                             ("Profile 4+, LowRAM_LowVRAM+: Profile 4 sending one part at a time. Saves up to about 1 GB of VRAM, slightly slower", 4.5),
                             ("Profile 5, VerylowRAM_LowVRAM (Fail safe): almost no Reserved RAM, all models sent to the GPU part by part. For PCs short of RAM and VRAM, slower with short steps such as images", 5)]
@@ -15543,7 +15567,6 @@ _deepy = deepy_controller.create_controller(
     clear_queue_action=clear_queue_action,
 )
 release_deepy_vram = _deepy.release_vram
-_deepy_hybrid = None
 
 
 def _deepy_runtime_deps():
@@ -16918,7 +16941,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                 if tab_id == 'generate' and default_state is None:
                     global _deepy_hybrid
                     state_dict = SharedState(state_dict)
-                    _deepy_hybrid = HybridService(_deepy_runtime_deps(), state_dict, process_queue=_process_tasks, finalize_queue=_finalize_generation, unload=_unload_model_if_needed, gallery_lock=lock)
+                    _deepy_hybrid = HybridService(_deepy_runtime_deps(), state_dict, process_queue=_process_tasks, finalize_queue=_finalize_generation, unload=_unload_model_if_needed, gallery_lock=lock, model_label=get_loaded_model_label)
                     _deepy_hybrid.configure_workspaces(args.workspaces_dir or server_config.get('workspaces_dir') or os.path.join(wgp_root, 'workspaces'))
                 state = default_state if default_state is not None else gr.State(state_dict)
                 if tab_id == "generate" and header is not None:
@@ -16962,28 +16985,28 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
 
                     with gr.Tab("Information", id="video_info"):
                         video_info = gr.HTML(visible=True, min_height=100, value=get_default_video_info()) 
-                        with gr.Row(**default_visibility_false) as audio_buttons_row:
+                        with gr.Row(**default_visibility_false, elem_classes=["wangp-media-actions"] if floating_generate_button else []) as audio_buttons_row:
                             video_info_extract_audio_settings_btn = gr.Button("Extract Settings", min_width= 1, size ="sm")
                             video_info_to_audio_guide_btn = gr.Button("To Audio Source", min_width= 1, size ="sm", visible = any_audio_guide)
                             video_info_to_audio_guide2_btn = gr.Button("To Audio Source 2", min_width= 1, size ="sm", visible = any_audio_guide2 )
                             video_info_to_audio_source_btn = gr.Button("To Soundtrack", min_width= 1, size ="sm", visible=audio_processor_api.has_audio_source_soundtrack())
                             video_info_eject_audio_btn = gr.Button("Eject Audio File", min_width= 1, size ="sm")
-                        with gr.Row(**default_visibility_false) as deleted_audio_buttons_row:
+                        with gr.Row(**default_visibility_false, elem_classes=["wangp-media-actions"] if floating_generate_button else []) as deleted_audio_buttons_row:
                             video_info_eject_deleted_audio_btn = gr.Button("Eject Deleted File", min_width= 1, size ="sm")
-                        with gr.Row(**default_visibility_false) as video_buttons_row:
+                        with gr.Row(**default_visibility_false, elem_classes=["wangp-media-actions"] if floating_generate_button else []) as video_buttons_row:
                             video_info_extract_settings_btn = gr.Button("Extract Settings", min_width= 1, size ="sm")
                             video_info_to_video_source_btn = gr.Button("To Video Source", min_width= 1, size ="sm", visible = any_video_source)
                             video_info_to_control_video_btn = gr.Button("To Control Video", min_width= 1, size ="sm", visible = any_control_video )
                             video_info_eject_video_btn = gr.Button("Eject Video", min_width= 1, size ="sm")
-                        with gr.Row(**default_visibility_false) as deleted_video_buttons_row:
+                        with gr.Row(**default_visibility_false, elem_classes=["wangp-media-actions"] if floating_generate_button else []) as deleted_video_buttons_row:
                             video_info_eject_deleted_video_btn = gr.Button("Eject Deleted File", min_width= 1, size ="sm")
-                        with gr.Row(**default_visibility_false) as mesh_buttons_row:
+                        with gr.Row(**default_visibility_false, elem_classes=["wangp-media-actions"] if floating_generate_button else []) as mesh_buttons_row:
                             video_info_extract_mesh_settings_btn = gr.Button("Extract Settings", min_width= 1, size ="sm")
                             video_info_to_mesh_input_btn = gr.Button("To Input Mesh", min_width= 1, size ="sm", visible = any_mesh_input)
                             video_info_eject_mesh_btn = gr.Button("Eject 3D Asset", min_width= 1, size ="sm")
-                        with gr.Row(**default_visibility_false) as deleted_mesh_buttons_row:
+                        with gr.Row(**default_visibility_false, elem_classes=["wangp-media-actions"] if floating_generate_button else []) as deleted_mesh_buttons_row:
                             video_info_eject_deleted_mesh_btn = gr.Button("Eject Deleted File", min_width= 1, size ="sm")
-                        with gr.Row(**default_visibility_false) as image_buttons_row:
+                        with gr.Row(**default_visibility_false, elem_classes=["wangp-media-actions"] if floating_generate_button else []) as image_buttons_row:
                             video_info_extract_image_settings_btn = gr.Button("Extract Settings", min_width= 1, size ="sm")
                             video_info_to_start_image_btn = gr.Button("To Start Image", size ="sm", min_width= 1, visible = any_start_image )
                             video_info_to_end_image_btn = gr.Button("To End Image", size ="sm", min_width= 1, visible = any_end_image)
@@ -16999,14 +17022,14 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                             PP_late_audio_replace_voice_sample = late_audio_ui["replace_voice_sample"]
                             PP_late_audio_replace_voice_sample2_row = late_audio_ui["replace_voice_sample2_row"]
                             PP_late_audio_replace_voice_sample2 = late_audio_ui["replace_voice_sample2"]
-                        with gr.Row():
+                        with gr.Row(elem_classes=["wangp-media-actions"] if floating_generate_button else []):
                             video_info_audio_postprocessing_btn = gr.Button("Apply Audio Postprocessing", size="sm", visible=True)
                             video_info_eject_audio2_btn = gr.Button("Eject Audio", size="sm", visible=True)
                     with gr.Tab("Post Processing", id= "post_processing", visible = late_video_postprocessing_visible) as video_postprocessing_tab:
                         with gr.Group(elem_classes= "postprocess"):
                             with gr.Column():
                                 PP_temporal_upsampling, PP_spatial_upsampling, PP_film_grain_intensity, PP_film_grain_saturation, PP_temporal_upsampling_method, PP_temporal_upsampling_multiplier, PP_spatial_upsampling_method, PP_spatial_upsampling_ratio, PP_spatial_upsampler_parameter_state, PP_spatial_upsampler_prompt, PP_spatial_upsampler_reference_images, PP_spatial_upsampler_param, PP_spatial_upsampler_param2, PP_spatial_upsampler_extra, PP_spatial_upsampler_media_outputs, PP_spatial_upsampler_help_target_id = gen_upsampling_dropdowns("", "", 0, 0.5, element_class="postprocess", image_outputs=False, late_postprocessing=True, spatial_parameter_values={})
-                        with gr.Row():
+                        with gr.Row(elem_classes=["wangp-media-actions"] if floating_generate_button else []):
                             video_info_postprocessing_btn = gr.Button("Apply Postprocessing", size ="sm", visible=True)
                             video_info_eject_video2_btn = gr.Button("Eject Media", size ="sm", visible=True)
                     with gr.Tab("Audio Remuxing", id= "audio_remuxing", visible = late_audio_remuxing_visible) as audio_remuxing_tab:
@@ -17026,7 +17049,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                             PP_replace_voice_sample = late_remux_ui["replace_voice_sample"]
                             PP_replace_voice_sample2_row = late_remux_ui["replace_voice_sample2_row"]
                             PP_replace_voice_sample2 = late_remux_ui["replace_voice_sample2"]
-                        with gr.Row():
+                        with gr.Row(elem_classes=["wangp-media-actions"] if floating_generate_button else []):
                             video_info_remux_audio_btn = gr.Button("Remux Audio", size ="sm", visible=True)
                             video_info_eject_video3_btn = gr.Button("Eject Video", size ="sm", visible=True)
                     with gr.Tab("Import Media to Galleries", id= "video_add"):
@@ -17211,26 +17234,18 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                         return
                     time.sleep(0.1)
 
-            def refresh_idle_status(state, previous_html):
-                gen = get_gen_info(state)
-                if gen.get("status_display", False) or gen.get("model_preloading", False):
-                    return gr.update(), None
-                html = render_idle_generation_status(state)
-                return (gr.update() if html == previous_html else gr.update(value=html, visible=True)), html
-
             def activate_status(state):
                 if state.get("validate_success",0) != 1:
                     return
                 gen = get_gen_info(state)
-                gen["status_display"] = True
+                set_generation_state(gen, status_display=True)
                 return time.time()
 
             start_quit_timer_js, cancel_quit_timer_js, trigger_zip_download_js, trigger_settings_download_js, click_brush_js = get_js()
 
-            # Every browser observes the same generation; observers must not queue behind each other.
-            status_trigger.change(refresh_status_async, inputs=[state], outputs=[gen_status], show_progress="hidden", concurrency_limit=None)
-            idle_status_view = gr.State(None)
-            gr.Timer(0.5).tick(refresh_idle_status, inputs=[state, idle_status_view], outputs=[gen_status, idle_status_view], queue=False, show_progress="hidden")
+            # Each page has an active subscription; reapply the newest idle
+            # snapshot after its final response so late completion cannot regress it.
+            status_trigger.change(refresh_status_async, inputs=[state], outputs=[gen_status], show_progress="hidden", concurrency_limit=None).then(fn=None, outputs=[gen_status], js='() => window.WanGPGenerationState.updates()[0]')
 
             if tab_id == 'generate':
                 from shared.deepy.hybrid_ui import bind_gallery_sync
@@ -17269,11 +17284,10 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                     get_model_def=lambda state_value: get_model_def(get_state_model_type(state_value)),
                     model_def=model_def,
                 )
-            pause_btn.click(pause_generation, [state], [ pause_btn, resume_btn] )
+            pause_btn.click(pause_generation, [state], show_progress="hidden", concurrency_limit=None, trigger_mode="multiple")
             resume_btn.click(resume_generation, [state], queue=False)
-            from shared.deepy.media_pause import generation_pause_controls
-            pause_view = gr.State(None)
-            gr.Timer(0.5).tick(generation_pause_controls, [state, pause_view], [pause_btn, resume_btn, pause_view], queue=False, show_progress="hidden")
+            from shared.deepy.hybrid_ui import bind_generation_state
+            bind_generation_state(tab_id, gen_status, pause_btn, resume_btn)
             abort_btn.click(abort_generation, [state, gr.State("")], [ abort_btn, queue_html], show_progress="hidden" ) #.then(refresh_gallery, inputs = [state, gen_info], outputs = [output, gen_info, queue_html] )
             abort_client_id.change(abort_generation, [state, abort_client_id], [ abort_btn, queue_html], show_progress="hidden" ) #.then(refresh_gallery, inputs = [state, gen_info], outputs = [output, gen_info, queue_html] )
             earlystop_btn.click(early_stop_generation, [state], [ earlystop_btn] )
