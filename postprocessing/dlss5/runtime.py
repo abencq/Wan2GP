@@ -5,9 +5,11 @@ import argparse
 import json
 import math
 import os
+import platform
 import re
 import struct
 import subprocess
+import sys
 import threading
 import time
 from fractions import Fraction
@@ -31,16 +33,23 @@ DEPTH_MODEL_VARIANT = "vitl"
 LEGACY_NR_WORKER = HOST_DIR / "nvngx.dll"
 DEPTH_NR_WORKER = HOST_DIR / "nr-depth-worker.exe"
 NR_WORKER = DEPTH_NR_WORKER if USE_DEPTH_GUIDE else LEGACY_NR_WORKER
+DLSSG_LINUX = sys.platform == "linux"
+NR_WSL = DLSSG_LINUX and "microsoft" in platform.release().lower()
+# WANGP_DLSSG_LINUX_DEV=1 opts in to the experimental native Linux DLSSG worker
+# (scripts/build_dlssg_worker_linux.sh, scripts/install_dlss5.sh, docs/DLSS5.md):
+# a Linux build of the MIT-licensed dlssg_worker plus the official NVIDIA DLSS SDK
+# Linux runtime. Upstream treats Linux as x2-only; with the opt-in the worker is
+# probed for the higher multipliers, exactly like the Windows path.
+DLSSG_LINUX_DEV = DLSSG_LINUX and os.environ.get("WANGP_DLSSG_LINUX_DEV", "0").strip().lower() in ("1", "true", "yes")
+DLSSG_WORKER = DLSSG_DIR / ("dlssg-worker" if DLSSG_LINUX else "dlssg-worker.exe")
 if os.name == "nt":
-    DLSSG_WORKER = DLSSG_DIR / "dlssg-worker.exe"
     DLSSG_RUNTIME = DLSSG_DIR / "nvngx_dlssg.dll"
-else:
-    # Linux: official NVIDIA DLSS SDK runtime (CUDA/Vulkan API); the worker is
-    # a Linux build of the MIT-licensed dlssg_worker (see docs/DLSS5.md). The
-    # glob picks the newest installed runtime, falling back to the version
+elif DLSSG_LINUX_DEV:
+    # The glob picks the newest installed runtime, falling back to the version
     # installed by scripts/install_dlss5.sh for a clear "missing" message.
-    DLSSG_WORKER = DLSSG_DIR / "dlssg-worker"
     DLSSG_RUNTIME = next(iter(sorted(DLSSG_DIR.glob("libnvidia-ngx-dlssg.so*"), reverse=True)), DLSSG_DIR / "libnvidia-ngx-dlssg.so.310.7.0")
+else:
+    DLSSG_RUNTIME = DLSSG_DIR / "libnvidia-ngx-dlssg.so.310.9.16"
 
 NR_FILES = (
     HOST_DIR / "dxgi.dll",
@@ -135,7 +144,7 @@ def _missing(files: tuple[Path, ...]) -> list[Path]:
 
 @lru_cache(maxsize=1)
 def dlssg_capabilities() -> dict:
-    if _missing(DLSSG_FILES):
+    if _missing(DLSSG_FILES) or (os.name != "nt" and not DLSSG_LINUX):
         return {}
     try:
         result = subprocess.run([str(DLSSG_WORKER), "--probe"], cwd=str(DLSSG_DIR), capture_output=True, text=True, timeout=15, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -147,10 +156,14 @@ def dlssg_capabilities() -> dict:
 
 @lru_cache(maxsize=1)
 def _gpu_series() -> int:
-    # nvidia-smi is available on Windows and Linux; the query is a no-op on
-    # hosts without an NVIDIA GPU (regex finds no series).
+    # nvidia-smi is available on Windows, Linux and WSL; the query is a no-op on
+    # hosts without an NVIDIA GPU (regex finds no series). Upstream tiers only
+    # Windows / WSL hosts: the experimental native Linux worker (DLSSG_LINUX_DEV)
+    # is allowed to tier its GPU through nvidia-smi as well.
+    if os.name != "nt" and not NR_WSL and not DLSSG_LINUX_DEV:
+        return 0
     try:
-        result = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True, timeout=5, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        result = subprocess.run(["/usr/lib/wsl/lib/nvidia-smi" if NR_WSL else "nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True, timeout=5, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         return 0
     series = [int(match.group(1)) for match in re.finditer(r"GeForce\s+RTX\s+(\d{2})\d{2}", result.stdout, re.IGNORECASE)]
@@ -199,6 +212,17 @@ def unavailable_reason(*, temporal: bool) -> str:
     missing = _missing(DLSSG_FILES if temporal else NR_FILES)
     if missing:
         return f"missing {missing[0].name}"
+    if temporal and DLSSG_LINUX:
+        capabilities = dlssg_capabilities()
+        if not capabilities:
+            return "Linux DLSS Frame Generation probe failed (run dlss5/dlssg/dlssg-worker --probe)"
+        return "" if capabilities["available"] else capabilities.get("reason", "NVIDIA Vulkan Frame Generation unavailable")
+    if not temporal and NR_WSL:
+        interop = Path("/proc/sys/fs/binfmt_misc/WSLInterop")
+        if not interop.is_file() or not interop.read_text().startswith("enabled\n"):
+            return "WSL Windows interoperability must be enabled for Neural Rendering"
+    elif os.name != "nt":
+        return "Windows 11 required"
     series = _gpu_series()
     minimum = 40 if temporal else 30
     if series < minimum:
