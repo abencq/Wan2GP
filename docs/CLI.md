@@ -516,8 +516,14 @@ Progress rules, since they are what decides how a console reads:
   echoed untouched, so a bar is stamped once where its line starts and its redraws -- colour
   codes included -- reach the terminal exactly as they are written.
 - A line with nothing on it is echoed unstamped -- a bare `print()`, a padded status line closing
-  on a carriage return, a line of spaces -- so an empty console line stays empty, with no stamp
-  sitting on it.
+  on a carriage return, a line of spaces, a bar's closing write of cursor codes -- so an empty console
+  line stays empty, with no stamp sitting on it. Control codes are nothing to draw: the cursor moves,
+  the colour codes, `ESC [ ? 25 h`, the `ESC ] 8 ; ;` link strings and the `Ctrl+C` byte an interrupt
+  leaves behind are consumed by the terminal and print as nothing.
+- The console always ends on a line of its own. A bar that closes on a carriage return leaves its line
+  open, and the stamp written on it used to be the last thing the app printed, with the shell prompt
+  arriving glued to it (`2026-10-22 18:51:17 | user@host:~$`). The stamped streams write one newline at
+  exit -- on a terminal only, and only under a stamp they actually wrote.
 - stdout is never stamped in MCP stdio mode: that stream carries JSON-RPC.
 - A `Traceback (most recent call last)` line is the last line the console is ever stamped on:
   the crash dump under it, and the prompt that returns after the crash, are echoed exactly as
