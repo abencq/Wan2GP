@@ -19,6 +19,16 @@ terminal, the newline written when an interrupt arrives puts the shutdown lines 
 own: the terminal echoes ``^C`` on the very line the app is about to print on, and a stamp written
 there would sit inside that echo.
 
+Invisible bytes carry no text. A bar lives on control codes -- ``\x1b[K``, ``\x1b[A``,
+``\x1b[?25h``, the ``\x1b]8;;`` link strings, the ``\x03`` an interrupt leaves behind -- the terminal
+consumes them and draws nothing, so a line built only of them is echoed unstamped. Counting them as
+text stamped a line that printed as nothing: a timestamp with no message after it.
+
+The last line is closed on the way out. A bar's closing write ends on a carriage return, not a
+newline, so the stamp written on that line stayed open and the shell prompt arrived right after it
+(``2026-10-22 18:51:17 | user@host:~$``). The stamped streams write one newline at exit -- terminals
+only, and only on a line they stamped and never saw close.
+
 A ``Traceback (most recent call last)`` line is the last line a stream is stamped on: the
 crash dump under it, and the console prompt that returns after the crash, reach the console
 exactly as they are -- a stamped backtrace is noise, and the prompt after a crash wants a
@@ -39,6 +49,7 @@ simply not installed there.
 """
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import signal
@@ -74,6 +85,7 @@ _STATE = {
     "streams": [],
     "started": 0.0,
     "interrupt_handler": None,
+    "exit_flush": False,
 }
 
 def _safe_write(stream, text):
@@ -130,15 +142,71 @@ _STAMP_CACHE = [-1, "", ""]
 
 _LINE_BLANK = " \t\r\x08\n"
 
+# Escape sequences move the terminal, they draw nothing: skip them whole, so a bar's own codes are
+# not counted as the text of a line. ``( # % lead a fixed 3-byte charset designator, ESC [ a CSI
+# ending on 0x40..0x7E, ESC ] P X ^ _ a string (OSC / DCS / SOS / PM / APC) ending on BEL or ST.
+_ESCAPE_FIXED_LEN = {"(": 3, ")": 3, "#": 3, "%": 3}
+_ESCAPE_STRINGS = ("]", "P", "X", "^", "_")
+
 _TRACEBACK_MARK = "Traceback (most recent call last)"
 
-def _carries_text(text, start, stop):
-    """True when this line has a character that prints.
+def _is_csi_final(one):
+    return 0x40 <= ord(one) <= 0x7E
 
-    Spaces, tabs, carriage returns, backspaces and the closing newline carry no text, so an empty
-    console line stays empty: no stamp goes in front of it, and a padded line echoes untouched.
+def _escape_span(text, start, stop):
+    """How many characters the escape sequence at ``start`` takes up."""
+    head = text[start + 1] if start + 1 < stop else ""
+    if head in _ESCAPE_FIXED_LEN:
+        return _ESCAPE_FIXED_LEN[head]                                 # ESC ( B, ESC ) 0, ESC # 3 ...
+    if head == "[":
+        index = start + 2                                              # CSI: parameters, then a final byte
+        while index < stop:
+            if _is_csi_final(text[index]):
+                return index + 1 - start
+            index += 1
+        return stop - start                                   # a CSI split across writes: this chunk is all of it
+    if head in _ESCAPE_STRINGS:
+        index = start + 2
+        while index < stop:
+            one = text[index]
+            if one == "\x07" or ord(one) == 0x9c:                       # BEL, or the 8-bit ST
+                return index + 1 - start
+            if one == "\x1b" and index + 1 < stop and text[index + 1] == "\\":
+                return index + 2 - start                              # ST: ESC \
+            index += 1
+        return stop - start
+    return 2                                            # a lone ESC, or a pair (ESC \, ESC 7): nothing draws
+
+def _carries_text(text, start, stop):
+    """True when this line has a character the terminal draws.
+
+    Spaces, tabs, carriage returns, backspaces and the closing newline carry no text, and neither do
+    the control codes a progress bar is made of: the cursor moves and colour codes, the erase-to-end,
+    the show/hide cursor, the OSC link strings, and the bare ``\\x03`` an interrupt leaves on a stream.
+    A line of them alone prints as nothing, so it stays unstamped.
     """
-    return any(one not in _LINE_BLANK for one in text[start:stop])
+    index = start
+    stop = min(stop, len(text))
+    while index < stop:
+        one = text[index]
+        if one in _LINE_BLANK:
+            index += 1
+            continue
+        code = ord(one)
+        if one == "\x1b":
+            index += _escape_span(text, index, stop)
+            continue
+        if code == 0x9b:                                             # the 8-bit CSI: skip to its final byte
+            index += 1
+            while index < stop and not _is_csi_final(text[index]):
+                index += 1
+            index += 1
+            continue
+        if code < 0x20 or code == 0x7f or (0x80 <= code < 0xa0):
+            index += 1                                               # C0 / DEL / C1 controls draw nothing
+            continue
+        return True                                                  # one drawn character is enough
+    return False
 
 def render_stamp(fmt=None):
     """One rendered stamp, cached per wall-clock second (bars write many lines per second)."""
@@ -181,6 +249,7 @@ class _LineStamper:
         self._console = console
         self._need_stamp = True
         self._stamps_stopped = False
+        self._stamp_open = False        # a stamp was written and its line has not closed yet
 
     def feed(self, text):
         if not text:
@@ -193,6 +262,7 @@ class _LineStamper:
                 stamp = render_stamp()
                 if stamp:
                     _safe_write(self._console, f"{stamp}{_STATE['separator_resolved']}")
+                    self._stamp_open = True
                 self._need_stamp = False
                 if text[position:stop].lstrip(" \t").startswith(_TRACEBACK_MARK):
                     self._stamps_stopped = True   # the last stamp this stream writes
@@ -201,6 +271,16 @@ class _LineStamper:
                 return
             position = index + 1
             self._need_stamp = True
+            self._stamp_open = False                    # the line closed: the stamp is on a finished line
+
+    def close_open_line(self):
+        """Close the line this stream left open under a stamp: the prompt must start on its own line."""
+        if not self._stamp_open:
+            return False
+        self._stamp_open = False
+        _safe_write(self._console, "\n")
+        _safe_flush(self._console)
+        return True
 
     def flush(self):
         _safe_flush(self._console)
@@ -231,6 +311,10 @@ class ConsoleStampStream:
     def flush(self):
         with _LOCK:
             self._stamper.flush()
+
+    def close_open_line(self):
+        with _LOCK:
+            return self._stamper.close_open_line()
 
     @property
     def encoding(self):
@@ -331,6 +415,36 @@ def _restore_streams():
         if original is not None:
             setattr(sys, name, original)
     _STATE["streams"] = []
+
+
+def close_open_lines():
+    """One newline per stamped console stream that ends its life on an open line.
+
+    A bar's closing write ends on a carriage return, so the stamp written on that line stayed open and
+    the shell prompt printed right after it. The newline goes to the real console, and only for a line
+    this stream stamped: a run that ends mid-bar, a pipe, a file: nothing is added.
+    """
+    closed = False
+    with _LOCK:
+        for stream in list(_STATE.get("streams") or []):
+            if not isinstance(stream, ConsoleStampStream):
+                continue
+            try:
+                if not bool(stream.isatty()):
+                    continue
+            except Exception:
+                continue
+            closed = bool(stream.close_open_line()) or closed
+    return closed
+
+
+def _arm_exit_flush():
+    """Register the closing newline once, when the streams are stamped (atexit runs it last)."""
+    if _STATE.get("exit_flush") or not _STATE["streams"]:
+        return False
+    _STATE["exit_flush"] = True
+    atexit.register(close_open_lines)
+    return True
 
 
 _INTERRUPT_NEWLINE = b"\n"
@@ -438,6 +552,7 @@ def install_console_stamps(argv=None, *, fmt=None, separator=None, quiet=False):
         return False
 
     _wrap_streams()
+    _arm_exit_flush()                # a stamp is never left open when the process ends
     if _STATE["streams"] and all(one.isatty() for one in _STATE["streams"]):
         _arm_interrupt_newline()       # terminals only: the interrupt gets a clean line
     if not quiet:
@@ -480,7 +595,11 @@ def configure_console_stamps(args, argv=None):
 def disable_console_stamps():
     """``--log-timestamp=off``: put the original streams back, output is byte-identical to a plain run."""
     _STATE["enabled"] = False
+    close_open_lines()                        # never hand the console over with a stamp open on it
     _restore_streams()
+    if _STATE.get("exit_flush"):
+        _STATE["exit_flush"] = False
+        atexit.unregister(close_open_lines)
     return ""
 
 
