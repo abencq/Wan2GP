@@ -61,6 +61,12 @@ def parse_wgp_args(config_filename: str, argv: Sequence[str] | None = None):
              "The pattern is rendered literally, so brackets are available by writing them: \"[%%H:%%M:%%S]\"")
     add("--log-timestamp-sep", dest="log_timestamp_sep", type=str, default=None, metavar="SEP",
         help="Separator between the stamp and the message (default: pipe). 'none' separates with a single space")
+    add("--console-guard", dest="console_guard", type=_arg_on_off, nargs="?", const=True, default=True, metavar="on|off",
+        help="Put the terminal back the way WanGP found it when the run ends: exit, Ctrl+C, SIGTERM, quit and restart. "
+             "Default: on - a healthy run never notices it, and a terminal a helper program left unusable (echo and "
+             "Ctrl+C off) is repaired at startup and restored at the end. 'off' leaves the terminal untouched. "
+             "Nothing is done when the output is a pipe or a file. WAN2GP_CONSOLE_GUARD=0 sets the default to off, "
+             "WAN2GP_CONSOLE_GUARD_LOG=1 logs the terminal settings at the start and at the end")
     add("--debug-deepy", type=str, default=None, help="Enable Deepy verbose debug logging and write it to the given folder")
     add("--deepy-sessions-dir", type=str, default="", metavar="FOLDER", help="Store persistent Deepy sessions in FOLDER (default: ./deepy_sessions)")
     add("--workspaces-dir", type=str, default="", metavar="FOLDER", help="Workspace manifests and dedicated media folders (overrides Configuration / Outputs; default: ./workspaces)")
