@@ -11,14 +11,14 @@ DLSS 5 support is optional and is not installed by the normal WanGP installer. I
 - separately obtained NVIDIA DLSS runtimes, ReShade with full add-on support, and the RenoDX DLSS 5 add-on.
 
 > [!NOTE]
-> On Linux the Windows-only pieces (ReShade, RenoDX, DLSSNR, the D3D12 worker executables) have no equivalents, so Neural Rendering runs through the WSL Windows worker described below, and Frame Generation through the native Linux worker in [Native Linux Frame Generation x2 (experimental)](#native-linux-frame-generation-x2-experimental). `scripts/install_dlss5.sh` and `scripts/install_dlss5.py` install the official NVIDIA DLSS SDK Linux runtimes used by that worker. The remaining sections describe the Windows installation.
+> On Linux the Windows-only pieces (ReShade, RenoDX, DLSSNR, the D3D12 worker executables) have no equivalents, so Neural Rendering runs through the WSL Windows worker described below, and Frame Generation through the native Linux worker in [Native Linux Frame Generation (experimental)](#native-linux-frame-generation-experimental). `scripts/install_dlss5.sh` and `scripts/install_dlss5.py` install the official NVIDIA DLSS SDK Linux runtimes used by that worker. The remaining sections describe the Windows installation.
 
 ## WSL Neural Rendering through the Windows worker
 
 WanGP running in WSL can use **DLSS 5 Neural Rendering** through the existing Windows worker. Python preprocessing runs in WSL, while the Windows worker performs Neural Rendering on the NVIDIA GPU using the Windows driver.
 
 > [!IMPORTANT]
-> **WSL users do not need the Linux DLSSG worker or its Linux NVIDIA runtime for Neural Rendering.** Use the Windows installer below. There is no Linux worker to build or install for this WSL workflow, and no NVIDIA Vulkan driver is needed inside WSL. The Linux package in the next section is for the separate experimental native Linux Frame Generation x2 feature.
+> **WSL users do not need the Linux DLSSG worker or its Linux NVIDIA runtime for Neural Rendering.** Use the Windows installer below. There is no Linux worker to build or install for this WSL workflow, and no NVIDIA Vulkan driver is needed inside WSL. The Linux package in the next section is for the separate experimental native Linux Frame Generation feature.
 
 Keep the WanGP checkout and its `dlss5` runtime folder on a Windows drive accessible from WSL, for example under `/mnt/e/`. Install the Windows runtime with `scripts\install_dlss5.bat` from Windows, as described below, then restart WanGP in WSL. Windows executable interoperability must be enabled in WSL, and the Windows NVIDIA driver and GPU must meet the normal Neural Rendering requirements. The same x1 refinement, upscaling modes, intensity, depth, and motion controls are available.
 
@@ -26,9 +26,9 @@ If the mode is disabled, check the reported missing runtime file, WSL interopera
 
 On systems with integrated graphics plus an NVIDIA GPU, open **Windows Settings > System > Display > Graphics**, add `dlss5\host\nr-depth-worker.exe`, and select **High performance** with the NVIDIA GPU. Otherwise the worker may select integrated graphics and fail NGX initialization even though CUDA sees the NVIDIA GPU. The same Windows preference applies to `dlss5\dlssg\dlssg-worker.exe` when using that Windows executable.
 
-## Native Linux Frame Generation x2 (experimental)
+## Native Linux Frame Generation (experimental)
 
-Linux has an experimental **DLSS Frame Generation x2** path for NVIDIA RTX GPUs with a compatible NVIDIA driver and Vulkan support. It doubles the video frame rate using the same `Original` or `RAFT` motion estimation choices as Windows. Higher multipliers and native Linux DLSS 5 Neural Rendering are not available; the WSL Windows-worker option above is separate.
+Linux has an experimental **DLSS Frame Generation** path for NVIDIA RTX GPUs with a compatible NVIDIA driver and Vulkan support. It increases the video frame rate using the same `Original` or `RAFT` motion estimation choices as Windows. Upstream support on Linux is **x2 only**; the native worker built by this checkout (see below) is listed as a second menu entry and unlocks the higher multipliers the capability probe reports for your GPU. Native Linux DLSS 5 Neural Rendering is not available; the WSL Windows-worker option above is separate.
 
 **This Linux package is not needed for WSL Neural Rendering; use the Windows installation above for that workflow.** This path has passed compilation, protocol failure checks, and software Vulkan transfer checks. **Actual DLSS generation and visual quality still require validation on native Linux with a supported NVIDIA GPU.** CUDA working in WSL is not sufficient: the worker must see the NVIDIA GPU through Vulkan, not a software renderer such as llvmpipe.
 
@@ -55,7 +55,7 @@ cp NVIDIA-DLSS/LICENSE.txt dlss5/dlssg/LICENSE-NVIDIA-DLSS-Linux.txt
 ./dlss5/dlssg/dlssg-worker --probe
 ```
 
-Restart WanGP after installation, then select **DLSS Frame Generation x2** in temporal postprocessing. A failed capability probe keeps the option disabled and reports the missing requirement. This package does not install Windows Neural Rendering dependencies.
+Restart WanGP after installation, then select **DLSS Frame Generation (x2)** in temporal postprocessing. A failed capability probe keeps the option disabled and reports the missing requirement. This package does not install Windows Neural Rendering dependencies.
 
 ### Build the Linux worker yourself
 
@@ -71,16 +71,25 @@ The build installs the worker, NVIDIA runtime, and license notices together. See
 
 For a transfer-only diagnostic, run `./dlss5/dlssg/dlssg-worker --self-test`. This checks Vulkan uploads and readbacks; a pass does **not** establish DLSS support or quality. On supported NVIDIA hardware, check a short clip with motion and scene cuts before processing longer videos. Frame Generation uses estimated motion and a constant depth guide, so fast motion, occlusions and fine details can produce artifacts.
 
-### Experimental: the native worker behind `WANGP_DLSSG_LINUX_DEV=1`
+### The native Linux worker with the full multiplier range
 
-Upstream support on Linux is **x2 only**. This checkout also carries the build scripts for a native
-Linux worker built from the same MIT-licensed source: `scripts/build_dlssg_worker_linux.sh` with
-`scripts/dlssg_worker_linux/`, and `scripts/install_dlss5.sh` / `scripts/install_dlss5.py` for the
-NVIDIA Linux runtimes. Set `WANGP_DLSSG_LINUX_DEV=1` in the environment you start WanGP with to opt
-in: WanGP then probes the worker (`./dlss5/dlssg/dlssg-worker --probe`) and unlocks x2-x4, with x5/x6
-on RTX 50 series, exactly like the Windows path. Without the flag the x2-only gate above stays in
-place. This path is not an upstream PR and is not validated on every driver, so treat it as a
-development feature.
+Upstream support on Linux is **x2 only**, pinned to `libnvidia-ngx-dlssg.so.310.9.16`. This checkout also carries the source and build scripts for a native Linux worker built from the same MIT-licensed source: `scripts/build_dlssg_worker_linux.sh` with `scripts/dlssg_worker_linux/`, and `scripts/install_dlss5.sh` / `scripts/install_dlss5.py` for the NVIDIA Linux runtimes. Build it with:
+
+```bash
+bash scripts/build_dlssg_worker_linux.sh
+./dlss5/dlssg-native/dlssg-worker --probe
+```
+
+The worker is installed in **`dlss5/dlssg-native/`**, next to a symlink of the newest installed NVIDIA runtime — the worker loads the runtime that sits in its own directory, so each worker keeps its own directory and `dlss5/dlssg/` stays exactly as upstream installs it. No environment variable and no restart is needed: WanGP probes every installed worker and lists them side by side in **Temporal Upsampling**, each label showing the multipliers its worker, runtime and GPU report.
+
+| Menu entry | Worker | Multipliers |
+|---|---|---|
+| `DLSS Frame Generation` | upstream `dlss5/dlssg/dlssg-worker` + pinned runtime | x2 on native Linux (x2-x4, capability-gated x5/x6 on RTX 50 series on Windows) |
+| `DLSS Frame Generation (x3-x6 supported)` | `dlss5/dlssg-native/dlssg-worker` (or a v2 worker in `dlss5/dlssg/`) + newest runtime | probe-driven: x2-x4, x5/x6 on RTX 50 series, capped by the reported `multi_frame_count_max` |
+
+The native entry is named by the multipliers it brings here. **`supported`** is the range the capability probe reported on this GPU; **`max`** is this GPU's ceiling, shown only while the worker cannot be probed at all (missing file, failed probe). **x2 is left out of the native range when a usable upstream entry already offers it** — the native Multiplier list keeps offering x2, so nothing is lost, the label just avoids claiming the same multiplier twice. An x2-only native worker is not listed when the upstream x2 entry works, and reads `(x2 supported)` when it is the only path. A blocker follows after `; disabled: `, for instance `(x2-x6 max; disabled: missing libnvidia-ngx-dlssg.so.310.7.0)`, `(x2-x6 max; disabled: Linux probe failed, run dlssg-native/dlssg-worker --probe)` or `(x2-x6 supported; disabled: Vulkan/NGX initialization failed)`; the Multiplier list then only offers probe-verified values. Task status lines and video metadata use the compact form `DLSS Frame Generation x4`.
+
+Pick the entry per generation; the two installs coexist and neither one needs a restart to become visible. When a worker is missing, its entry stays disabled and names the missing file. This path is not an upstream PR and is not validated on every driver, so treat it as an experimental feature.
 
 ## Automatic installation (Windows)
 
@@ -252,4 +261,4 @@ Because these guides are estimated from the video, results can differ from DLSS 
 
 ---
 
-> Applies to: Installation and diagnostics for optional DLSS 5 on Windows, Neural Rendering from WSL using the Windows worker, and experimental DLSS Frame Generation x2 on Linux. Available processors and generation options depend on the installed runtime and compatible NVIDIA hardware.
+> Applies to: Installation and diagnostics for optional DLSS 5 on Windows, Neural Rendering from WSL using the Windows worker, and experimental DLSS Frame Generation on Linux. Available processors and generation options depend on the installed runtime and compatible NVIDIA hardware.
