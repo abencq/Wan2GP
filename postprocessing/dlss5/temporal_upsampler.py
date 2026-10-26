@@ -64,23 +64,30 @@ class DLSSGTemporalUpsampler(api.SimpleScaleSuffixMixin):
         return not cls._reason(variant) and bool(capabilities) and bool(capabilities.get("available"))
 
     @classmethod
-    def _listed_variants(cls) -> tuple[DlssgVariant, ...]:
-        """The entries worth showing.
+    def _redundant_native(cls) -> DlssgVariant | None:
+        """The native worker a working upstream x2 entry already covers.
 
         An x2-only native worker that works is a strict subset of a working
-        upstream x2 path, so it is not listed a second time; validation and
-        saved configs keep working, only the menu drops the duplicate. A native
-        worker that cannot run is always listed, because its label is what
-        explains why.
+        upstream x2 path, so it is hidden from the menus. A native worker that
+        cannot run is never hidden, because its label is what explains why.
         """
-        variants = dlssg_variants()
         native = cls._variant_of(True)
         upstream = cls._variant_of(False)
         if native is None or upstream is None:
-            return variants
+            return None
         if cls._upstream_covers_x2() and cls._usable(native) and multipliers_for(native) == (2.0,):
-            return (upstream,)
-        return variants
+            return native
+        return None
+
+    def method_visible(self, method: str) -> bool:
+        """Hide the covered native entry from the menus only, never from the handler.
+
+        The shared contract keeps a hidden method usable and puts it back in a
+        menu when a saved selection asks for it, so the redundancy check above
+        cannot swallow a stored value, a status line or a discovery listing.
+        """
+        variant = self._variant(method)
+        return not (variant is not None and variant.native_linux and self._redundant_native() is not None)
 
     @classmethod
     def _display_range(cls, variant: DlssgVariant) -> tuple[float, float, bool]:
@@ -131,13 +138,13 @@ class DLSSGTemporalUpsampler(api.SimpleScaleSuffixMixin):
         )
         note = (
             " A label reading 'supported' is the range the probe verified on this GPU, while 'max' is this GPU's ceiling shown while the worker cannot be probed."
-            " When the upstream x2 entry is usable, this entry is listed for x3 and above because that entry already offers x2, and an x2-only native worker is not listed at all."
+            " When the upstream x2 entry is usable, this entry is labelled from x3 because that entry already offers x2, and an x2-only native worker is hidden from the menus while the upstream entry works: it stays usable, the menus restore it when a saved selection asks for it, and it reappears when it is the only path."
         )
         return f"Native Linux DLSSG worker (scripts/build_dlssg_worker_linux.sh) supporting up to {format_multiplier_range(variant, nominal=True)} on this GPU{detail}.{note} Requires the NVIDIA Vulkan driver and an RTX 40 or newer GPU; x5/x6 require an RTX 50 series GPU. Worker: {variant.label_path}."
 
     def query_temporal_upsampler_def(self):
         methods, multipliers, method_pos, method_descriptions = [], {}, {}, {}
-        for offset, variant in enumerate(self._listed_variants()):
+        for offset, variant in enumerate(dlssg_variants()):
             methods.append((self._label(variant), variant.method))
             multipliers[variant.method] = multipliers_for(variant)
             method_pos[variant.method] = 10_000 + offset
@@ -150,11 +157,11 @@ class DLSSGTemporalUpsampler(api.SimpleScaleSuffixMixin):
             "methods": methods,
             # Compact name for status lines and video metadata; the method
             # labels above are the long ones the pickers show.
-            "method_short_labels": {variant.method: DLSSG_UPSTREAM.name for variant in self._listed_variants()},
+            "method_short_labels": {variant.method: DLSSG_UPSTREAM.name for variant in dlssg_variants()},
             "multipliers": multipliers,
             "method_descriptions": method_descriptions,
             "default_temporal_upsampling": "dlssg*2",
-            "description": "NVIDIA DLSS Frame Generation using video motion estimation. Every installed worker is listed separately: the upstream worker (Windows x2-x4 plus capability-gated x5/x6 on RTX 50 series, requiring Windows 11, HAGS, and RTX 40 or newer; native Linux x2 with the NVIDIA Vulkan driver) and, on Linux, the native multi-multiplier worker shown with the range it supports here. The native range omits x2 when a usable upstream entry already offers it, and an x2-only native worker is not listed twice. The choice is made per generation with no restart and no environment variable. See docs/DLSS5.md.",
+            "description": "NVIDIA DLSS Frame Generation using video motion estimation. Every installed worker is listed separately: the upstream worker (Windows x2-x4 plus capability-gated x5/x6 on RTX 50 series, requiring Windows 11, HAGS, and RTX 40 or newer; native Linux x2 with the NVIDIA Vulkan driver) and, on Linux, the native multi-multiplier worker shown with the range it supports here. The native range omits x2 when a usable upstream entry already offers it, and an x2-only native worker is hidden from the menus while that upstream entry works, keeping its multipliers, its validation and any saved selection that uses it. The choice is made per generation with no restart and no environment variable. See docs/DLSS5.md.",
         }
 
     def validate_upsampling(self, temporal_upsampling, *, source_is_image=False):
