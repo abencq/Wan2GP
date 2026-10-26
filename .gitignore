@@ -65,7 +65,6 @@ loras_url_cache_v2.json
 
 # [NC]
 venv/
-venv.rtx30/
 ckpts
 ffmpeg_bins/
 loras
