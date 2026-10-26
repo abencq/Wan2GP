@@ -3703,6 +3703,7 @@ if not "max_reserved_loras" in server_config: server_config["max_reserved_loras"
 if not "image_output_codec" in server_config: server_config["image_output_codec"]= "jpeg_95"
 if not "audio_output_codec" in server_config: server_config["audio_output_codec"]= "aac_128"
 if not "audio_stand_alone_output_codec" in server_config: server_config["audio_stand_alone_output_codec"]= "wav"
+if not "output_filename_default" in server_config: server_config["output_filename_default"] = ""
 upsampler_api.require_upsampler_by_method("flashvsr").normalize_config()
 if "loras_root" not in server_config: server_config["loras_root"] = DEFAULT_LORA_ROOT
 if "save_queue_if_crash" not in server_config: server_config["save_queue_if_crash"] = 1
