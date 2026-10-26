@@ -1,5 +1,7 @@
+# Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .infos import wan_help
 
-import os
 import re
 import torch
 import numpy as np
@@ -11,6 +13,7 @@ from shared.utils import files_locator as fl
 from .bernini_prompt_infos import get_bernini_infos, get_bernini_prompt_infos
 from .shotplan_prompt_infos import SHOTPLAN_PROMPT_ENHANCER, SHOTPLAN_PROMPT_INFOS
 from .vace_infos import VACE_INFOS
+from .camera_control import infos as camera_infos
 from .kiwi.variant_config import get_kiwi_variant_model_def
 from .scail2 import (
     SCAIL2_ANIMATE_PREPROCESSING_POSE,
@@ -30,7 +33,10 @@ def test_vace(base_model_type):
     return base_model_type in ["vace_14B", "vace_14B_2_2", "vace_1.3B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B", "vace_ditto_14B"]     
 
 def test_class_i2v(base_model_type):
-    return base_model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk", "infinitetalk", "i2v_2_2_multitalk", "animate", "animate2", "chrono_edit", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "i2v_2_2_svi2pro" ]
+    return base_model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk", "infinitetalk", "i2v_2_2_multitalk", "animate", "animate2", "chrono_edit", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "i2v_2_2_svi2pro", "fun_camera_1.3B", "uni3c" ]
+
+def test_camera_control(base_model_type):
+    return base_model_type in ["fun_camera_1.3B", "uni3c"]
 
 def test_class_t2v(base_model_type):    
     return base_model_type in ["t2v", "t2v_2_2", "shotplan_t2v", "shotplan_t2v_2_2", "alpha", "alpha2", "lynx", "vista4d", "bernini", "bernini_1.3B"]
@@ -42,7 +48,7 @@ def test_oneframe_overlap(base_model_type):
     return test_class_i2v(base_model_type) and not (test_multitalk(base_model_type) or base_model_type in ["animate", "scail"] or test_scail2(base_model_type) or test_svi2pro(base_model_type))  or test_wan_5B(base_model_type)
 
 def test_class_1_3B(base_model_type):    
-    return base_model_type in [ "vace_1.3B", "t2v_1.3B", "recam_1.3B","phantom_1.3B","fun_inp_1.3B", "scail2_1.3B", "bernini_1.3B"]
+    return base_model_type in [ "vace_1.3B", "t2v_1.3B", "recam_1.3B","phantom_1.3B","fun_inp_1.3B", "scail2_1.3B", "bernini_1.3B", "fun_camera_1.3B"]
 
 def test_multitalk(base_model_type):
     return base_model_type in ["multitalk", "vace_multitalk_14B", "i2v_2_2_multitalk", "infinitetalk"]
@@ -75,7 +81,7 @@ class family_handler():
         return ["multitalk", "infinitetalk", "fantasy", "vace_14B", "vace_14B_2_2", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B",
                     "t2v_1.3B", "standin", "lynx_lite", "lynx", "t2v", "t2v_2_2", "vace_1.3B", "vace_ditto_14B", "phantom_1.3B", "phantom_14B",
                     "recam_1.3B", "animate", "animate2", "alpha", "alpha2", "alpha_lynx", "chrono_edit", "shotplan_t2v", "shotplan_t2v_2_2",
-                    "i2v", "i2v_2_2", "i2v_2_2_multitalk", "ti2v_2_2", "lucy_edit", "kiwi_edit", "flf2v_720p", "fun_inp_1.3B", "fun_inp", "mocha", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "vista4d", "i2v_2_2_svi2pro", "bernini", "bernini_1.3B"]
+                    "i2v", "i2v_2_2", "i2v_2_2_multitalk", "ti2v_2_2", "lucy_edit", "kiwi_edit", "flf2v_720p", "fun_inp_1.3B", "fun_inp", "mocha", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "vista4d", "i2v_2_2_svi2pro", "bernini", "bernini_1.3B", "fun_camera_1.3B", "uni3c"]
 
 
     @staticmethod
@@ -115,58 +121,24 @@ class family_handler():
         return {"wan":(0, "Wan2.1"), "wan2_2":(1, "Wan2.2") }
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-i2v",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Wan i2v Loras (default: {os.path.join(lora_root, 'wan_i2v')})"
-        )
-        parser.add_argument(
-            "--lora-dir",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Wan t2v Loras (default: {os.path.join(lora_root, 'wan')})"
-        )
-        parser.add_argument(
-            "--lora-dir-wan-1-3b",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Wan 1.3B Loras (default: {os.path.join(lora_root, 'wan_1.3B')})"
-        )
-        parser.add_argument(
-            "--lora-dir-wan-5b",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Wan 5B Loras (default: {os.path.join(lora_root, 'wan_5B')})"
-        )
-        parser.add_argument(
-            "--lora-dir-wan-i2v",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Wan i2v Loras (default: {os.path.join(lora_root, 'wan_i2v')})"
-        )
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
+    def get_lora_dir(base_model_type):
         if test_shotplan(base_model_type):
-            return os.path.join(lora_root, "wan_shotplan_2_2" if base_model_type == "shotplan_t2v_2_2" else "wan_shotplan")
+            return "wan_shotplan_2_2" if base_model_type == "shotplan_t2v_2_2" else "wan_shotplan"
         i2v = test_class_i2v(base_model_type) and not test_i2v_2_2(base_model_type)
-        wan_dir = getattr(args, "lora_dir_wan", None) or getattr(args, "lora_dir", None) or os.path.join(lora_root, "wan")
-        wan_i2v_dir = getattr(args, "lora_dir_wan_i2v", None) or getattr(args, "lora_dir_i2v", None) or os.path.join(lora_root, "wan_i2v")
-        wan_1_3b_dir = getattr(args, "lora_dir_wan_1_3b", None) or os.path.join(lora_root, "wan_1.3B")
-        wan_5b_dir = getattr(args, "lora_dir_wan_5b", None) or os.path.join(lora_root, "wan_5B")
 
         if base_model_type == "animate2":
-            return os.path.join(lora_root, "wan_animate2")
+            return "wan_animate2"
+        if base_model_type == "fun_camera_1.3B":
+            return "wan_1.3B"
         if test_scail2(base_model_type):
-            return wan_i2v_dir
+            return "wan_i2v"
         if i2v:
-            return wan_i2v_dir
+            return "wan_i2v"
         if "1.3B" in base_model_type:
-            return wan_1_3b_dir
+            return "wan_1.3B"
         if test_wan_5B(base_model_type) or base_model_type in ["ovi"]:
-            return wan_5b_dir
-        return wan_dir
+            return "wan_5B"
+        return "wan"
 
     @staticmethod
     def set_cache_parameters(cache_type, base_model_type, model_def, inputs, skip_steps_cache):
@@ -216,6 +188,8 @@ class family_handler():
     @staticmethod
     def query_model_def(base_model_type, model_def):
         extra_model_def = {}
+        extra_model_def["device_explicit"] = base_model_type in ["t2v", "t2v_1.3B", "t2v_2_2", "i2v", "i2v_2_2", "flf2v_720p", "fun_inp", "fun_inp_1.3B", "ti2v_2_2", "i2v_2_2_svi2pro", "bernini_1.3B", "kiwi_edit", "vace_14B_2_2", "bernini", "steadydancer", "scail", "scail2_14B", "wanmove",
+                                                                 "lynx", "standin", "vace_14B", "vace_ditto_14B", "vace_lynx_14B", "vace_standin_14B", "infinitetalk", "fun_camera_1.3B", "uni3c"]
         if base_model_type not in ["mocha", "recam_1.3B", "scail2_14B", "scail2_1.3B", "vista4d"]:
             extra_model_def["riflex"] = True
         override_text_encoder_urls = model_def.get("text_encoder_URLs", None)
@@ -234,8 +208,13 @@ class family_handler():
         extra_model_def["standin_class"] = standin = test_standin(base_model_type)
         extra_model_def["lynx_class"] = lynx = test_lynx(base_model_type)
         extra_model_def["alpha_class"] = alpha = test_alpha(base_model_type)
-        extra_model_def["wan_5B_class"] = wan_5B = test_wan_5B(base_model_type)        
+        if alpha:
+            extra_model_def["specialities"] = [{"name": "alpha output", "aliases": ["RGBA", "transparent video", "transparent background"], "description": "Generate foreground RGB and alpha together. Video saves a checkerboard preview plus RGBA PNG ZIP or ProRes 4444; image mode saves RGBA."}]
+        extra_model_def["wan_5B_class"] = wan_5B = test_wan_5B(base_model_type)
+        extra_model_def["tiny_vae_architecture"] = "ti2v_2_2" if wan_5B else "t2v"
         extra_model_def["vace_class"] = vace_class = test_vace(base_model_type)
+        # control videos and masks in uint8 (VACE / Animate 2: WanGP's preprocessing, SCAIL-2 / SteadyDancer: their own preprocessors)
+        extra_model_def["uint8_guides"] = vace_class or base_model_type in ["animate2", "steadydancer"] or test_scail2(base_model_type)
         extra_model_def["bernini_class"] = bernini = test_bernini(base_model_type)
         extra_model_def["shotplan"] = shotplan = test_shotplan(base_model_type)
         extra_model_def["scail2"] = scail2 = test_scail2(base_model_type)
@@ -250,8 +229,9 @@ class family_handler():
                     "label": "Animate 2 KV Cache",
                     "type": "dropdown",
                     "default": "Disabled",
-                    "choices": [("Disabled", "Disabled"), ("GPU (faster, high VRAM)", "Enabled"), ("RAM (lower VRAM)", "RAM")],
-                    "info": "Caches the driving-video branch. GPU is fastest but uses substantial VRAM; RAM transfers each layer to the GPU as needed.",
+                    "choices": [("Disabled (Slower but lower VRAM/RAM)", "Disabled"), ("Enabled (Faster, best quality but requires more VRAM/RAM)", "Enabled"),
+                                ("INT8 in VRAM (Fastest, about half the VRAM of Enabled)", "INT8"), ("INT8 in RAM (Faster, lowest VRAM)", "RAM")],
+                    "info": "Caches the driving-video branch, which is the same at every step. Enabled keeps it exactly on the GPU. INT8 caches its keys and values in about half the memory, so cached steps skip recomputing them; images differ very slightly from Enabled. INT8 in RAM keeps them in system RAM and moves each layer to the GPU as it runs, for the lowest VRAM.",
                 }],
             })
         if shotplan:
@@ -312,7 +292,9 @@ class family_handler():
             extra_model_def["parent_model_type"] = "alpha"
 
         group = "wan"
-        if bernini:
+        if test_camera_control(base_model_type):
+            profiles_dir = base_model_type
+        elif bernini:
             profiles_dir = ["wan_bernini_1.3B", "wan_1.3B"] if base_model_type == "bernini_1.3B" else ["wan_bernini", "wan_2_2"]
             group = "wan2_2"
         elif base_model_type == "animate2":
@@ -491,34 +473,9 @@ class family_handler():
                     "label": "Vista4D Camera Movement",
                     "default": "dolly_zoom",
                     "image_modes": [0],
-                    "choices": [
-                        ("Dolly Zoom", "dolly_zoom"),
-                        ("Left Front Zoom", "left_front_zoom"),
-                        ("Right Front Zoom", "right_front_zoom"),
-                        ("Close Crane Above", "close_crane_above"),
-                        ("Close Crane Below", "close_crane_below"),
-                        ("Arc Right 45 deg", "arc_right_45"),
-                        ("Arc Left 45 deg", "arc_left_45"),
-                        ("Push In", "push_in"),
-                        ("Pull Back", "pull_back"),
-                        ("Truck Right", "truck_right"),
-                        ("Truck Left", "truck_left"),
-                        ("Pedestal Up", "pedestal_up"),
-                        ("Pedestal Down", "pedestal_down"),
-                        ("Pan Right 45 deg", "pan_right_45"),
-                        ("Pan Left 45 deg", "pan_left_45"),
-                        ("Tilt Up 45 deg", "tilt_up_45"),
-                        ("Tilt Down 45 deg", "tilt_down_45"),
-                        ("Zoom In", "zoom_in"),
-                        ("Zoom Out", "zoom_out"),
-                        ("Bird View", "bird_view"),
-                        ("Crane Above Right", "crane_above_right"),
-                        ("Crane Above Left", "crane_above_left"),
-                        ("Crane Below Right", "crane_below_right"),
-                        ("Crane Below Left", "crane_below_left"),
-                    ],
+                    "choices": camera_infos.CAMERA_PRESET_CHOICES,
                 },
-                "custom_guide": {"label": "Custom Camera Movement (.npz)", "required": False, "file_types": [".npz"]},
+                "custom_guide": {"id": "custom_guide", "name": "Custom Camera Movement", "label": "Custom Camera Movement (.npz)", "type": "file", "default": None, "required": False, "file_types": [".npz"]},
                 "mask_preprocessing": {"selection": [""], "visible": False},
                 "custom_settings": [
                     {"id": "vista4d_scene_scale", "name": "Scene scale", "label": "Vista4D scene scale", "type": "float", "default": 1.0},
@@ -535,8 +492,24 @@ class family_handler():
             })
 
 
+        if test_camera_control(base_model_type):
+            fun_camera = base_model_type == "fun_camera_1.3B"
+            prefix = "FUN_CAMERA" if fun_camera else "UNI3C"
+            extra_model_def.update({key: getattr(camera_infos, f"{prefix}_{key.upper()}") for key in ("infos", "prompt_infos", "deepy_infos", "deepy_prompt_infos")})
+            extra_model_def.update({
+                "specialities": [camera_infos.CAMERA_CONTROL_SPECIALITY],
+                "fun_camera": fun_camera,
+                "uni3c": not fun_camera,
+                "model_modes": {"label": "Camera Movement", "default": "arc_left_45", "image_modes": [0], "choices": camera_infos.CAMERA_PRESET_CHOICES},
+                "custom_guide": camera_infos.CAMERA_PATH_GUIDE,
+                "custom_settings": [camera_infos.CAMERA_STRENGTH_SETTING],
+                "sliding_window": False,
+                "motion_amplitude": False,
+                "v2i_switch_supported": False,
+            })
+
         if base_model_type in ["wanmove"]:
-            extra_model_def["custom_guide"] = { "label": "Trajectory File", "required": True, "file_types": [".npy"]}
+            extra_model_def["custom_guide"] = {"id": "custom_guide", "name": "Trajectory", "label": "Trajectory File (.npy)", "type": "file", "default": None, "required": True, "file_types": [".npy"]}
             extra_model_def["i2v_trajectory"] = True
 
         if base_model_type in ["steadydancer"]:
@@ -967,6 +940,8 @@ class family_handler():
             image_prompt_types_allowed = "TVL"
         elif scail2:
             image_prompt_types_allowed = "TSV"
+        elif test_camera_control(base_model_type):
+            image_prompt_types_allowed = "TS" if base_model_type == "fun_camera_1.3B" else "S"
         elif multitalk or base_model_type in ["fantasy", "steadydancer", "scail"]:
             image_prompt_types_allowed = "SVL"
         elif svi2pro:
@@ -1002,7 +977,10 @@ class family_handler():
         #     extra_model_def["one_image_ref_needed"] = True
 
 
-        return extra_model_def
+        guidance = wan_help(base_model_type, {**extra_model_def, **model_def})
+        if base_model_type in ("vace_ditto_14B", "bernini_1.3B", "vace_standin_14B", "vace_lynx_14B", "vace_multitalk_14B"):
+            extra_model_def["infos"] = guidance["infos"]
+        return merge_help(extra_model_def, guidance)
         
 
     @staticmethod
@@ -1059,13 +1037,14 @@ class family_handler():
 
                 download_def.append(magic_mask.query_download_def())
         elif base_model_type == "vista4d":
-            download_def += [
-                {
-                    "repoId": "DeepBeepMeep/Wan2.1",
-                    "sourceFolderList": ["depth", "sam3"],
-                    "fileList": [["depth_anything_v3_vitl_bf16.safetensors"], ["sam3.1_multiplex_bf16.safetensors", "bpe_simple_vocab_16e6.txt.gz"]],
-                }
-            ]
+            from preprocessing.depth_anything_v3.assets import query_download_def as query_depth_files
+            from preprocessing.sam3.assets import query_download_def as query_sam3_files
+
+            download_def += [query_depth_files(), query_sam3_files()]
+        elif base_model_type == "uni3c":
+            from preprocessing.depth_anything_v3.assets import query_download_def as query_depth_files
+
+            download_def.append(query_depth_files(metric=True))
 
         return download_def
 
@@ -1332,6 +1311,16 @@ class family_handler():
                 ui_defaults.update({
                     "video_prompt_type": "UVI" if model_def.get("kiwi_ref_embedder", True) else "UV", 
                 })
+
+        elif test_camera_control(base_model_type):
+            fun_camera = base_model_type == "fun_camera_1.3B"
+            ui_defaults.update({
+                "video_length": 81,
+                "num_inference_steps": 50,
+                "guidance_scale": 6.0 if fun_camera else 5.0,
+                "flow_shift": 3.0 if fun_camera else 5.0,
+                "model_mode": "arc_left_45",
+            })
 
         elif test_bernini(base_model_type):
             bernini_defaults = {

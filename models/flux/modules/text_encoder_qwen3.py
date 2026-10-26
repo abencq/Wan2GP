@@ -1,3 +1,4 @@
+from shared.utils.phase_progress import text_encoding_progress
 import os
 from functools import lru_cache
 from typing import List
@@ -8,7 +9,7 @@ from accelerate import init_empty_weights
 from einops import rearrange
 from transformers import AutoConfig, AutoTokenizer, Qwen3ForCausalLM
 
-from mmgp import offload
+from mmgp import offload, runtime
 from shared.utils.gguf_mapping import has_standard_gguf_tensor_names, remap_state_dict_triplet
 
 OUTPUT_LAYERS = [9, 18, 27]
@@ -69,6 +70,10 @@ class Qwen3Embedder(nn.Module):
             defaultConfigPath=default_config,
             preprocess_sd=_build_qwen3_state_dict_preprocessor(default_config),
         )
+        # the token table stays in RAM (mmgp looks up the prompt's rows on the CPU) with the output head, which never runs: the hidden
+        # states come from the base model
+        runtime.lookup_on_cpu(self.model.model.embed_tokens)
+        runtime.unused(self.model.lm_head)
 
         tokenizer_root = side_files_root
         tokenizer_subdir = os.path.join(tokenizer_root, "tokenizer")
@@ -104,12 +109,13 @@ class Qwen3Embedder(nn.Module):
         input_ids = torch.cat(all_input_ids, dim=0).to(self.model.device)
         attention_mask = torch.cat(all_attention_masks, dim=0).to(self.model.device)
 
-        output = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            use_cache=False,
-        )
+        with text_encoding_progress(self.model.model.layers, prompt_count=len(txt)):
+            output = self.model.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+            )
 
         out = torch.stack([output.hidden_states[k] for k in OUTPUT_LAYERS], dim=1)
         return rearrange(out, "b c l d -> b l (c d)")

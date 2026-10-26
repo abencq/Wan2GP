@@ -1,3 +1,4 @@
+from shared.utils.phase_progress import text_encoding_prompts, text_encoding_progress, generation_progress
 import json
 import math
 import os
@@ -12,14 +13,14 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, Qwen2VLImageProcessorFast, Qwen2VLProcessor
 from transformers.processing_utils import ProcessorMixin
 
-from mmgp import offload
+from mmgp import offload, runtime
 from shared.utils import files_locator as fl
 from shared.utils.gguf_mapping import has_standard_gguf_tensor_names, remap_state_dict_triplet
 from shared.utils.text_encoder_cache import TextEncoderCache
 
 from models.ideogram4.qwen3_vl_configuration import Qwen3VLConfig, register_qwen3_vl_config
 from models.ideogram4.qwen3_vl_transformers import Qwen3VLModel, Qwen3VLTextModel, Qwen3VLVisionModel
-from models.qwen.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
+from models.qwen.vae_variants import load_vae
 
 from .krea2_mmdit import SingleStreamDiT, config_from_diffusers
 
@@ -42,8 +43,8 @@ def preprocess_sd(state_dict):
     return {key[prefix_len:] if key.startswith(_TRANSFORMER_STATE_DICT_PREFIX) else key: value for key, value in state_dict.items()}
 
 
-def _timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
-    ts = torch.linspace(1, 0, steps + 1)
+def _timesteps(seq_len, steps, x1, x2, device, y1=0.5, y2=1.15, sigma=1.0, mu=None):
+    ts = torch.linspace(1, 0, steps + 1, device=device)
     if mu is None:
         slope = (y2 - y1) / (x2 - x1)
         mu = slope * seq_len + (y1 - slope * x1)
@@ -142,7 +143,8 @@ class Qwen3VLConditioner(torch.nn.Module):
             inputs_embeds = inputs_embeds.masked_scatter(visual_pos_masks.unsqueeze(-1).expand_as(inputs_embeds), image_embeds.to(inputs_embeds.dtype))
             position_ids, _ = self.qwen.get_rope_index(input_ids, image_grid_thw=image_grid_thw, attention_mask=mask)
         selected_layers = [layer_idx - 1 for layer_idx in self.select_layers]
-        states = self.qwen.language_model(input_ids=None if inputs_embeds is not None else input_ids, inputs_embeds=inputs_embeds, attention_mask=mask, position_ids=position_ids, use_cache=False, visual_pos_masks=visual_pos_masks, deepstack_visual_embeds=deepstack_visual_embeds, return_mid_results_layers=selected_layers)
+        with text_encoding_progress(self.qwen.language_model.layers, prompt_count=len(text)):
+            states = self.qwen.language_model(input_ids=None if inputs_embeds is not None else input_ids, inputs_embeds=inputs_embeds, attention_mask=mask, position_ids=position_ids, use_cache=False, visual_pos_masks=visual_pos_masks, deepstack_visual_embeds=deepstack_visual_embeds, return_mid_results_layers=selected_layers)
         if states.last_hidden_state is None:
             return None, None
         mid_results = states.mid_results
@@ -179,7 +181,9 @@ class Krea2Pipeline:
         self.transformer = transformer
         self.vae = vae
         self.encoder = encoder
-        self.text_encoder_cache = TextEncoderCache()
+        # an entry keeps 12 encoder layers over the 512 padded tokens (~31 MB): the padding rows stay, as they still shape SageAttention's
+        # key quantization; the default 100 MB would hold 3 prompts
+        self.text_encoder_cache = TextEncoderCache(max_size_mb=512)
         self.dtype = dtype
         self.compression = 8
         self.channels = 16
@@ -195,8 +199,8 @@ class Krea2Pipeline:
 
     def _decode_latents_to_cpu_uint8(self, latents):
         latents = rearrange(latents, "b c h w -> b c 1 h w").to(self.vae.dtype)
-        latents_mean = torch.tensor(self.vae.config.latents_mean).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
-        latents_std = torch.tensor(self.vae.config.latents_std).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
+        latents_mean = torch.tensor(self.vae.config.latents_mean, device=latents.device).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
+        latents_std = torch.tensor(self.vae.config.latents_std, device=latents.device).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
         latents = (latents * latents_std) + latents_mean
         return self.vae.decode_to_cpu_uint8(latents)[:, :, 0]
 
@@ -223,8 +227,8 @@ class Krea2Pipeline:
             image = image.resize((width, height), resample=Image.Resampling.LANCZOS)
         tensor = convert_image_to_tensor(image).unsqueeze(0).unsqueeze(2).to(device=device, dtype=self.vae.dtype)
         latents = self.vae.encode(tensor).latent_dist.mode()
-        latents_mean = torch.tensor(self.vae.config.latents_mean).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
-        latents_std = torch.tensor(self.vae.config.latents_std).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
+        latents_mean = torch.tensor(self.vae.config.latents_mean, device=latents.device).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
+        latents_std = torch.tensor(self.vae.config.latents_std, device=latents.device).view(1, self.channels, 1, 1, 1).to(latents.device, latents.dtype)
         latents = (latents - latents_mean) / latents_std
         return latents[:, :, 0].to(device=device, dtype=dtype)
 
@@ -323,31 +327,35 @@ class Krea2Pipeline:
                     scale = 768 / max(image.size)
                     image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
                 grounding_images.append(image)
-        txt, txtmask = self._encode_prompts(prompts, device, dtype, images=grounding_images)
-        if txt is None:
-            return None
-        cfg = guidance > 0
-        true_cfg_scale = guidance + 1.0 if cfg else 1.0
-        NAG = None
-        nagtxt = nagtxtmask = None
-        context_len = txt.shape[1]
-        if float(NAG_scale) > 1.0 and not cfg:
-            nagtxt, nagtxtmask = self._encode_prompts(negative_prompts, device, dtype, images=grounding_images)
-            if nagtxt is None:
+        pending_prompts = prompts + negative_prompts if guidance > 0 or float(NAG_scale) > 1.0 else prompts
+        cache_keys = [(self.encoder.max_length, tuple(self.encoder.select_layers), p) for p in pending_prompts]
+        prompt_count = len(pending_prompts) if grounding_images is not None else sum(k not in self.text_encoder_cache._entries for k in dict.fromkeys(cache_keys))
+        with text_encoding_prompts(prompt_count):
+            txt, txtmask = self._encode_prompts(prompts, device, dtype, images=grounding_images)
+            if txt is None:
                 return None
-            context_len = max(txt.shape[1], nagtxt.shape[1])
-            txtmask = torch.cat((txtmask, txtmask.new_zeros(txtmask.shape[0], context_len - txtmask.shape[1])), dim=1)
-            nagtxtmask = torch.cat((nagtxtmask, nagtxtmask.new_zeros(nagtxtmask.shape[0], context_len - nagtxtmask.shape[1])), dim=1)
-            NAG = {"scale": float(NAG_scale), "tau": float(NAG_tau), "alpha": float(NAG_alpha), "cap_embed_len": context_len, "prefix_len": 0}
-        x, pos, mask = _prepare(noise, context_len, patch, txtmask)
-        if cfg:
-            untxt, untxtmask = self._encode_prompts(negative_prompts, device, dtype, images=grounding_images)
-            if untxt is None:
-                return None
-            _, unpos, unmask = _prepare(noise, untxt.shape[1], patch, untxtmask)
+            cfg = guidance > 0
+            true_cfg_scale = guidance + 1.0 if cfg else 1.0
+            NAG = None
+            nagtxt = nagtxtmask = None
+            context_len = txt.shape[1]
+            if float(NAG_scale) > 1.0 and not cfg:
+                nagtxt, nagtxtmask = self._encode_prompts(negative_prompts, device, dtype, images=grounding_images)
+                if nagtxt is None:
+                    return None
+                context_len = max(txt.shape[1], nagtxt.shape[1])
+                txtmask = torch.cat((txtmask, txtmask.new_zeros(txtmask.shape[0], context_len - txtmask.shape[1])), dim=1)
+                nagtxtmask = torch.cat((nagtxtmask, nagtxtmask.new_zeros(nagtxtmask.shape[0], context_len - nagtxtmask.shape[1])), dim=1)
+                NAG = {"scale": float(NAG_scale), "tau": float(NAG_tau), "alpha": float(NAG_alpha), "cap_embed_len": context_len, "prefix_len": 0}
+            x, pos, mask = _prepare(noise, context_len, patch, txtmask)
+            if cfg:
+                untxt, untxtmask = self._encode_prompts(negative_prompts, device, dtype, images=grounding_images)
+                if untxt is None:
+                    return None
+                _, unpos, unmask = _prepare(noise, untxt.shape[1], patch, untxtmask)
         x1 = (256 // align) ** 2
         x2 = (1280 // align) ** 2
-        ts = _timesteps(x.shape[1], steps, x1, x2, y1=y1, y2=y2, mu=mu)
+        ts = _timesteps(x.shape[1], steps, x1, x2, x.device, y1=y1, y2=y2, mu=mu)
         img = x
         reference_tokens = []
         if edit:
@@ -404,7 +412,7 @@ class Krea2Pipeline:
                 image_mask_rebuilt = torch.maximum(image_mask_rebuilt, outpainting_mask_rebuilt)
             randn = x.clone()
             if model_mode_int in (2, 3, 4, 5):
-                from shared.inpainting.lanpaint import LanPaint
+                from shared.lanpaint import LanPaint
 
                 lanpaint_steps = {2: 2, 3: 5, 4: 10, 5: 15}.get(model_mode_int, 5)
                 lanpaint_proc = LanPaint(NSteps=lanpaint_steps, Lambda=16.0, StepSize=0.2, Beta=1.0, Friction=15.0, IS_FLUX=False, IS_FLOW=True, overdamped_fallback=True)
@@ -533,7 +541,7 @@ class Krea2Pipeline:
             source_pixels = self._image_to_cpu_uint8(source_image, width, height).to(decoded.device, torch.float32)
             mask_pixels = image_mask_rebuilt.to(decoded.device, torch.float32)
             if lanpaint_proc is not None:
-                from shared.inpainting.lanpaint import blend_images_with_mask
+                from shared.lanpaint import blend_images_with_mask
 
                 if outpainting_mask is not None:
                     blend_pad = 4
@@ -662,7 +670,7 @@ def _build_krea2_text_encoder_preprocessor(text_config):
     return preprocess_state_dict
 
 
-def _load_text_encoder(text_encoder_filename, config_path, dtype, with_vision=False, vision_encoder_filename=None):
+def _load_text_encoder(text_encoder_filename, config_path, dtype, with_vision=False):
     register_qwen3_vl_config()
     config = Qwen3VLConfig.from_json_file(config_path)
     with init_empty_weights(include_buffers=True):
@@ -677,30 +685,17 @@ def _load_text_encoder(text_encoder_filename, config_path, dtype, with_vision=Fa
         default_dtype=dtype,
         preprocess_sd=_build_krea2_text_encoder_preprocessor(config.text_config),
     )
-    if with_vision:
-        if vision_encoder_filename is None:
-            raise ValueError("Krea2 edit requires a standalone Qwen3-VL vision encoder checkpoint.")
+    runtime.lookup_on_cpu(text_encoder.language_model.embed_tokens)  # the 0.7 GB token table stays in RAM: mmgp looks up the prompt's rows on the CPU
+    if with_vision:  # the shared checkpoint holds the vision tower beside the language model
         offload.load_model_data(
             text_encoder.visual,
-            vision_encoder_filename,
+            text_encoder_filename,
             modelPrefix="visual",
             writable_tensors=False,
             default_dtype=dtype,
         )
     text_encoder.eval().requires_grad_(False)
     return text_encoder
-
-
-def _load_vae(filename, config_path, dtype, upsampler_factor=1, preprocess_sd=None):
-    config = _load_json(config_path)
-    for key in ("_class_name", "_diffusers_version", "_name_or_path"):
-        config.pop(key, None)
-    config["upsampler_factor"] = upsampler_factor
-    with init_empty_weights(include_buffers=True):
-        vae = AutoencoderKLQwenImage(**config)
-    offload.load_model_data(vae, filename, writable_tensors=False, default_dtype=None, preprocess_sd=preprocess_sd)
-    vae.eval().requires_grad_(False)
-    return vae
 
 
 class model_factory:
@@ -730,40 +725,22 @@ class model_factory:
         text_encoder_folder = model_def["text_encoder_folder"]
         text_encoder_config_path = fl.locate_file(os.path.join(text_encoder_folder, "config.json"))
         edit = base_model_type in ("krea2_raw_edit", "krea2_turbo_edit")
-        vision_encoder_filename = None
-        if edit:
-            vision_encoder_filename = fl.locate_file(model_def["vision_encoder_filename"])
-        text_encoder = _load_text_encoder(
-            text_encoder_filename,
-            text_encoder_config_path,
-            dtype,
-            with_vision=edit,
-            vision_encoder_filename=vision_encoder_filename,
-        )
+        text_encoder = _load_text_encoder(text_encoder_filename, text_encoder_config_path, dtype, with_vision=edit)
         tokenizer_config = fl.locate_file(os.path.join(text_encoder_folder, "tokenizer_config.json"))
         fl.locate_file(os.path.join(text_encoder_folder, "tokenizer.json"))
         fl.locate_file(os.path.join(text_encoder_folder, "chat_template.jinja"))
         tokenizer_path = os.path.dirname(tokenizer_config)
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, max_length=512, trust_remote_code=True, extra_special_tokens={})
-        image_processor = Qwen2VLImageProcessorFast.from_pretrained(tokenizer_path)
+        image_processor = Qwen2VLImageProcessorFast.from_pretrained(fl.locate_file(os.path.join(text_encoder_folder, "preprocessor_config.json")))  # located per file: a same-named folder in another checkpoint root must not shadow it
         processor = Krea2Qwen3VLProcessor(image_processor, tokenizer)
-        vae_upsampler_factor = 2 if VAE_upsampling is not None else 1
-        if vae_upsampler_factor == 2:
-            from models.qwen.convert_diffusers_qwen_vae import convert_state_dict
-
-            vae_filename = "Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors"
-            preprocess_vae_sd = convert_state_dict
-        else:
-            vae_filename = "qwen_vae.safetensors"
-            preprocess_vae_sd = None
-        vae = _load_vae(fl.locate_file(vae_filename), fl.locate_file("qwen_vae_config.json"), VAE_dtype, upsampler_factor=vae_upsampler_factor, preprocess_sd=preprocess_vae_sd)
-        vae.upsampling_set = VAE_upsampling
+        vae = load_vae(model_def, VAE_upsampling)
         self.pipeline = Krea2Pipeline(transformer, vae, Qwen3VLConditioner(text_encoder, tokenizer, processor), dtype=dtype)
         self.transformer = transformer
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
         self.vae = vae
 
+    @generation_progress
     def generate(
         self,
         seed: int | None = None,
@@ -853,7 +830,7 @@ class model_factory:
         def _vae_upsampler_progress(_phase, current_step=None, total_steps=None):
             if callable(set_progress_status):
                 label = getattr(vae_upsampler, "progress_label", "VAE Spatial Upsampling")
-                set_progress_status(f"{label} in progress" if current_step is None or total_steps is None else f"{label} in progress ({int(current_step) + 1}/{int(total_steps)})")
+                set_progress_status(f"{label} in Progress" if current_step is None or total_steps is None else f"{label} in Progress ({int(current_step) + 1}/{int(total_steps)})")
 
         images = self.pipeline(
             prompts,

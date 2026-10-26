@@ -1,4 +1,6 @@
-import os
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .help import HEARTMULA_HELP
 
 import torch
 
@@ -28,11 +30,12 @@ def _get_heartmula_model_def():
             "placeholder": "piano,happy,wedding",
             "lines": 2,
         },
-        "lm_engines": ["cg"],
+        "lm_decoder": True,
         "text_prompt_enhancer_instructions": HEARTMULA_LYRIC_PROMPT,
         "prompt_enhancer_button_label": "Compose Lyrics",
         "duration_slider": {
-            "label": "Duration of the Song (in seconds)",
+            "label": "Maximum Song Duration (seconds)",
+            "name": "Maximum Song Duration",
             "min": 30,
             "max": 240,
             "increment": 0.1,
@@ -86,21 +89,12 @@ class family_handler:
         return {"music": (2195, "Music"), "tts": (2200, "TTS")}
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-heart_mula",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Heart Mula settings (default: {os.path.join(lora_root, 'heart_mula')})",
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
-        return getattr(args, "lora_heart_mula", None) or os.path.join(lora_root, "heart_mula")
+    def get_lora_dir(base_model_type):
+        return "heart_mula"
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
-        return _get_heartmula_model_def()
+        return merge_help({**_get_heartmula_model_def(), "device_explicit": True}, HEARTMULA_HELP)
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
@@ -121,7 +115,7 @@ class family_handler:
         submodel_no_list=None,
         text_encoder_filename=None,
         profile=0,
-        lm_decoder_engine="legacy",
+        lm_features=None,
         **kwargs,
     ):
         from .HeartMula.pipeline import HeartMuLaPipeline
@@ -152,10 +146,9 @@ class family_handler:
             codec_steps=model_def.get("heartmula_codec_steps", 10),
             codec_guidance_scale=model_def.get("heartmula_codec_guidance_scale", 1.25),
             codec_version=model_def.get("heartmula_codec_version", ""),
-            lm_decoder_engine=lm_decoder_engine,
+            cuda_graphs=lm_features.graphs,
+            flash_attention=lm_features.flash,
         )
-        if lm_decoder_engine=="cg":
-            pipeline.mula._budget = 0
 
         pipeline.mula.decoder[0].layers._compile_me = False
         pipeline.mula.backbone.layers._compile_me = False
@@ -170,9 +163,11 @@ class family_handler:
                 "transformer": ["transformer2"],
                 "transformer2": ["transformer"],
             },
+            # their decoding steps are MMGP graphs: the backbone may stream its layers (memory profile, VRAM preload)
+            "cudaGraphs": ["transformer", "transformer2"] if lm_features.graphs else False,
         }
 
-        if int(profile) in (2, 4, 5):
+        if int(profile) in (0, 2, 4, 5):
             pipe["budgets"] = {"transformer2": 200}
 
         return pipeline, pipe

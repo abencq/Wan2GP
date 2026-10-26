@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Alibaba, Inc. and its affiliates.
+# Modified for WanGP.
 import torch
 import numpy as np
 import argparse
@@ -56,3 +57,6 @@ class FlowVisAnnotator(FlowAnnotator):
     def forward(self, frames):
         flow_up_list, flow_up_vis_list = super().forward(frames)
         return flow_up_vis_list[:1] + flow_up_vis_list
+
+def query_download_def():
+    return {"repoId": "DeepBeepMeep/Wan2.1", "sourceFolderList": ["flow"], "fileList": [["raft-things.pth"]]}

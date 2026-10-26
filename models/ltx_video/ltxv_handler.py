@@ -1,4 +1,6 @@
-import os
+# Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .infos import LTXV_HELP
 import torch
 from shared.utils.hf import build_hf_url
 
@@ -7,7 +9,7 @@ class family_handler():
     def query_model_def(base_model_type, model_def):
         LTXV_config = model_def.get("LTXV_config", "")
         distilled= "distilled" in LTXV_config 
-        extra_model_def = {}
+        extra_model_def = {"device_explicit": distilled}
         if distilled:
             extra_model_def.update({
             "lock_inference_steps": True,
@@ -40,7 +42,7 @@ class family_handler():
         extra_model_def["dont_cat_preguide"]= True
         extra_model_def["vae_block_size"] = 32
         extra_model_def["multiple_images_as_text_prompts"] = True
-        return extra_model_def
+        return merge_help(extra_model_def, LTXV_HELP)
 
     @staticmethod
     def query_supported_types():
@@ -65,17 +67,8 @@ class family_handler():
         return {"ltxv":(30, "LTX Video")}
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-ltxv",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains LTX Videos Loras (default: {os.path.join(lora_root, 'ltxv')})"
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
-        return getattr(args, "lora_dir_ltxv", None) or os.path.join(lora_root, "ltxv")
+    def get_lora_dir(base_model_type):
+        return "ltxv"
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):

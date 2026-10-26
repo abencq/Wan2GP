@@ -1,14 +1,14 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 from typing import Any
 
 from shared.deepy.config import (
+    DEEPY_MODEL_SPEED_KEY,
+    DEEPY_MODEL_SIZE_KEY,
+    DEEPY_TYPE_KEY,
     DEEPY_AUTO_CANCEL_QUEUE_TASKS_DEFAULT,
     DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY,
-    DEEPY_DEFAULT_EDIT_IMAGE,
-    DEEPY_DEFAULT_GEN_IMAGE,
-    DEEPY_DEFAULT_GEN_SONG,
-    DEEPY_DEFAULT_GEN_VIDEO,
     DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_DEFAULT,
     DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY,
     DEEPY_SESSION_GALLERY_MEDIA_MODE_DEFAULT,
@@ -17,19 +17,12 @@ from shared.deepy.config import (
     DEEPY_SESSION_RESET_MODE_KEY,
     DEEPY_MULTI_SESSION_DEFAULT,
     DEEPY_MULTI_SESSION_KEY,
-    DEEPY_TOOL_EDIT_IMAGE_KEY,
-    DEEPY_TOOL_GEN_IMAGE_KEY,
-    DEEPY_TOOL_GEN_SONG_KEY,
-    DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY,
-    DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY,
-    DEEPY_TOOL_GEN_VIDEO_KEY,
-    DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY,
     get_deepy_config_value,
     normalize_deepy_auto_cancel_queue_tasks,
     normalize_deepy_separate_requests_with_empty_line,
     normalize_deepy_session_gallery_media_mode,
     normalize_deepy_session_reset_mode,
-    normalize_deepy_multi_session,
+    normalize_deepy_session_mode,
 )
 from shared.deepy import tool_settings as deepy_tool_settings
 
@@ -52,6 +45,68 @@ ASSISTANT_OVERRIDE_HEIGHT_KEY = "deepy_height"
 ASSISTANT_OVERRIDE_NUM_FRAMES_KEY = "deepy_num_frames"
 ASSISTANT_OVERRIDE_AUDIO_DURATION_KEY = "deepy_audio_duration"
 ASSISTANT_OVERRIDE_SEED_KEY = "deepy_seed"
+
+
+def _pairs(tools):
+    return tuple(tuple(tools[index:index + 2]) for index in range(0, len(tools), 2))
+
+
+# the template pickers, two per row in the registry order: Deepy Zero's tasks, then the tasks of agents only (shown for Deepy Prime)
+TEMPLATE_TOOL_LAYOUT = (_pairs([tool for tool in deepy_tool_settings.GENERATION_TOOL_IDS if tool in deepy_tool_settings.ZERO_GENERATION_TOOL_IDS])
+                        + _pairs(deepy_tool_settings.AGENT_TOOL_IDS))
+TEMPLATE_TOOL_UI_KEY = deepy_tool_settings.TOOL_UI_KEYS
+
+MODEL_SELECTION_FIELDS = [
+    {"key": "model_speed", "label": "Speed", "choices": [("Fast", "fast"), ("Standard", "standard"), ("No preference", "any")]},
+    {"key": "model_size", "label": "Model Size", "choices": [("Smaller", "smaller"), ("Larger", "larger"), ("No preference", "any")]},
+]
+
+
+def normalize_model_preference(value, key):
+    field = next(field for field in MODEL_SELECTION_FIELDS if field["key"] == key)
+    if value not in [choice[1] for choice in field["choices"]]:
+        raise ValueError(f"Invalid {field['label']} preference: {value}")
+    return value
+
+
+PROPERTY_MODE_CHOICES = [
+    ("Use template defaults first", True),
+    ("Use the values below", False),
+]
+GENERATION_PROPERTY_FIELDS = [
+    {"key": "width", "label": "Default Width", "minimum": ASSISTANT_OVERRIDE_DIMENSION_MIN, "maximum": ASSISTANT_OVERRIDE_DIMENSION_MAX, "step": ASSISTANT_OVERRIDE_DIMENSION_STEP},
+    {"key": "height", "label": "Default Height", "minimum": ASSISTANT_OVERRIDE_DIMENSION_MIN, "maximum": ASSISTANT_OVERRIDE_DIMENSION_MAX, "step": ASSISTANT_OVERRIDE_DIMENSION_STEP},
+    {"key": "num_frames", "label": "Default Frames", "minimum": ASSISTANT_OVERRIDE_FRAMES_MIN, "maximum": ASSISTANT_OVERRIDE_FRAMES_MAX, "step": 1},
+    {"key": "audio_duration", "label": "Default Audio (s)", "minimum": ASSISTANT_OVERRIDE_AUDIO_DURATION_MIN, "maximum": ASSISTANT_OVERRIDE_AUDIO_DURATION_MAX, "step": 1},
+    {"key": "seed", "label": "Seed (-1 for random)", "minimum": -1, "maximum": 999999999, "step": 1},
+]
+
+
+def get_simplified_settings_form(settings, *, prime=None):
+    if prime is None:
+        prime = get_deepy_config_value(DEEPY_TYPE_KEY, "zero") == "prime"
+    preferences = MODEL_SELECTION_FIELDS if prime else []
+    templates = [{"key": TEMPLATE_TOOL_UI_KEY[tool], "label": deepy_tool_settings.TOOL_DISPLAY_NAMES[tool], "choices": deepy_tool_settings.list_tool_variant_choices(tool, current_variant=settings[TEMPLATE_TOOL_UI_KEY[tool]])}
+                 for row in TEMPLATE_TOOL_LAYOUT for tool in row if prime or tool not in deepy_tool_settings.AGENT_TOOL_IDS]
+    keys = [*(field["key"] for field in preferences), "use_template_properties", *(field["key"] for field in GENERATION_PROPERTY_FIELDS), *(field["key"] for field in templates)]
+    return {"values": {key: settings[key] for key in keys}, "preferences": preferences, "property_modes": PROPERTY_MODE_CHOICES, "properties": GENERATION_PROPERTY_FIELDS, "templates": templates}
+
+
+def validate_simplified_settings(values, form):
+    if not isinstance(values, dict) or values.keys() - form["values"].keys():
+        raise ValueError("Only the displayed Deepy settings can be changed here.")
+    fields = {field["key"]: field for field in form["properties"]}
+    choices = {field["key"]: [value for label, value in field["choices"]] for field in [*form["templates"], *form["preferences"]]}
+    for key, value in values.items():
+        if key == "use_template_properties":
+            if type(value) is not bool:
+                raise ValueError("The property mode must be a boolean.")
+        elif key in fields:
+            field = fields[key]
+            if type(value) is not int or not field["minimum"] <= value <= field["maximum"] or (value - field["minimum"]) % field["step"]:
+                raise ValueError(f'{field["label"]}: expected {field["minimum"]}–{field["maximum"]}, step {field["step"]}.')
+        elif not isinstance(value, str) or value not in choices[key]:
+            raise ValueError("Select one of the displayed choices.")
 
 
 def _clamp_int(value: Any, default: int, minimum: int, maximum: int, step: int = 1) -> int:
@@ -109,19 +164,15 @@ def get_persisted_assistant_tool_ui_settings(server_config: dict[str, Any] | Non
     return normalize_assistant_tool_ui_settings(
         auto_cancel_queue_tasks=source.get(DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY, get_deepy_config_value(DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY, DEEPY_AUTO_CANCEL_QUEUE_TASKS_DEFAULT)),
         separate_requests_with_empty_line=source.get(DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY, get_deepy_config_value(DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY, DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_DEFAULT)),
+        model_speed=source.get(DEEPY_MODEL_SPEED_KEY, get_deepy_config_value(DEEPY_MODEL_SPEED_KEY, "fast")),
+        model_size=source.get(DEEPY_MODEL_SIZE_KEY, get_deepy_config_value(DEEPY_MODEL_SIZE_KEY, "smaller")),
         use_template_properties=source.get(ASSISTANT_USE_TEMPLATE_PROPERTIES_KEY, get_deepy_config_value(ASSISTANT_USE_TEMPLATE_PROPERTIES_KEY, True)),
         width=source.get(ASSISTANT_OVERRIDE_WIDTH_KEY, get_deepy_config_value(ASSISTANT_OVERRIDE_WIDTH_KEY, ASSISTANT_OVERRIDE_WIDTH_DEFAULT)),
         height=source.get(ASSISTANT_OVERRIDE_HEIGHT_KEY, get_deepy_config_value(ASSISTANT_OVERRIDE_HEIGHT_KEY, ASSISTANT_OVERRIDE_HEIGHT_DEFAULT)),
         num_frames=source.get(ASSISTANT_OVERRIDE_NUM_FRAMES_KEY, get_deepy_config_value(ASSISTANT_OVERRIDE_NUM_FRAMES_KEY, ASSISTANT_OVERRIDE_FRAMES_DEFAULT)),
         audio_duration=source.get(ASSISTANT_OVERRIDE_AUDIO_DURATION_KEY, get_deepy_config_value(ASSISTANT_OVERRIDE_AUDIO_DURATION_KEY, ASSISTANT_OVERRIDE_AUDIO_DURATION_DEFAULT)),
         seed=source.get(ASSISTANT_OVERRIDE_SEED_KEY, get_deepy_config_value(ASSISTANT_OVERRIDE_SEED_KEY, ASSISTANT_OVERRIDE_SEED_DEFAULT)),
-        video_with_speech_variant=source.get(DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY, get_deepy_config_value(DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY, deepy_tool_settings.get_default_video_with_speech_variant())),
-        image_generator_variant=source.get(DEEPY_TOOL_GEN_IMAGE_KEY, get_deepy_config_value(DEEPY_TOOL_GEN_IMAGE_KEY, DEEPY_DEFAULT_GEN_IMAGE)),
-        song_variant=source.get(DEEPY_TOOL_GEN_SONG_KEY, get_deepy_config_value(DEEPY_TOOL_GEN_SONG_KEY, DEEPY_DEFAULT_GEN_SONG)),
-        image_editor_variant=source.get(DEEPY_TOOL_EDIT_IMAGE_KEY, get_deepy_config_value(DEEPY_TOOL_EDIT_IMAGE_KEY, DEEPY_DEFAULT_EDIT_IMAGE)),
-        video_generator_variant=source.get(DEEPY_TOOL_GEN_VIDEO_KEY, get_deepy_config_value(DEEPY_TOOL_GEN_VIDEO_KEY, DEEPY_DEFAULT_GEN_VIDEO)),
-        speech_from_description_variant=source.get(DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY, get_deepy_config_value(DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY, deepy_tool_settings.get_default_speech_from_description_variant())),
-        speech_from_sample_variant=source.get(DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY, get_deepy_config_value(DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY, deepy_tool_settings.get_default_speech_from_sample_variant())),
+        **{key: source.get(deepy_tool_settings.TOOL_CONFIG_KEYS[tool], deepy_tool_settings.get_default_tool_variant(tool)) for tool, key in TEMPLATE_TOOL_UI_KEY.items()},
     )
 
 
@@ -132,19 +183,15 @@ def store_assistant_tool_ui_settings(server_config: dict[str, Any] | None, setti
     updates = {
         DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY: normalized["auto_cancel_queue_tasks"],
         DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY: normalized["separate_requests_with_empty_line"],
+        DEEPY_MODEL_SPEED_KEY: normalized["model_speed"],
+        DEEPY_MODEL_SIZE_KEY: normalized["model_size"],
         ASSISTANT_USE_TEMPLATE_PROPERTIES_KEY: normalized["use_template_properties"],
         ASSISTANT_OVERRIDE_WIDTH_KEY: normalized["width"],
         ASSISTANT_OVERRIDE_HEIGHT_KEY: normalized["height"],
         ASSISTANT_OVERRIDE_NUM_FRAMES_KEY: normalized["num_frames"],
         ASSISTANT_OVERRIDE_AUDIO_DURATION_KEY: normalized["audio_duration"],
         ASSISTANT_OVERRIDE_SEED_KEY: normalized["seed"],
-        DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY: normalized["video_with_speech_variant"],
-        DEEPY_TOOL_GEN_IMAGE_KEY: normalized["image_generator_variant"],
-        DEEPY_TOOL_GEN_SONG_KEY: normalized["song_variant"],
-        DEEPY_TOOL_EDIT_IMAGE_KEY: normalized["image_editor_variant"],
-        DEEPY_TOOL_GEN_VIDEO_KEY: normalized["video_generator_variant"],
-        DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY: normalized["speech_from_description_variant"],
-        DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY: normalized["speech_from_sample_variant"],
+        **{deepy_tool_settings.TOOL_CONFIG_KEYS[tool]: normalized[key] for tool, key in TEMPLATE_TOOL_UI_KEY.items()},
     }
     server_config.update(updates)
     return True
@@ -153,7 +200,7 @@ def store_assistant_tool_ui_settings(server_config: dict[str, Any] | None, setti
 def get_persisted_assistant_session_ui_settings(server_config: dict[str, Any] | None = None) -> dict[str, Any]:
     source = server_config if isinstance(server_config, dict) else {}
     return {
-        "multi_session": normalize_deepy_multi_session(source.get(DEEPY_MULTI_SESSION_KEY, get_deepy_config_value(DEEPY_MULTI_SESSION_KEY, DEEPY_MULTI_SESSION_DEFAULT))),
+        "multi_session": normalize_deepy_session_mode(source.get(DEEPY_MULTI_SESSION_KEY, get_deepy_config_value(DEEPY_MULTI_SESSION_KEY, DEEPY_MULTI_SESSION_DEFAULT))),
         "reset_mode": normalize_deepy_session_reset_mode(source.get(DEEPY_SESSION_RESET_MODE_KEY, get_deepy_config_value(DEEPY_SESSION_RESET_MODE_KEY, DEEPY_SESSION_RESET_MODE_DEFAULT))),
         "gallery_media_mode": normalize_deepy_session_gallery_media_mode(source.get(DEEPY_SESSION_GALLERY_MEDIA_MODE_KEY, get_deepy_config_value(DEEPY_SESSION_GALLERY_MEDIA_MODE_KEY, DEEPY_SESSION_GALLERY_MEDIA_MODE_DEFAULT))),
     }
@@ -163,51 +210,24 @@ def store_assistant_session_ui_settings(server_config: dict[str, Any] | None, *,
     if not isinstance(server_config, dict):
         return False
     server_config.update({
-        DEEPY_MULTI_SESSION_KEY: normalize_deepy_multi_session(multi_session),
+        DEEPY_MULTI_SESSION_KEY: normalize_deepy_session_mode(multi_session),
         DEEPY_SESSION_RESET_MODE_KEY: normalize_deepy_session_reset_mode(reset_mode),
         DEEPY_SESSION_GALLERY_MEDIA_MODE_KEY: normalize_deepy_session_gallery_media_mode(gallery_media_mode),
     })
     return True
 
 
-def get_template_selector_state() -> dict[str, Any]:
+def get_template_selector_state() -> dict[str, dict[str, Any]]:
+    """{task: {"choices", "selected"}} of the template pickers, from the persisted settings."""
     persisted = get_persisted_assistant_tool_ui_settings()
-    return {
-        "image_generator_choices": deepy_tool_settings.list_tool_variant_choices("gen_image", current_variant=persisted["image_generator_variant"]),
-        "selected_image_generator": persisted["image_generator_variant"],
-        "song_choices": deepy_tool_settings.list_tool_variant_choices("gen_song", current_variant=persisted["song_variant"]),
-        "selected_song": persisted["song_variant"],
-        "image_editor_choices": deepy_tool_settings.list_tool_variant_choices("edit_image", current_variant=persisted["image_editor_variant"]),
-        "selected_image_editor": persisted["image_editor_variant"],
-        "video_generator_choices": deepy_tool_settings.list_tool_variant_choices("gen_video", current_variant=persisted["video_generator_variant"]),
-        "selected_video_generator": persisted["video_generator_variant"],
-        "video_with_speech_choices": deepy_tool_settings.list_tool_variant_choices("gen_video_with_speech", current_variant=persisted["video_with_speech_variant"]),
-        "selected_video_with_speech": persisted["video_with_speech_variant"],
-        "speech_from_description_choices": deepy_tool_settings.list_tool_variant_choices("gen_speech_from_description", current_variant=persisted["speech_from_description_variant"]),
-        "selected_speech_from_description": persisted["speech_from_description_variant"],
-        "speech_from_sample_choices": deepy_tool_settings.list_tool_variant_choices("gen_speech_from_sample", current_variant=persisted["speech_from_sample_variant"]),
-        "selected_speech_from_sample": persisted["speech_from_sample_variant"],
-    }
+    return {tool: {"choices": deepy_tool_settings.list_tool_variant_choices(tool, current_variant=persisted[key]), "selected": persisted[key]} for tool, key in TEMPLATE_TOOL_UI_KEY.items()}
 
 
-def refresh_template_selector_state(current_image_generator: Any, current_image_editor: Any, current_video_generator: Any, current_video_with_speech: Any, current_song: Any, current_speech_from_description: Any, current_speech_from_sample: Any) -> dict[str, Any]:
+def refresh_template_selector_state(tool_values: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """{task: {"choices", "selected"}} of the template pickers after the presets were reloaded, for the {task: template} shown."""
     deepy_tool_settings.refresh_tool_presets()
-    return {
-        "image_generator_choices": deepy_tool_settings.list_tool_variant_choices("gen_image", current_variant=current_image_generator),
-        "selected_image_generator": deepy_tool_settings.find_tool_variant("gen_image", current_image_generator),
-        "song_choices": deepy_tool_settings.list_tool_variant_choices("gen_song", current_variant=current_song),
-        "selected_song": deepy_tool_settings.find_tool_variant("gen_song", current_song),
-        "image_editor_choices": deepy_tool_settings.list_tool_variant_choices("edit_image", current_variant=current_image_editor),
-        "selected_image_editor": deepy_tool_settings.find_tool_variant("edit_image", current_image_editor),
-        "video_generator_choices": deepy_tool_settings.list_tool_variant_choices("gen_video", current_variant=current_video_generator),
-        "selected_video_generator": deepy_tool_settings.find_tool_variant("gen_video", current_video_generator),
-        "video_with_speech_choices": deepy_tool_settings.list_tool_variant_choices("gen_video_with_speech", current_variant=current_video_with_speech),
-        "selected_video_with_speech": deepy_tool_settings.find_tool_variant("gen_video_with_speech", current_video_with_speech),
-        "speech_from_description_choices": deepy_tool_settings.list_tool_variant_choices("gen_speech_from_description", current_variant=current_speech_from_description),
-        "selected_speech_from_description": deepy_tool_settings.find_tool_variant("gen_speech_from_description", current_speech_from_description),
-        "speech_from_sample_choices": deepy_tool_settings.list_tool_variant_choices("gen_speech_from_sample", current_variant=current_speech_from_sample),
-        "selected_speech_from_sample": deepy_tool_settings.find_tool_variant("gen_speech_from_sample", current_speech_from_sample),
-    }
+    return {tool: {"choices": deepy_tool_settings.list_tool_variant_choices(tool, current_variant=tool_values.get(tool)), "selected": deepy_tool_settings.find_tool_variant(tool, tool_values.get(tool))}
+            for tool in TEMPLATE_TOOL_UI_KEY}
 
 
 def normalize_assistant_tool_ui_settings(
@@ -216,39 +236,43 @@ def normalize_assistant_tool_ui_settings(
     separate_requests_with_empty_line: Any = None,
     use_template_properties: Any = None,
     priority: Any = None,
+    model_speed: Any = None,
+    model_size: Any = None,
     width: Any = None,
     height: Any = None,
     num_frames: Any = None,
     audio_duration: Any = None,
     seed: Any = None,
-    video_with_speech_variant: Any = None,
-    image_generator_variant: Any = None,
-    song_variant: Any = None,
-    image_editor_variant: Any = None,
-    video_generator_variant: Any = None,
-    speech_from_description_variant: Any = None,
-    speech_from_sample_variant: Any = None,
+    **variants: Any,
 ) -> dict[str, Any]:
+    """The Deepy tool settings, each template given as its task's ui_key (TEMPLATE_TOOL_UI_KEY); omitted values come from the config."""
+    unknown = variants.keys() - set(TEMPLATE_TOOL_UI_KEY.values())
+    if unknown:
+        raise TypeError(f"Unknown Deepy tool settings: {', '.join(sorted(unknown))}")
     return {
         "auto_cancel_queue_tasks": normalize_deepy_auto_cancel_queue_tasks(get_deepy_config_value(DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY, DEEPY_AUTO_CANCEL_QUEUE_TASKS_DEFAULT) if auto_cancel_queue_tasks is None else auto_cancel_queue_tasks),
         "separate_requests_with_empty_line": normalize_assistant_separate_requests_with_empty_line(get_deepy_config_value(DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY, DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_DEFAULT) if separate_requests_with_empty_line is None else separate_requests_with_empty_line),
+        "model_speed": normalize_model_preference(get_deepy_config_value(DEEPY_MODEL_SPEED_KEY, "fast") if model_speed is None else model_speed, "model_speed"),
+        "model_size": normalize_model_preference(get_deepy_config_value(DEEPY_MODEL_SIZE_KEY, "smaller") if model_size is None else model_size, "model_size"),
         "use_template_properties": normalize_assistant_use_template_properties(get_deepy_config_value(ASSISTANT_USE_TEMPLATE_PROPERTIES_KEY, True) if use_template_properties is None else use_template_properties),
         "width": normalize_assistant_override_width(get_deepy_config_value(ASSISTANT_OVERRIDE_WIDTH_KEY, ASSISTANT_OVERRIDE_WIDTH_DEFAULT) if width is None else width),
         "height": normalize_assistant_override_height(get_deepy_config_value(ASSISTANT_OVERRIDE_HEIGHT_KEY, ASSISTANT_OVERRIDE_HEIGHT_DEFAULT) if height is None else height),
         "num_frames": normalize_assistant_override_num_frames(get_deepy_config_value(ASSISTANT_OVERRIDE_NUM_FRAMES_KEY, ASSISTANT_OVERRIDE_FRAMES_DEFAULT) if num_frames is None else num_frames),
         "audio_duration": normalize_assistant_override_audio_duration(get_deepy_config_value(ASSISTANT_OVERRIDE_AUDIO_DURATION_KEY, ASSISTANT_OVERRIDE_AUDIO_DURATION_DEFAULT) if audio_duration is None else audio_duration),
         "seed": normalize_assistant_override_seed(get_deepy_config_value(ASSISTANT_OVERRIDE_SEED_KEY, ASSISTANT_OVERRIDE_SEED_DEFAULT) if seed is None else seed),
-        "video_with_speech_variant": deepy_tool_settings.resolve_tool_variant("gen_video_with_speech", get_deepy_config_value(DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY, deepy_tool_settings.get_default_video_with_speech_variant()) if video_with_speech_variant is None else video_with_speech_variant, default_variant=deepy_tool_settings.get_default_video_with_speech_variant()),
-        "image_generator_variant": deepy_tool_settings.resolve_tool_variant("gen_image", get_deepy_config_value(DEEPY_TOOL_GEN_IMAGE_KEY, DEEPY_DEFAULT_GEN_IMAGE) if image_generator_variant is None else image_generator_variant, default_variant=DEEPY_DEFAULT_GEN_IMAGE),
-        "song_variant": deepy_tool_settings.resolve_tool_variant("gen_song", get_deepy_config_value(DEEPY_TOOL_GEN_SONG_KEY, DEEPY_DEFAULT_GEN_SONG) if song_variant is None else song_variant, default_variant=DEEPY_DEFAULT_GEN_SONG),
-        "image_editor_variant": deepy_tool_settings.resolve_tool_variant("edit_image", get_deepy_config_value(DEEPY_TOOL_EDIT_IMAGE_KEY, DEEPY_DEFAULT_EDIT_IMAGE) if image_editor_variant is None else image_editor_variant, default_variant=DEEPY_DEFAULT_EDIT_IMAGE),
-        "video_generator_variant": deepy_tool_settings.resolve_tool_variant("gen_video", get_deepy_config_value(DEEPY_TOOL_GEN_VIDEO_KEY, DEEPY_DEFAULT_GEN_VIDEO) if video_generator_variant is None else video_generator_variant, default_variant=DEEPY_DEFAULT_GEN_VIDEO),
-        "speech_from_description_variant": deepy_tool_settings.resolve_tool_variant("gen_speech_from_description", get_deepy_config_value(DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY, deepy_tool_settings.get_default_speech_from_description_variant()) if speech_from_description_variant is None else speech_from_description_variant, default_variant=deepy_tool_settings.get_default_speech_from_description_variant()),
-        "speech_from_sample_variant": deepy_tool_settings.resolve_tool_variant("gen_speech_from_sample", get_deepy_config_value(DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY, deepy_tool_settings.get_default_speech_from_sample_variant()) if speech_from_sample_variant is None else speech_from_sample_variant, default_variant=deepy_tool_settings.get_default_speech_from_sample_variant()),
+        **{key: deepy_tool_settings.get_default_tool_variant(tool) if variants.get(key) is None
+           else deepy_tool_settings.resolve_tool_variant(tool, variants[key], default_variant=deepy_tool_settings.get_default_tool_variant(tool))
+           for tool, key in TEMPLATE_TOOL_UI_KEY.items()},
     }
 
 
 __all__ = [
+    "GENERATION_PROPERTY_FIELDS",
+    "PROPERTY_MODE_CHOICES",
+    "TEMPLATE_TOOL_LAYOUT",
+    "TEMPLATE_TOOL_UI_KEY",
+    "get_simplified_settings_form",
+    "validate_simplified_settings",
     "ASSISTANT_OVERRIDE_DIMENSION_MAX",
     "ASSISTANT_OVERRIDE_DIMENSION_MIN",
     "ASSISTANT_OVERRIDE_DIMENSION_STEP",

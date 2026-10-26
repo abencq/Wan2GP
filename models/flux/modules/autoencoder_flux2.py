@@ -1,7 +1,11 @@
+from shared.utils.phase_progress import vae_decoding_progress, set_phase_status
 import math
 from dataclasses import dataclass, field
 
 import torch
+from shared.kernels import vae_ops
+from shared.utils.conv_bands import band_convs, conv_bands
+from .autoencoder import norm_swish
 from einops import rearrange
 from torch import Tensor, nn
 
@@ -15,10 +19,6 @@ class AutoEncoderParamsFlux2:
     ch_mult: list[int] = field(default_factory=lambda: [1, 2, 4, 4])
     num_res_blocks: int = 2
     z_channels: int = 32
-
-
-def swish(x: Tensor) -> Tensor:
-    return x * torch.sigmoid(x)
 
 
 class AttnBlock(nn.Module):
@@ -43,7 +43,7 @@ class AttnBlock(nn.Module):
         q = rearrange(q, "b c h w -> b 1 (h w) c").contiguous()
         k = rearrange(k, "b c h w -> b 1 (h w) c").contiguous()
         v = rearrange(v, "b c h w -> b 1 (h w) c").contiguous()
-        h_ = nn.functional.scaled_dot_product_attention(q, k, v)
+        h_ = vae_ops.attention(q, k, v)  # by chunks of queries where SDPA has no memory-efficient kernel (BF16 on Turing)
 
         return rearrange(h_, "b 1 (h w) c -> b c h w", h=h, w=w, c=c, b=b)
 
@@ -65,19 +65,15 @@ class ResnetBlock(nn.Module):
         if self.in_channels != self.out_channels:
             self.nin_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x):
-        h = x
-        h = self.norm1(h)
-        h = swish(h)
-        h = self.conv1(h)
-
-        h = self.norm2(h)
-        h = swish(h)
-        h = self.conv2(h)
-
+    def forward(self, x_list):
+        """x_list: [input], emptied so that the input can be released once read (its shortcut projection is taken first)."""
+        x = x_list.pop()
+        h = norm_swish(self.norm1, x)
         if self.in_channels != self.out_channels:
             x = self.nin_shortcut(x)
-
+        h = self.conv1(h)
+        h = norm_swish(self.norm2, h)
+        h = self.conv2(h)
         return x + h
 
 
@@ -100,9 +96,7 @@ class Upsample(nn.Module):
         self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x: Tensor):
-        x = nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
-        x = self.conv(x)
-        return x
+        return conv_bands(x, self.conv, upsample=True)  # by bands of rows: no full-size upsampled input
 
 
 class Encoder(nn.Module):
@@ -157,25 +151,23 @@ class Encoder(nn.Module):
         self.conv_out = nn.Conv2d(block_in, 2 * z_channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x: Tensor) -> Tensor:
-        # downsampling
-        hs = [self.conv_in(x)]
+        # downsampling (only the current activation is kept: each block releases its input once read)
+        h = self.conv_in(x)
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1])
+                block_input, h = [h], None
+                h = self.down[i_level].block[i_block](block_input)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
-                hs.append(h)
             if i_level != self.num_resolutions - 1:
-                hs.append(self.down[i_level].downsample(hs[-1]))
+                h = self.down[i_level].downsample(h)
 
         # middle
-        h = hs[-1]
-        h = self.mid.block_1(h)
+        h = self.mid.block_1([h])
         h = self.mid.attn_1(h)
-        h = self.mid.block_2(h)
+        h = self.mid.block_2([h])
         # end
-        h = self.norm_out(h)
-        h = swish(h)
+        h = norm_swish(self.norm_out, h)
         h = self.conv_out(h)
         h = self.quant_conv(h)
         return h
@@ -246,24 +238,24 @@ class Decoder(nn.Module):
         h = self.conv_in(z)
 
         # middle
-        h = self.mid.block_1(h)
+        h = self.mid.block_1([h])
         h = self.mid.attn_1(h)
-        h = self.mid.block_2(h)
+        h = self.mid.block_2([h])
 
         # cast to proper dtype
         h = h.to(upscale_dtype)
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
-                h = self.up[i_level].block[i_block](h)
+                block_input, h = [h], None  # handoff: the block releases its input once read
+                h = self.up[i_level].block[i_block](block_input)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
         # end
-        h = self.norm_out(h)
-        h = swish(h)
+        h = norm_swish(self.norm_out, h)
         h = self.conv_out(h)
         return h
 
@@ -300,6 +292,7 @@ class AutoencoderKLFlux2(nn.Module):
             affine=False,
             track_running_stats=True,
         )
+        band_convs(self)  # large 3x3 convolutions by bands of rows: no full-image cuDNN workspace
 
     def normalize(self, z):
         self.bn.eval()
@@ -312,6 +305,7 @@ class AutoencoderKLFlux2(nn.Module):
         return z * s.to(z) + m.to(z)
 
     def encode(self, x: Tensor) -> Tensor:
+        set_phase_status("VAE Encoding")
         moments = self.encoder(x)
         mean = torch.chunk(moments, 2, dim=1)[0]
 
@@ -336,5 +330,6 @@ class AutoencoderKLFlux2(nn.Module):
             
     def decode(self, z: Tensor) -> Tensor:
 
-        dec = self.decoder(z)
-        return dec
+        with vae_decoding_progress(1, self.decoder):
+            dec = self.decoder(z)
+            return dec

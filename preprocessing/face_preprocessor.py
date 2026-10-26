@@ -1,3 +1,6 @@
+# Adapted from Stand-In (https://github.com/WeChatCV/Stand-In, preprocessor/image_input_preprocessor.py), Copyright (c) the Stand-In authors,
+# Apache License 2.0 (see docs/third_party_licenses/Apache-2.0.txt). Modified for WanGP.
+# Modifications Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 import os
 import cv2
 import requests
@@ -54,6 +57,10 @@ def _pad_to_square(img: np.ndarray, pad_color: int = 255) -> np.ndarray:
 
 class FaceProcessor:
     def __init__(self):
+        from models.hyvideo.data_kits.assets import query_download_def
+        from shared.utils.download import process_files_def_if_needed
+
+        process_files_def_if_needed(query_download_def())
         self.align_instance = AlignImage("cuda", det_path= fl.locate_file("det_align/detface.pt"))
         self.align_instance.facedet.model.to("cpu")
 

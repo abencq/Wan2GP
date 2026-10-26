@@ -1,5 +1,7 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
+import glob
 import hashlib
 import mimetypes
 import os
@@ -16,6 +18,7 @@ from typing import Any
 import ffmpeg
 from PIL import Image
 
+from shared.deepy.image_channels import image_color_details
 from shared.deepy.media_registry import detect_media_type
 from shared.utils.video_decode import resolve_media_binary
 
@@ -129,9 +132,10 @@ class FileAccessPolicy:
         else:
             return None
         alias, separator, remainder = reference.partition("/")
+        alias = re.sub(r"^workspace(\d*)$", r"documents\1", alias, flags=re.IGNORECASE)  # the documents root was named @workspace before
         root = next((path for name, path in self.mounts if name.casefold() == alias.casefold()), None)
         if root is None:
-            raise ValueError(f"Unknown virtual filesystem root: {alias or '(empty)'}. Call wangp_io list without a path to list roots.")
+            raise ValueError(f"Unknown virtual filesystem root: {alias or '(empty)'}. List authorized roots without a path first.")
         parts = [part for part in remainder.split("/") if part] if separator else []
         return root.joinpath(*parts).resolve()
 
@@ -145,7 +149,7 @@ class FileAccessPolicy:
         target = Path(text).expanduser()
         absolute = target.is_absolute() or re.match(r"^[A-Za-z]:[\\/]", text) is not None or text.startswith(("\\\\", "/"))
         if absolute and self.virtualized and not isinstance(path, Path):
-            raise PermissionError("Absolute filesystem paths require Read Everywhere; use a virtual root returned by wangp_io list.")
+            raise PermissionError("Absolute filesystem paths require Read Everywhere; use a virtual root returned by the directory listing tool.")
         return (target if absolute else self.output_roots[0] / target).resolve()
 
     def virtualize_path(self, path: Any) -> str:
@@ -181,10 +185,11 @@ class FileAccessPolicy:
             path_key = key in _PATH_KEYS or key.endswith(("_path", "_paths")) or key.endswith(("_file", "_files", "_folder", "_folders", "_directory", "_directories")) and (absolute or virtual)
             if path_key or key in {"source", "sources"} and (absolute or virtual):
                 try:
-                    return self.virtualize_path(_resolved_path(text) if absolute else self.resolve_path(text))
+                    target = self.resolve_path(text) if virtual and not absolute else _resolved_path(text)
+                    return self.virtualize_path(target) if any(_inside(target, root) for _alias, root in self.mounts) else None
                 except (OSError, PermissionError, ValueError):
                     if absolute:
-                        return Path(text).name or "file"
+                        return None
             return self._virtualize_text(text)
         return value
 
@@ -211,7 +216,10 @@ class FileAccessPolicy:
         if not self.can_read(target):
             raise PermissionError(f"Filesystem read is not authorized for: {self.virtualize_path(target)}")
         if file and not target.is_file():
-            raise FileNotFoundError(f"Path is not an existing file: {self.virtualize_path(target)}")
+            named = sorted(target.parent.glob(f"{glob.escape(target.name)}.*")) if not target.suffix and target.parent.is_dir() else []
+            if not named and isinstance(path, str) and not path.startswith("@") and not Path(path).is_absolute():  # a relative path meant for another folder, e.g. a Python sandbox file ('scratch/a.png')
+                named = [candidate for root in self.read_roots for candidate in (root / path, root / "sandbox" / path) if candidate.is_file()]
+            raise FileNotFoundError(f"Path is not an existing file: {self.virtualize_path(target)}" + (f" (did you mean {', '.join(self.virtualize_path(item) for item in named[:3])}?)" if named else ""))
         if directory and not target.is_dir():
             raise FileNotFoundError(f"Path is not an existing directory: {self.virtualize_path(target)}")
         if not file and not directory and not target.exists():
@@ -222,6 +230,15 @@ class FileAccessPolicy:
         target = self.resolve_path(path)
         if not self.can_write(target):
             raise PermissionError(f"Filesystem write is not authorized for: {self.virtualize_path(target)}")
+        return target
+
+    def create_only(self, path: Any) -> bool:
+        return False
+
+    def require_mutation(self, path: Any) -> Path:
+        target = self.require_write(path)
+        if target in self.write_roots:
+            raise PermissionError(f"A filesystem root cannot be moved or deleted: {self.virtualize_path(target)}")
         return target
 
     def roots(self) -> list[dict[str, Any]]:
@@ -260,8 +277,8 @@ def build_file_access_policy(server_config: dict[str, Any] | None, *, unrestrict
     config = dict(server_config or {})
     mode = DEEPY_FILE_SYSTEM_ACCESS_READ if unrestricted_read else normalize_deepy_file_system_access(config.get(DEEPY_ALLOW_READ_FILE_SYSTEM_KEY, False))
     video_output = config.get("save_path", "outputs") or "outputs"
-    output_roots = _unique_paths([video_output, config.get("image_save_path", video_output) or video_output, config.get("audio_save_path", video_output) or video_output])
-    configured_roots = [(path, alias) for path, alias in parse_deepy_file_system_paths(config.get(DEEPY_FILE_SYSTEM_PATHS_KEY, DEEPY_FILE_SYSTEM_PATHS_DEFAULT))]
+    output_roots = _unique_paths([video_output, config.get("image_save_path", video_output) or video_output, config.get("audio_save_path", video_output) or video_output, config.get("mesh_save_path", video_output) or video_output])
+    configured_roots = parse_deepy_file_system_paths(config.get(DEEPY_FILE_SYSTEM_PATHS_KEY, DEEPY_FILE_SYSTEM_PATHS_DEFAULT)) if mode != DEEPY_FILE_SYSTEM_ACCESS_DISABLED else []
     seen_paths = {os.path.normcase(str(path)) for path in output_roots}
     selected = []
     for value, alias in configured_roots:
@@ -282,26 +299,6 @@ def build_file_access_policy(server_config: dict[str, Any] | None, *, unrestrict
     return FileAccessPolicy(mode=mode, output_roots=output_roots, selected_roots=selected_roots, read_everywhere=read_everywhere, root_aliases=tuple([*output_aliases, *selected_aliases]))
 
 
-def _extension_filter(value: Any) -> set[str]:
-    if value is None:
-        return set()
-    values = re.split(r"[,;\s]+", value) if isinstance(value, str) else value
-    return {f".{str(item).strip().lower().lstrip('.')}" for item in values if str(item).strip()}
-
-
-def list_files(path: str, extensions: Any = None, policy: FileAccessPolicy | None = None) -> dict[str, Any]:
-    directory = policy.require_read(path, directory=True) if policy is not None else _resolved_path(path)
-    if not directory.is_dir():
-        return {"status": "error", "path": str(directory), "files": [], "count": 0, "error": "Path is not an existing directory."}
-    allowed = _extension_filter(extensions)
-    files = [
-        {"filename": item.name, "extension": item.suffix.lower(), "size_bytes": item.stat().st_size, "path": str(item.resolve())}
-        for item in sorted(directory.iterdir(), key=lambda entry: entry.name.casefold())
-        if item.is_file() and (not allowed or item.suffix.lower() in allowed) and (policy is None or policy.can_read(item))
-    ]
-    return {"status": "done", "path": str(directory), "extensions": sorted(allowed), "files": files, "count": len(files), "error": ""}
-
-
 def list_entries(policy: FileAccessPolicy, path: str = "", pattern: str = "*", recursive: bool = False, limit: int = 200, offset: int = 0, media_type: str = "all") -> dict[str, Any]:
     if not str(path or "").strip():
         roots = policy.roots()
@@ -311,8 +308,8 @@ def list_entries(policy: FileAccessPolicy, path: str = "", pattern: str = "*", r
     limit = max(1, min(int(limit), 1000))
     offset = max(0, int(offset))
     media_type = str(media_type or "all").strip().lower()
-    if media_type not in {"all", "image", "video", "audio", "txt", "other"}:
-        raise ValueError("media_type must be all, image, video, audio, txt, or other")
+    if media_type not in {"all", "image", "video", "audio", "3d", "world", "txt", "other"}:
+        raise ValueError("media_type must be all, image, video, audio, 3d, world, txt, or other")
     candidates = directory.rglob(pattern) if recursive else iter(sorted(directory.glob(pattern), key=lambda entry: str(entry).casefold()))
     entries = []
     for item in candidates:
@@ -363,6 +360,21 @@ def _rate(value: Any) -> float | None:
     return _float(text)
 
 
+def _stream_summary(stream: dict[str, Any]) -> dict[str, Any]:
+    tags = stream.get("tags", {})
+    title = tags.get("title") or tags.get("handler_name", "")  # MP4 keeps track names as handler_name
+    summary = {"type": stream["codec_type"], "codec": stream.get("codec_name")}
+    if stream["codec_type"] == "audio":
+        summary.update(sample_rate=_integer(stream.get("sample_rate")), channels=_integer(stream.get("channels")), layout=stream.get("channel_layout"))
+    if tags.get("language", "und") != "und":
+        summary["language"] = tags["language"]
+    if title and not re.fullmatch(r"\w*Handler", title):  # FFmpeg's VideoHandler / SoundHandler defaults name nothing
+        summary["title"] = title
+    if stream["codec_type"] == "subtitle" and stream.get("disposition", {}).get("default"):
+        summary["default"] = True
+    return {key: value for key, value in summary.items() if value is not None}
+
+
 def _probe_media(path: Path, media_type: str) -> dict[str, Any]:
     probe = ffmpeg.probe(str(path), cmd=resolve_media_binary("ffprobe") or "ffprobe")
     streams = probe.get("streams", [])
@@ -372,6 +384,7 @@ def _probe_media(path: Path, media_type: str) -> dict[str, Any]:
     result = {
         "status": "done", "path": str(path), "filename": path.name, "size_bytes": path.stat().st_size, "file_type": media_type,
         "duration_seconds": duration, "has_audio": bool(audio_streams), "audio_track_count": len(audio_streams), "error": "",
+        "streams": [_stream_summary(stream) for stream in streams if stream.get("codec_type") in {"video", "audio", "subtitle"}],
     }
     if media_type == "video":
         video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
@@ -390,9 +403,10 @@ def _probe_media(path: Path, media_type: str) -> dict[str, Any]:
 def _query_image(path: Path) -> dict[str, Any]:
     with Image.open(path) as image:
         width, height = image.size
+        color_details = image_color_details(image)
         frame_count = int(getattr(image, "n_frames", 1) or 1)
         duration = sum(float(image.seek(index) or image.info.get("duration", 0) or 0) for index in range(frame_count)) / 1000 if frame_count > 1 else None
-    return {"status": "done", "path": str(path), "filename": path.name, "size_bytes": path.stat().st_size, "file_type": "image", "width": width, "height": height, "resolution": f"{width}x{height}", "frame_count": frame_count, "fps": None if not duration else frame_count / duration, "duration_seconds": duration, "has_audio": False, "audio_track_count": 0, "error": ""}
+    return {"status": "done", "path": str(path), "filename": path.name, "size_bytes": path.stat().st_size, "file_type": "image", "width": width, "height": height, "resolution": f"{width}x{height}", "frame_count": frame_count, "fps": None if not duration else frame_count / duration, "duration_seconds": duration, "has_audio": False, "audio_track_count": 0, **color_details, "error": ""}
 
 
 def file_info(path: str, policy: FileAccessPolicy | None = None) -> dict[str, Any]:
@@ -402,7 +416,14 @@ def file_info(path: str, policy: FileAccessPolicy | None = None) -> dict[str, An
         return {"status": "done", "path": str(target), "filename": target.name, "file_type": "directory", "size_bytes": None, "modified": stat.st_mtime, "error": ""}
     try:
         media_type = detect_media_type(str(target))
-        result = _query_image(target) if media_type == "image" else _probe_media(target, media_type) if media_type in {"video", "audio"} else {"status": "done", "path": str(target), "filename": target.name, "size_bytes": target.stat().st_size, "file_type": "file", "mime_type": mimetypes.guess_type(target.name)[0] or "application/octet-stream", "error": ""}
+        if media_type == "3d":
+            from shared.utils.mesh_outputs import asset_summary
+            result = {"status": "done", "path": str(target), "filename": target.name, "size_bytes": target.stat().st_size, "file_type": "3d", **asset_summary(str(target)), "error": ""}
+        elif media_type == "world":
+            from shared.utils.world_outputs import world_summary
+            result = {"status": "done", "path": str(target), "filename": target.name, "size_bytes": target.stat().st_size, "file_type": "world", **world_summary(str(target)), "error": ""}
+        else:
+            result = _query_image(target) if media_type == "image" else _probe_media(target, media_type) if media_type in {"video", "audio"} else {"status": "done", "path": str(target), "filename": target.name, "size_bytes": target.stat().st_size, "file_type": "file", "mime_type": mimetypes.guess_type(target.name)[0] or "application/octet-stream", "error": ""}
         result["modified"] = target.stat().st_mtime
         return result
     except (OSError, ValueError, ffmpeg.Error) as exc:
@@ -497,14 +518,17 @@ def search_text(policy: FileAccessPolicy, path: str, query: str, pattern: str = 
 
 def write_text(policy: FileAccessPolicy, path: str, text: str, mode: str = "create", encoding: str = "utf-8") -> dict[str, Any]:
     file_path = policy.require_write(path)
-    if not file_path.parent.is_dir():
-        raise FileNotFoundError(f"Parent directory does not exist: {file_path.parent}")
     mode = str(mode or "create").strip().lower()
     open_mode = {"create": "x", "overwrite": "w", "append": "a"}.get(mode)
     if open_mode is None:
         raise ValueError("mode must be create, overwrite, or append.")
+    if policy.create_only(file_path):
+        open_mode = "x"
+    if open_mode == "x" and file_path.exists():
+        raise FileExistsError(f"{path} already exists and cannot be replaced here: write a new file name." if policy.create_only(file_path) else f"{path} already exists: pass mode \"overwrite\" to replace it, or use append_text to add to it.")
     content = str(text)
-    with file_path.open(open_mode, encoding=_encoding(encoding)) as writer:
+    file_path.parent.mkdir(parents=True, exist_ok=True)  # inside the authorized write area, like the file itself
+    with file_path.open(open_mode, encoding=_encoding(encoding), newline="") as writer:  # the text as given: no Windows newline translation
         writer.write(content)
     digest = hashlib.sha256()
     with file_path.open("rb") as reader:
@@ -539,19 +563,17 @@ def copy_file(policy: FileAccessPolicy, source: str, destination: str, overwrite
         raise FileNotFoundError(f"Destination directory does not exist: {destination_path.parent}")
     if destination_path.exists() and not overwrite:
         raise FileExistsError(f"Destination already exists: {destination_path}")
-    shutil.copy2(source_path, destination_path)
+    if policy.create_only(destination_path):
+        with source_path.open("rb") as reader, destination_path.open("xb") as writer:
+            shutil.copyfileobj(reader, writer)
+        shutil.copystat(source_path, destination_path)
+    else:
+        shutil.copy2(source_path, destination_path)
     return {"status": "done", "source": str(source_path), "path": str(destination_path), "filename": destination_path.name, "size_bytes": destination_path.stat().st_size, "error": ""}
 
 
-def _mutable_path(policy: FileAccessPolicy, path: str) -> Path:
-    target = policy.require_write(path)
-    if any(os.path.normcase(str(target)) == os.path.normcase(str(root)) for root in policy.write_roots):
-        raise PermissionError(f"A filesystem root cannot be moved or deleted: {policy.virtualize_path(target)}")
-    return target
-
-
 def move_path(policy: FileAccessPolicy, source: str, destination: str) -> dict[str, Any]:
-    source_path = _mutable_path(policy, source)
+    source_path = policy.require_mutation(source)
     if not source_path.exists():
         raise FileNotFoundError(f"Source does not exist: {policy.virtualize_path(source_path)}")
     destination_path = policy.resolve_path(destination)
@@ -567,12 +589,20 @@ def move_path(policy: FileAccessPolicy, source: str, destination: str) -> dict[s
     if source_path.is_dir() and _inside(destination_path, source_path):
         raise ValueError("A directory cannot be moved inside itself.")
     item_type = "directory" if source_path.is_dir() else "file"
-    shutil.move(str(source_path), str(destination_path))
+    if policy.create_only(destination_path):
+        if item_type == "directory":
+            shutil.copytree(source_path, destination_path, symlinks=True, copy_function=lambda source, target: copy_file(policy, Path(source), Path(target))["path"])
+            shutil.rmtree(source_path)
+        else:
+            copy_file(policy, source_path, destination_path)
+            source_path.unlink()
+    else:
+        shutil.move(str(source_path), str(destination_path))
     return {"status": "done", "source": str(source_path), "path": str(destination_path), "filename": destination_path.name, "type": item_type, "size_bytes": destination_path.stat().st_size if destination_path.is_file() else None, "error": ""}
 
 
 def delete_path(policy: FileAccessPolicy, path: str, recursive: bool = False) -> dict[str, Any]:
-    target = _mutable_path(policy, path)
+    target = policy.require_mutation(path)
     if not target.exists():
         raise FileNotFoundError(f"Path does not exist: {policy.virtualize_path(target)}")
     item_type = "directory" if target.is_dir() else "file"
@@ -624,7 +654,7 @@ def zip_files(policy: FileAccessPolicy, sources: list[str], destination: str = "
         same_parent = next(iter(parents)) if len(parents) == 1 else None
         default_folder = same_parent if same_parent is not None and policy.can_write(same_parent / default_name) else policy.output_roots[0]
         target = default_folder / default_name
-    target = _available_zip_path(policy.require_write(target))
+    target = policy.require_write(_available_zip_path(target))
     if not target.parent.is_dir():
         raise FileNotFoundError(f"ZIP destination directory does not exist: {target.parent}")
     temp_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
@@ -652,7 +682,10 @@ def zip_files(policy: FileAccessPolicy, sources: list[str], destination: str = "
                         index += 1
                     names.add(unique_name.casefold())
                     archive.write(item, unique_name)
-        os.replace(temp_path, target)
+        if policy.create_only(target):
+            os.link(temp_path, target)
+        else:
+            os.replace(temp_path, target)
     finally:
         if temp_path.exists():
             temp_path.unlink()
@@ -693,6 +726,9 @@ def unzip_file(policy: FileAccessPolicy, source: str, destination: str = "", ove
             target = destination_path.joinpath(*member_path.parts).resolve()
             if not _inside(target, destination_path):
                 raise ValueError(f"ZIP member escapes the destination: {member.filename}")
+            from shared.deepy.prime_filesystem import PrimeFileAccessPolicy
+            if isinstance(policy, PrimeFileAccessPolicy):
+                policy.require_write(target)
             if target == source_path:
                 raise ValueError("A ZIP cannot overwrite its own source archive.")
             key = os.path.normcase(str(target))
@@ -724,44 +760,24 @@ def unzip_file(policy: FileAccessPolicy, source: str, destination: str = "", ove
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member, "r") as reader, target.open("wb") as writer:
+            with archive.open(member, "r") as reader, target.open("xb" if policy.create_only(target) else "wb") as writer:
                 shutil.copyfileobj(reader, writer)
 
     files = [member for member, _target, is_directory in plans if not is_directory]
     return {"status": "done", "source": str(source_path), "path": str(destination_path), "file_count": len(files), "size_bytes": sum(member.file_size for member in files), "overwritten_count": overwritten_count, "error": ""}
 
 
-_ARTIFACT_REFERENCE_SCHEMA = {
-    "type": "object",
-    "description": "A Deepy artifact reference rendered server-side; the compiled content must not be copied into the tool call. Most consumers require finalization, while write_artifact_text may export current committed progress.",
-    "properties": {
-        "$artifact": {"type": "string", "description": "Artifact ID returned by wangp_artifact."},
-        "where": {"type": "array", "items": {"type": "object"}},
-        "select": {"type": "string", "description": "Optional dotted field to extract from each record or from a ledger."},
-        "template": {"type": "string", "description": "Optional Python-style format template applied to each object record."},
-        "join": {"type": "string", "description": "Join rendered record values into one text payload."},
-        "prefix": {"type": "string"},
-        "suffix": {"type": "string"},
-        "offset": {"type": "integer", "default": 0},
-        "limit": {"type": "integer"},
-    },
-    "required": ["$artifact"],
-    "additionalProperties": False,
-}
-
-
 IO_ACTIONS = {
-    "list": {"description": "List authorized roots or a page of directory entries. When has_more is true, repeat the same filters with offset set to next_offset.", "access": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Directory; omit to list authorized roots."}, "pattern": {"type": "string", "default": "*", "description": "Filename glob."}, "media_type": {"type": "string", "enum": ["all", "image", "video", "audio", "txt", "other"], "default": "all", "description": "Implicit extension filter. Typed filters return files only; other excludes supported media and .txt files."}, "recursive": {"type": "boolean", "default": False}, "limit": {"type": "integer", "default": 200, "description": "Maximum entries to return; Deepy may shorten the page to fit its context-safe output budget."}, "offset": {"type": "integer", "default": 0, "description": "Entry offset; preserve the previous filters and use its next_offset to continue."}, "store_artifact": {"type": "boolean", "default": False, "description": "Store the exact returned page in a working artifact and return compact progress instead of echoing all entries."}, "artifact_id": {"type": "string", "description": "Existing record-set artifact to append this page to."}, "artifact_title": {"type": "string", "description": "Title used when creating a new file collection artifact."}}}},
+    "list": {"description": "List authorized roots or a page of directory entries. When has_more is true, repeat the same filters with offset set to next_offset.", "access": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Directory; omit to list authorized roots."}, "pattern": {"type": "string", "default": "*", "description": "Filename glob."}, "media_type": {"type": "string", "enum": ["all", "image", "video", "audio", "txt", "other"], "default": "all", "description": "Implicit extension filter. Typed filters return files only; other excludes supported media and .txt files."}, "recursive": {"type": "boolean", "default": False}, "limit": {"type": "integer", "default": 200, "description": "Maximum entries to return; Deepy may shorten the page to fit its context-safe output budget."}, "offset": {"type": "integer", "default": 0, "description": "Entry offset; preserve the previous filters and use its next_offset to continue."}}}},
     "info": {"description": "Return file, directory, or media metadata.", "access": "always", "parameters": {"type": "object", "properties": {"source": {"type": "string", "description": "Authorized path or Gallery media id."}}, "required": ["source"]}},
     "read_text": {"description": "Read a 1-based line range from a UTF-8 text file. Use next_line to continue and eof to distinguish a completed range from the end of the file.", "access": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer", "default": 1}, "end_line": {"type": "integer"}, "encoding": {"type": "string", "enum": ["utf-8", "utf-8-sig"], "default": "utf-8-sig"}}, "required": ["path"], "additionalProperties": False}},
     "search_text": {"description": "Search authorized UTF-8 files and return matching lines.", "access": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "query": {"type": "string"}, "pattern": {"type": "string", "default": "*", "description": "Filename glob."}, "recursive": {"type": "boolean", "default": False}, "regex": {"type": "boolean", "default": False}, "case_sensitive": {"type": "boolean", "default": False}, "limit": {"type": "integer", "default": 100}}, "required": ["path", "query"]}},
-    "write_text": {"description": "Create, overwrite, or append literal UTF-8 text already present in the request. For artifact content, use write_artifact_text instead of copying it here.", "access": "write", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "text": {"type": "string"}, "mode": {"type": "string", "enum": ["create", "overwrite", "append"], "default": "create"}, "encoding": {"type": "string", "enum": ["utf-8", "utf-8-sig"], "default": "utf-8"}}, "required": ["path", "text"]}},
-    "write_artifact_text": {"description": "Render an artifact directly to a UTF-8 file without placing the compiled payload in Deepy's context or tool call. Unfinished record sets may be exported as explicit partial progress; overwrite the file after the complete artifact is finalized.", "access": "write", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "artifact": _ARTIFACT_REFERENCE_SCHEMA, "mode": {"type": "string", "enum": ["create", "overwrite", "append"], "default": "create"}, "encoding": {"type": "string", "enum": ["utf-8", "utf-8-sig"], "default": "utf-8"}}, "required": ["path", "artifact"]}},
+    "write_text": {"description": "Create, overwrite, or append literal UTF-8 text already present in the request.", "access": "write", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "text": {"type": "string"}, "mode": {"type": "string", "enum": ["create", "overwrite", "append"], "default": "create"}, "encoding": {"type": "string", "enum": ["utf-8", "utf-8-sig"], "default": "utf-8"}}, "required": ["path", "text"]}},
     "mkdir": {"description": "Create an authorized directory.", "access": "write", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
     "copy": {"description": "Copy an authorized file to a writable destination.", "access": "write", "parameters": {"type": "object", "properties": {"source": {"type": "string", "description": "Authorized path or Gallery media id."}, "destination": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}, "required": ["source", "destination"]}},
     "move": {"description": "Move an authorized writable file or directory to an unused destination.", "access": "write", "parameters": {"type": "object", "properties": {"source": {"type": "string"}, "destination": {"type": "string"}}, "required": ["source", "destination"]}},
     "delete": {"description": "Permanently delete an authorized writable file or directory; recursive is required for a non-empty directory.", "access": "write", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean", "default": False}}, "required": ["path"]}},
-    "zip": {"description": "Create a persistent ZIP from authorized files or folders.", "access": "write", "parameters": {"type": "object", "properties": {"sources": {"oneOf": [{"type": "array", "items": {"type": "string"}}, _ARTIFACT_REFERENCE_SCHEMA], "description": "Authorized paths or Gallery media ids, or an artifact reference selecting paths."}, "destination": {"type": "string", "description": "Optional folder/.zip path; plain paths use video outputs."}}, "required": ["sources"]}},
+    "zip": {"description": "Create a persistent ZIP from authorized files or folders.", "access": "write", "parameters": {"type": "object", "properties": {"sources": {"type": "array", "items": {"type": "string"}, "description": "Authorized paths or Gallery media ids."}, "destination": {"type": "string", "description": "Optional folder/.zip path; plain paths use video outputs."}}, "required": ["sources"]}},
     "unzip": {"description": "Safely extract an authorized ZIP into a writable directory without replacing existing files by default.", "access": "write", "parameters": {"type": "object", "properties": {"source": {"type": "string", "description": "Authorized ZIP file path."}, "destination": {"type": "string", "description": "Optional extraction directory; defaults to a folder named after the ZIP beside it when writable, otherwise in video outputs."}, "overwrite": {"type": "boolean", "default": False}}, "required": ["source"]}},
     "download": {"description": "Create a session-long download link for an existing file.", "access": "always", "parameters": {"type": "object", "properties": {"source": {"type": "string", "description": "Authorized file path or Gallery media id."}}, "required": ["source"]}},
 }
@@ -779,5 +795,5 @@ def available_io_actions(policy: FileAccessPolicy, downloads_enabled: bool = Tru
 
 __all__ = [
     "TEXT_MAX_CHARS", "FileAccessPolicy", "IO_ACTIONS", "available_io_actions", "build_file_access_policy", "copy_file", "delete_path", "file_info", "list_entries",
-    "list_files", "make_directory", "move_path", "query_file", "read_text", "search_text", "unzip_file", "write_text", "zip_files",
+    "make_directory", "move_path", "query_file", "read_text", "search_text", "unzip_file", "write_text", "zip_files",
 ]

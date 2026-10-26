@@ -1,3 +1,4 @@
+from shared.utils.phase_progress import text_encoding_progress
 from torch import Tensor, nn
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokenizer
 import os
@@ -19,6 +20,8 @@ class HFEmbedder(nn.Module):
             from mmgp import offload as offloadobj
             self.tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(os.path.dirname(text_encoder_filename),  max_length=max_length)
             self.hf_module: T5EncoderModel  = offloadobj.fast_load_transformers_model(text_encoder_filename, writable_tensors=False) 
+            from mmgp import runtime
+            runtime.lookup_on_cpu(self.hf_module.get_input_embeddings())  # the token table stays in RAM: mmgp looks up the prompt's rows on the CPU
 
         self.hf_module = self.hf_module.eval().requires_grad_(False)
 
@@ -33,9 +36,10 @@ class HFEmbedder(nn.Module):
             return_tensors="pt",
         )
 
-        outputs = self.hf_module(
-            input_ids=batch_encoding["input_ids"].to(self.hf_module.device),
-            attention_mask=None,
-            output_hidden_states=False,
-        )
+        with text_encoding_progress(self.hf_module.text_model.encoder.layers if self.is_clip else self.hf_module.encoder.block, prompt_count=len(text)):
+            outputs = self.hf_module(
+                input_ids=batch_encoding["input_ids"].to(self.hf_module.device),
+                attention_mask=None,
+                output_hidden_states=False,
+            )
         return outputs[self.output_key].bfloat16()

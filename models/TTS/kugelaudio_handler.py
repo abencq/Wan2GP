@@ -1,3 +1,6 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .help import KUGEL_HELP
 import os
 import re
 
@@ -25,6 +28,7 @@ KUGELAUDIO_TOKENIZER_FILES = [
 
 KUGELAUDIO_DURATION_SLIDER = {
     "label": "Max duration (seconds)",
+    "name": "Max Duration",
     "min": 1,
     "max": 600,
     "increment": 1,
@@ -74,7 +78,7 @@ def _get_kugelaudio_model_def():
         "image_prompt_types_allowed": "",
         "supports_early_stop": True,
         "profiles_dir": ["kugelaudio_0_open"],
-        "lm_engines": ["cg"],
+        "lm_decoder": True,
         "duration_slider": dict(KUGELAUDIO_DURATION_SLIDER),
         "custom_settings": [one.copy() for one in KUGELAUDIO_CUSTOM_SETTINGS],
         "preserve_empty_prompt_lines": True,
@@ -83,13 +87,14 @@ def _get_kugelaudio_model_def():
         "audio_guide_label": "Reference voice (optional)",
         "audio_prompt_choices": True,
         "audio_prompt_type_sources": {
-            "selection": ["", "A", "AB"],
+            "selection": ["", "A", "AB", "ABD"],
             "labels": {
                 "": "Text only",
                 "A": "Voice cloning (1 reference audio)",
                 "AB": "Voice cloning (2 reference audios: Speaker 1 and Speaker 2)",
+                "ABD": "Voice cloning (3 reference audios: Speakers 1, 2 and 3)",
             },
-            "letters_filter": "AB",
+            "letters_filter": "ABD",
             "default": "",
         },
         "text_prompt_enhancer_instructions": TTS_MONOLOGUE_PROMPT,
@@ -137,21 +142,12 @@ class family_handler:
         return {"tts": (2200, "TTS")}
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-kugelaudio",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains KugelAudio settings (default: {os.path.join(lora_root, 'kugelaudio')})",
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
-        return getattr(args, "lora_dir_kugelaudio", None) or os.path.join(lora_root, "kugelaudio")
+    def get_lora_dir(base_model_type):
+        return "kugelaudio"
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
-        return _get_kugelaudio_model_def()
+        return merge_help(_get_kugelaudio_model_def(), KUGEL_HELP)
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
@@ -172,7 +168,7 @@ class family_handler:
         submodel_no_list=None,
         text_encoder_filename=None,
         profile=0,
-        lm_decoder_engine="legacy",
+        lm_features=None,
         **kwargs,
     ):
         from .kugelaudio.pipeline import KugelAudioPipeline
@@ -182,13 +178,8 @@ class family_handler:
             model_weights_path=weights_path,
             ckpt_root=fl.get_download_location(),
             device=mps_device_or(torch.device("cpu")),
-            lm_decoder_engine=lm_decoder_engine,
+            cuda_graphs=lm_features.graphs,
         )
-        if lm_decoder_engine == "cg":
-            pipeline.model._budget = 0
-            language_model = getattr(getattr(pipeline.model, "model", None), "language_model", None)
-            if language_model is not None:
-                language_model._budget = 0
         _configure_diffusion_compile_targets(pipeline.model)
 
         pipe = {
@@ -218,7 +209,8 @@ class family_handler:
                 config_path,
             )
 
-        return pipeline, pipe
+        # its decoding steps are MMGP graphs: the language model may stream its layers (memory profile, VRAM preload)
+        return pipeline, {"pipe": pipe, "cudaGraphs": ["transformer"] if lm_features.graphs else False}
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
@@ -260,19 +252,20 @@ class family_handler:
             if "A" not in audio_prompt_type or "B" not in audio_prompt_type:
                 return "Multi-speaker prompts require two reference voice audio samples. Provide a voice sample or remove Speaker tags."
         if "B" in audio_prompt_type:
-            if inputs.get("audio_guide") is None or inputs.get("audio_guide2") is None:
-                return "Two-voice cloning requires two reference audio files."
+            speaker_count = 3 if "D" in audio_prompt_type else 2
+            if any(inputs.get(key) is None for key in ("audio_guide", "audio_guide2", "audio_guide3")[:speaker_count]):
+                return f"{speaker_count}-voice cloning requires {speaker_count} reference audio files."
             speaker_matches = list(re.finditer(r"Speaker\s*(\d+)\s*:", text, flags=re.IGNORECASE))
             if not speaker_matches:
                 return (
-                    "Two-voice cloning requires prompt lines with Speaker 1: and Speaker 2: "
-                    "(or any two numeric speaker IDs). For headless settings, keep "
+                    f"{speaker_count}-voice cloning requires prompt lines with Speaker 1: to Speaker {speaker_count}: "
+                    f"(or any {speaker_count} numeric speaker IDs). For headless settings, keep "
                     "'multi_prompts_gen_type' = 'FG' so dialogue lines stay in one prompt."
                 )
             speaker_ids = sorted({int(m.group(1)) for m in speaker_matches})
-            if len(speaker_ids) != 2:
+            if len(speaker_ids) != speaker_count:
                 return (
-                    "Two-voice cloning requires exactly two speaker IDs. Use Speaker 1: and Speaker 2:. "
+                    f"{speaker_count}-voice cloning requires exactly {speaker_count} speaker IDs. Use Speaker 1: to Speaker {speaker_count}:. "
                     "For headless settings, keep 'multi_prompts_gen_type' = 'FG'."
                 )
         return None

@@ -11,7 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modifications Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 
+from shared.utils.phase_progress import vae_decoding_progress, set_phase_status
+from shared.kernels import vae_ops
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -412,8 +415,8 @@ class WanAttentionBlock(nn.Module):
         qkv = qkv.permute(0, 1, 3, 2).contiguous()
         q, k, v = qkv.chunk(3, dim=-1)
 
-        # apply attention
-        x = F.scaled_dot_product_attention(q, k, v)
+        # apply attention (by chunks of queries where SDPA has no memory-efficient kernel for the VAE's dtype)
+        x = vae_ops.attention(q, k, v)
 
         x = x.squeeze(1).permute(0, 2, 1).reshape(batch_size * time, channels, height, width)
 
@@ -1205,6 +1208,7 @@ class AutoencoderKLWan(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 The latent representations of the encoded videos. If `return_dict` is True, a
                 [`~models.autoencoder_kl.AutoencoderKLOutput`] is returned, otherwise a plain `tuple` is returned.
         """
+        set_phase_status("VAE Encoding")
         if self.use_slicing and x.shape[0] > 1:
             encoded_slices = [self._encode(x_slice) for x_slice in x.split(1)]
             h = torch.cat(encoded_slices)
@@ -1262,15 +1266,19 @@ class AutoencoderKLWan(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 If return_dict is True, a [`~models.vae.DecoderOutput`] is returned, otherwise a plain `tuple` is
                 returned.
         """
-        if self.use_slicing and z.shape[0] > 1:
-            decoded_slices = [self._decode(z_slice).sample for z_slice in z.split(1)]
-            decoded = torch.cat(decoded_slices)
-        else:
-            decoded = self._decode(z).sample
+        tiles = z.shape[2] * (z.shape[0] if self.use_slicing else 1)
+        if self.use_tiling and (z.shape[-2] > self.tile_sample_min_height // self.spatial_compression_ratio or z.shape[-1] > self.tile_sample_min_width // self.spatial_compression_ratio):
+            tiles *= len(range(0, z.shape[-2], self.tile_sample_stride_height // self.spatial_compression_ratio)) * len(range(0, z.shape[-1], self.tile_sample_stride_width // self.spatial_compression_ratio))
+        with vae_decoding_progress(tiles, self.decoder, cleanup=self.clear_cache):
+            if self.use_slicing and z.shape[0] > 1:
+                decoded_slices = [self._decode(z_slice).sample for z_slice in z.split(1)]
+                decoded = torch.cat(decoded_slices)
+            else:
+                decoded = self._decode(z).sample
 
-        if not return_dict:
-            return (decoded,)
-        return DecoderOutput(sample=decoded)
+            if not return_dict:
+                return (decoded,)
+            return DecoderOutput(sample=decoded)
 
     def blend_v(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
         blend_extent = min(a.shape[-2], b.shape[-2], blend_extent)
