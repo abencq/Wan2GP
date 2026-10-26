@@ -139,6 +139,7 @@ class DLSSGTemporalUpsampler(api.SimpleScaleSuffixMixin):
         note = (
             " A label reading 'supported' is the range the probe verified on this GPU, while 'max' is this GPU's ceiling shown while the worker cannot be probed."
             " When the upstream x2 entry is usable, this entry is labelled from x3 because that entry already offers x2, and an x2-only native worker is hidden from the menus while the upstream entry works: it stays usable, the menus restore it when a saved selection asks for it, and it reappears when it is the only path."
+            " On a multi-GPU host the range follows the GPU WanGP is restricted to (CUDA_VISIBLE_DEVICES), the weakest of them, and the worker is pinned to that GPU; see docs/DLSS5.md."
         )
         return f"Native Linux DLSSG worker (scripts/build_dlssg_worker_linux.sh) supporting up to {format_multiplier_range(variant, nominal=True)} on this GPU{detail}.{note} Requires the NVIDIA Vulkan driver and an RTX 40 or newer GPU; x5/x6 require an RTX 50 series GPU. Worker: {variant.label_path}."
 
