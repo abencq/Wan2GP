@@ -1,3 +1,6 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .help import ACE1_HELP
 import os
 import re
 
@@ -55,6 +58,7 @@ def _ace_step15_lm_weights_name(lm_folder):
 
 ACE_STEP_DURATION_SLIDER = {
     "label": "Duration (seconds)",
+    "name": "Target Duration",
     "min": 5,
     "max": 240,
     "increment": 1,
@@ -63,6 +67,7 @@ ACE_STEP_DURATION_SLIDER = {
 
 ACE_STEP15_DURATION_SLIDER = {
     "label": "Duration (seconds)",
+    "name": "Target Duration",
     "min": 5,
     "max": 360,
     "increment": 1,
@@ -318,40 +323,19 @@ class family_handler:
         return {"music": (2195, "Music"), "tts": (2200, "TTS")}
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-ace-step",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Ace Step settings (default: {os.path.join(lora_root, 'ace_step')})",
-        )
-        parser.add_argument(
-            "--lora-dir-ace-step15",
-            dest="lora_ace_step15",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Ace Step 1.5 settings (default: {os.path.join(lora_root, 'ace_step_v1_5')})",
-        )
-        parser.add_argument(
-            "--lora-dir-ace-step15-xl",
-            dest="lora_ace_step15_xl",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Ace Step 1.5 XL settings (default: {os.path.join(lora_root, 'ace_step_v1_5_xl')})",
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
+    def get_lora_dir(base_model_type):
         if _is_ace_step15(base_model_type):
-            attr_name = "lora_ace_step15_xl" if _is_ace_step15_xl(base_model_type) else "lora_ace_step15"
-            return getattr(args, attr_name, None) or os.path.join(lora_root, _ace_step15_lora_dir_name(base_model_type))
-        return getattr(args, "lora_ace_step", None) or os.path.join(lora_root, "ace_step")
+            return _ace_step15_lora_dir_name(base_model_type)
+        return "ace_step"
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
         if _is_ace_step15(base_model_type):
             extra_model_def = {
                 "group": "music",
+                "infos": "Generate music by combining Lyrics (`prompt`) with Music Caption (`alt_prompt`): the lyrics supply words and song sections; the caption supplies style, instruments, mood and vocal character. Audio Task selects text-only generation, a cover from Source Audio (`audio_guide`, mode `A`), Reference Timbre (`audio_guide2`, mode `B`), or both (`AB`). For a cover, supply the source lyrics and use Source Audio Strength to control adherence. Duration, BPM, key, meter and language are separate controls. The music usually ends with a fade before the target duration (with ACE-Step 1.5 Turbo it lasted 67-97% of it, for example 11-13 s of a 16 s request): when a cue must fill a length, request about a third more and trim it. Songs come out mastered loud (around -10 LUFS, peaks at full scale): lower the music when mixing it under speech.",
+                "deepy_infos": "Lyrics `prompt` + sound/style caption `alt_prompt` generate music. `audio_prompt_type`: `A` = cover from `audio_guide` (use source lyrics; Source Audio Strength controls adherence), `B` = timbre from `audio_guide2`, `AB` = both. Duration/BPM/key/meter/language have separate controls. Music usually ends with a fade before duration_seconds (Turbo: 67-97% of it); to fill an exact length request ~1/3 more and trim (extract_audio, or trim_start_s/trim_duration_s in a remux_media mix). Output is mastered loud (~-10 LUFS, peaks at full scale): give it a negative gain under narration or set normalize_lufs.",
+                "deepy_prompt_infos": "Put actual lyrics in `prompt`, with short lines and [Verse], [Chorus], [Bridge] tags separated by blank lines. Keep repeated choruses consistent. Put genre, instruments, mood and vocal character in `alt_prompt`, naming the lead voice first and plainly (`female vocals, ...` or `male vocals, ...`). For instrumental music use `[Instrumental]` as lyrics and describe the sound in the caption.",
                 "audio_only": True,
                 "image_outputs": False,
                 "sliding_window": False,
@@ -371,9 +355,10 @@ class family_handler:
                 "audio_scale_name": "Source Audio Strength",
                 "audio_prompt_choices": True,
                 "enabled_audio_lora": True,
-                "lm_engines": ["vllm"],
+                "lm_decoder": True,
+                "cuda_graphs": ["transformer"],
                 "prompt_class": "Lyrics",
-                "prompt_infos": ACE_STEP_LYRICS_PROMPT_INFOS,
+                "prompt_infos": "Write the actual lyrics in `prompt`, not an instruction to write a song. Describe the desired sound in `alt_prompt`, for example: warm acoustic folk, fingerpicked guitar, soft female vocals, restrained percussion. For instrumental music, use `[Instrumental]` in `prompt` and describe the instruments in the caption.\n\n" + ACE_STEP_LYRICS_PROMPT_INFOS,
                 "alt_guidance": "LM Guidance (CFG)",
                 "prompt_description": "Lyrics / Prompt (Write [Instrumental] for Instrumental Generation only)",
                 "audio_prompt_type_sources": {
@@ -402,9 +387,13 @@ class family_handler:
             }
             if _ace_step15_has_lm_definition(model_def):
                 extra_model_def["model_modes"] = ACE_STEP15_MODEL_MODES.copy()
+            extra_model_def["device_explicit"] = True
+            from models.help_shared import specialities
+            extra_model_def["specialities"] = specialities("music generation")
             return extra_model_def
-        return {
+        return merge_help({
             "group": "music",
+            "device_explicit": True,
             "audio_only": True,
             "image_outputs": False,
             "sliding_window": False,
@@ -441,7 +430,7 @@ class family_handler:
             "duration_slider": dict(ACE_STEP_DURATION_SLIDER),
             "text_prompt_enhancer_instructions": HEARTMULA_LYRIC_PROMPT,
             "prompt_enhancer_button_label": "Compose Lyrics",
-        }
+        }, ACE1_HELP)
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
@@ -528,7 +517,7 @@ class family_handler:
         submodel_no_list=None,
         text_encoder_filename=None,
         profile=0,
-        lm_decoder_engine="legacy",
+        lm_features=None,
         **kwargs,
     ):
         transformer_weights = None
@@ -563,7 +552,7 @@ class family_handler:
             silence_latent = _get_model_path(model_def, "ace_step15_silence_latent", _ace_step15_ckpt_file(ACE_STEP15_SILENCE_LATENT_NAME))
             if enable_lm:
                 lm_weight_name = os.path.basename(str(lm_weights)) if lm_weights else ""
-                print(f"[ace_step15] LM engine='{lm_decoder_engine}' | LM weights='{lm_weight_name}'")
+                print(f"[ace_step15] LM weights='{lm_weight_name}'")
 
             pipeline = ACEStep15Pipeline(
                 transformer_weights_path=transformer_weights,
@@ -578,7 +567,7 @@ class family_handler:
                 silence_latent_path=silence_latent,
                 enable_lm=enable_lm,
                 ignore_lm_cache_seed=ignore_lm_cache_seed,
-                lm_decoder_engine=lm_decoder_engine,
+                lm_features=lm_features,
                 device=mps_device(),
                 dtype=dtype or torch.bfloat16,
             )
@@ -591,7 +580,7 @@ class family_handler:
             if text_encoder_filename and pipeline.lm_model is not None:
                 pipe["text_encoder"] = pipeline.lm_model
 
-            pipe = { "pipe": pipe, "coTenantsMap": {}, }
+            pipe = { "pipe": pipe, "coTenantsMap": {}, "cudaGraphs": ["text_encoder"] if "text_encoder" in pipe and lm_features.graphs else False}
 
             if save_quantized and transformer_weights:
                 from wgp import save_quantized_model

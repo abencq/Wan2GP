@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Alibaba, Inc. and its affiliates.
+# Modifications Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 
 import os
 import cv2
@@ -395,10 +396,6 @@ class OptimizedWholebody:
         self.session_pose = ort.InferenceSession(path_or_bytes=onnx_pose, providers=providers)
         self.device = device
         
-        # Pre-allocate session options for better performance
-        self.session_det.set_providers(providers)
-        self.session_pose.set_providers(providers)
-        
         # Get input names once to avoid repeated lookups
         self.det_input_name = self.session_det.get_inputs()[0].name
         self.pose_input_name = self.session_pose.get_inputs()[0].name
@@ -750,7 +747,7 @@ class AlignedPoseBodyFaceVideoAnnotator:
         self.ref_image = cfg.get("REF_IMAGE")
         self.resize_size = cfg.get("RESIZE_SIZE", 1024)
         self.render_overscan = max(1.0, float(cfg.get("ALIGN_RENDER_OVERSCAN", 2.0)))
-        self.annotator = OptimizedPoseAnnotator(cfg)
+        self.annotator = OptimizedPoseAnnotator(cfg) if self.ref_image is not None else None
         self._fallback = None
 
     def _fallback_forward(self, frames):

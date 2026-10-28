@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Alibaba, Inc. and its affiliates.
+# Modified for WanGP.
 import numpy as np
 import torch
 import torch.nn as nn
@@ -146,3 +147,6 @@ class ScribbleVideoAnnotator(ScribbleAnnotator):
             anno_frame = super().forward(np.array(frame))
             ret_frames.append(anno_frame)
         return ret_frames
+
+def query_download_def():
+    return {"repoId": "DeepBeepMeep/Wan2.1", "sourceFolderList": ["scribble"], "fileList": [["netG_A_latest.pth"]]}

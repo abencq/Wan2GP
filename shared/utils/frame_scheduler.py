@@ -1,10 +1,11 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import math
 import re
 
 
-WGP_SLASH_COMMANDS = {"duration", "overlap", "new_shot", "loras_mult"}
+WGP_SLASH_COMMANDS = {"duration", "overlap", "new_shot", "no_end_image", "loras_mult"}
 SLASH_BLOCK_RE = re.compile(r"\[\s*/\s*([^\]]+?)\s*\]", re.IGNORECASE)
 
 
@@ -27,6 +28,24 @@ def floor_frame_count(frame_count: int, minimum: int, step: int, offset: int = 1
         return frame_count
     lower = ((frame_count - offset) // step) * step + offset
     return lower if lower >= minimum else normalize_frame_count(minimum, minimum, step, offset)
+
+
+VIDEO_LENGTH_ROUNDINGS = ("floor", "ceil", "nearest")
+VIDEO_LENGTH_ROUNDING = "ceil"  # set by wgp.py at startup (its VIDEO_LENGTH_ROUNDING)
+
+
+def set_video_length_rounding(rounding: str) -> None:
+    global VIDEO_LENGTH_ROUNDING
+    if rounding not in VIDEO_LENGTH_ROUNDINGS:
+        raise ValueError(f"Video length rounding must be one of {', '.join(VIDEO_LENGTH_ROUNDINGS)}, not {rounding!r}")
+    VIDEO_LENGTH_ROUNDING = rounding
+
+
+def fit_video_length(frame_count: int, minimum: int, step: int, offset: int = 1) -> int:
+    """A requested video length fitted to a model's frame steps with VIDEO_LENGTH_ROUNDING: ceil never shortens the request
+    (speech and music driving the video keep their last words), floor never lengthens it, nearest takes the closest count."""
+    fit = {"floor": floor_frame_count, "ceil": normalize_frame_count, "nearest": normalize_output_frame_count}[VIDEO_LENGTH_ROUNDING]
+    return fit(frame_count, minimum, step, offset)
 
 
 def normalize_output_frame_count(frame_count: int, minimum: int, step: int, offset: int = 1) -> int:
@@ -128,6 +147,11 @@ def _parse_options(prompt: str, *, supported_model_commands: set[str], allow_new
                     continue
                 wgp_options["overlap_frames"] = 0
                 wgp_options["new_shot"] = True
+            elif key == "no_end_image":
+                if separator:
+                    error = "/no_end_image does not take a value."
+                    continue
+                wgp_options["no_end_image"] = True
             elif key == "loras_mult":
                 if not separator or not value:
                     error = "/loras_mult requires a value, e.g. [/loras_mult=1;3]."
@@ -333,6 +357,8 @@ def build_frame_scheduler(
         window = _window(prompt, duration, overlap, discard_last_frames, model_options, minimum, step, frame_offset=frame_offset, overlap_offset=overlap_offset, max_overlap=max_overlap, available_overlap=first_window_overlap_frames if idx == 1 else actual_consumed, new_shot=bool(wgp_options.get("new_shot", False)), preserve_exact_output_frames=preserve_exact_output_frames, output_frame_policy=output_frame_policy)
         if "loras_multipliers" in wgp_options:
             window["loras_multipliers"] = wgp_options["loras_multipliers"]
+        if wgp_options.get("no_end_image"):
+            window["no_end_image"] = True
         windows.append(window)
         requested_consumed += duration
         actual_consumed += window["output_frames"]

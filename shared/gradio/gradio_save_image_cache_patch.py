@@ -1,6 +1,8 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import nullcontext
 import hashlib
 from pathlib import Path
 from threading import RLock
@@ -22,8 +24,11 @@ def _debug(message: str) -> None:
         print(f"[WanGP gradio-image-cache] {message}", flush=True)
 
 
-def _content_key(y, cache_dir, format):
-    digest = hashlib.blake2b(y.tobytes(), digest_size=16).hexdigest()
+def _content_key(y, cache_dir, format, pixels=None):
+    digest = hashlib.sha256(y.tobytes() if pixels is None else pixels).hexdigest()
+    if y.palette is not None or y.info:
+        metadata = (y.palette.mode, y.palette.tobytes()) if y.palette is not None else None
+        digest = hashlib.sha256((digest + repr((metadata, y.info))).encode()).hexdigest()
     return (str(cache_dir), format, y.mode, y.size, digest)
 
 
@@ -96,6 +101,66 @@ def _store_content(key, path):
             _content_cache.popitem(last=False)
 
 
+def save_image_by_content(image, cache_dir, format='png'):
+    """Reuse encoded pixels across form copies, checking mutable images each time."""
+    format = _effective_format(image, format)
+    key = _content_key(image, cache_dir, format)
+    with _lock:
+        path = _content_cache.get(key)
+        if path is not None and Path(path).is_file():
+            _content_cache.move_to_end(key)
+            return path
+    path = _save_pil_to_mode_aware_cache(image, cache_dir, format)
+    _store_content(key, path)
+    return path
+
+
+def remember_source_image(image, source, cache_dir, format, *, cache_identity=True, decoded_source=None):
+    """Reuse unchanged uploaded pixels, including copies made by form state."""
+    from io import BytesIO
+
+    from gradio import processing_utils
+    from PIL import Image
+
+    if not isinstance(image, Image.Image) or source is None:
+        return
+    effective_format = _effective_format(image, format)
+    pixels = image.tobytes()
+    content_key = _content_key(image, cache_dir, effective_format, pixels)
+    identity_key = (id(image), str(cache_dir), effective_format, image.mode, image.size)
+    with _lock:
+        existing = _content_cache.get(content_key)
+        if existing is not None and Path(existing).exists():
+            # These exact pixels already have a verified cached file. A form
+            # round trip must not decode the original a second time to prove it.
+            _content_cache.move_to_end(content_key)
+            if cache_identity:
+                _store_identity(identity_key, image, existing, effective_format)
+            return
+    source_bytes = isinstance(source, (bytes, bytearray, memoryview))
+    with Image.open(BytesIO(source) if source_bytes else source.path) if decoded_source is None else nullcontext(decoded_source) as original:
+        if original.format not in {"JPEG", "PNG", "WEBP"} or getattr(original, "n_frames", 1) != 1:
+            return
+        compatible_mode = original.mode == image.mode or (original.mode == "RGB" and image.mode == "RGBA")
+        if original.mode == "RGBA" and image.mode == "RGB":
+            compatible_mode = original.getchannel("A").getextrema() == (255, 255)
+        if original.size != image.size or not compatible_mode:
+            return
+        decoded = original if original.mode == image.mode else original.convert(image.mode)
+        if decoded.tobytes() != pixels:
+            return
+        suffix = original.format.lower()
+    # Save the received bytes verbatim. Do not attach a filename to the PIL
+    # object: content matching must still detect edits to a copied image.
+    if source_bytes:
+        path = processing_utils.save_bytes_to_cache(source, f"image.{suffix}", cache_dir)
+    else:
+        path = processing_utils.save_file_to_cache(source.path, cache_dir)
+    _store_content(content_key, path)
+    if cache_identity:
+        _store_identity(identity_key, image, path, effective_format)
+
+
 def install() -> bool:
     global _installed
     if _installed:
@@ -135,20 +200,8 @@ def install() -> bool:
                     return path
                 _cache.pop(key, None)
 
-        raw_key = _content_key(y, cache_dir, effective_format)
-        with _lock:
-            content_path = _content_cache.get(raw_key)
-            if content_path is not None and Path(content_path).exists():
-                _content_cache.move_to_end(raw_key)
-                _debug(f"content_cache_hit id={id(y)} mode={y.mode} size={y.size} format={format_label} path={content_path}")
-                _store_identity(key, y, content_path, effective_format)
-                return content_path
-            if content_path is not None:
-                _content_cache.pop(raw_key, None)
-
-        path = _save_pil_to_mode_aware_cache(y, cache_dir, effective_format)
+        path = save_image_by_content(y, cache_dir, effective_format)
         _store_identity(key, y, path, effective_format)
-        _store_content(raw_key, path)
         _debug(f"cache_store id={id(y)} mode={y.mode} size={y.size} format={format_label} path={path}")
         return path
 
@@ -165,4 +218,4 @@ def clear() -> None:
         _content_cache.clear()
 
 
-__all__ = ["WANGP_GRADIO_IMAGE_DEBUG", "clear", "install"]
+__all__ = ["WANGP_GRADIO_IMAGE_DEBUG", "clear", "install", "remember_source_image", "save_image_by_content"]

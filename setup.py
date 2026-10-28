@@ -205,16 +205,19 @@ def get_gpu_info():
     except: pass
 
     if IS_WIN:
+        amd_gpus = get_amd_gpus()
+        if amd_gpus: return amd_gpus[0][0], "AMD"
+        # wmic is not installed on recent Windows 11 builds
         try:
-            name = subprocess.check_output(
-                "wmic path win32_VideoController get name",
-                shell=True,
+            names = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
                 encoding='utf-8',
                 stderr=subprocess.DEVNULL
-            )
-            name = name.replace("Name", "").strip().split('\n')[0].strip()
-            if "Radeon" in name or "AMD" in name: return name, "AMD"
-            return name, "INTEL"
+            ).split('\n')
+            names = [n.strip() for n in names if n.strip()]
+            for name in names:
+                if "Radeon" in name or "AMD" in name: return name, "AMD"
+            if names: return names[0], "INTEL"
         except: pass
     else:
         try:
@@ -230,6 +233,42 @@ def get_gpu_info():
 
     return "Unknown", "UNKNOWN"
 
+def get_amd_gpus():
+    """Return (board name, gfx target) for each AMD GPU reported by the driver's clinfo."""
+    try:
+        out = subprocess.check_output(["clinfo"], encoding='utf-8', errors='replace', stderr=subprocess.DEVNULL)
+    except: return []
+    gpus = []
+    is_gpu, board = False, ""
+    for line in out.split('\n'):
+        key, _, value = line.strip().partition(":")
+        value = value.strip()
+        if key == "Device Type":
+            is_gpu, board = "CL_DEVICE_TYPE_GPU" in value, ""
+        elif is_gpu and key == "Board name":
+            board = value
+        elif is_gpu and key == "Name" and value.startswith("gfx"):
+            gfx = value.split(":")[0]
+            gpus.append((board or gfx, gfx))
+            is_gpu = False
+    return gpus
+
+def get_amd_device_extras():
+    targets = []
+    for _, gfx in get_amd_gpus():
+        if gfx not in targets: targets.append(gfx)
+    if targets:
+        print(f"[*] Detected AMD GPU target(s): {', '.join(targets)}")
+    else:
+        targets = [t.strip() for t in input("Could not detect the AMD GPU target. Enter it (e.g. gfx1201, see docs/AMD-INSTALLATION.md): ").split(",") if t.strip()]
+    return ",".join(f"device-{t}" for t in targets)
+
+def resolve_torch_cmd(config, torch_k):
+    cmd = resolve_cmd(config['components']['torch'][torch_k]['cmd'])
+    if "{device}" in cmd:
+        cmd = cmd.replace("{device}", get_amd_device_extras())
+    return cmd
+
 def get_profile_key(gpu_name, vendor):
     g = gpu_name.upper()
     if vendor == "APPLE":
@@ -241,10 +280,7 @@ def get_profile_key(gpu_name, vendor):
         if "20" in g or "QUADRO" in g: return "RTX_20"
         return "GTX_10"
     elif vendor == "AMD":
-        if any(x in g for x in ["7600", "7700", "7800", "7900"]): return "AMD_GFX110X"
-        if any(x in g for x in ["7000", "Z1", "PHOENIX"]): return "AMD_GFX1151"
-        if any(x in g for x in ["8000", "STRIX", "1201"]): return "AMD_GFX1201"
-        return "AMD_GFX110X"
+        return "AMD"
     return "RTX_40"
 
 def get_os_key():
@@ -276,9 +312,13 @@ def run_cmd(cmd, env_vars=None):
 
     subprocess.run(cmd, shell=True, check=True, env=custom_env)
 
-def run_pip_component(pip, cmd):
+def run_pip_component(pip, cmd, env_path=None):
     if not cmd: return
-    run_cmd(cmd.format(pip=pip) if "{pip}" in cmd else f"{pip} {cmd}")
+    env_vars = None
+    if not IS_WIN and env_path:
+        # Build-time generators may invoke bare python instead of sys.executable.
+        env_vars = {"PATH": os.path.join(os.path.abspath(env_path), "bin") + os.pathsep + os.environ.get("PATH", "")}
+    run_cmd(cmd.format(pip=pip) if "{pip}" in cmd else f"{pip} {cmd}", env_vars=env_vars)
 
 def install_plugin_requirements(pip_cmd):
     plugins_dir = "plugins"
@@ -371,7 +411,7 @@ def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k,
     pip = template["install"].format(dir=env_path)
 
     print(f"\n[2/3] Installing Torch: {config['components']['torch'][torch_k]['label']}...")
-    torch_cmd = resolve_cmd(config['components']['torch'][torch_k]['cmd'])
+    torch_cmd = resolve_torch_cmd(config, torch_k)
     run_cmd(f"{pip} {torch_cmd}")
 
     print(f"\n[3/3] Installing Requirements & Extras...")
@@ -383,6 +423,7 @@ def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k,
 
     if sage_k:
         cmd = resolve_cmd(config['components']['sage'][sage_k]['cmd'])
+        cmd = cmd.replace("{py}", "cp" + py_k.replace(".", ""))  # wheels built for each Python version
         if cmd.startswith("http") or cmd.startswith("sageattention"):
             run_cmd(f"{pip} {cmd}")
         else:
@@ -394,13 +435,24 @@ def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k,
 
     if sparge_k:
         cmd = resolve_cmd(config['components']['sparge'][sparge_k]['cmd'])
-        if cmd: run_pip_component(pip, cmd)
+        if cmd: run_pip_component(pip, cmd, env_path=env_path if env_type != "none" else None)
 
     if flash_k:
         cmd = resolve_cmd(config['components']['flash'][flash_k]['cmd'])
         if cmd: run_cmd(f"{pip} {cmd}")
 
     for k in kernel_list:
+        if k in ("wgpkernels", "wgpkernels_cu128", "wgpkernels_rocm10"):
+            k = {"cu130": "wgpkernels", "cu128": "wgpkernels_cu128", "rocm10": "wgpkernels_rocm10"}.get(torch_k)
+            if k is None:
+                continue
+            if k == "wgpkernels_rocm10" and not any(f"device-{arch}" in torch_cmd for arch in ("gfx1200", "gfx1201")):
+                continue
+        if k in ("gguf", "gguf_cu128", "gguf_rocm10"):
+            gguf_builds = {("cu130", "3.11"): "gguf", ("cu128", "3.10"): "gguf_cu128", ("rocm10", "3.12"): "gguf_rocm10"}
+            k = gguf_builds.get((torch_k, py_k))
+            if k is None or k == "gguf_rocm10" and not any(f"device-{arch}" in torch_cmd for arch in ("gfx1200", "gfx1201")):
+                continue
         if k in config['components']['kernels']:
             cmd = resolve_cmd(config['components']['kernels'][k]['cmd'])
             if cmd: run_cmd(f"{pip} {cmd}")
@@ -417,6 +469,11 @@ def menu(title, options, recommended_key=None):
     if choice == "" and recommended_key: return recommended_key
     try: return keys[int(choice)-1]
     except: return recommended_key
+
+def recommended_triton(profile, torch_key):
+    if not profile['triton'] or profile['triton'] == 'v33':
+        return profile['triton']
+    return {'cu128': 'v34', 'cu130': 'v37', 'rocm10': 'v38'}.get(torch_key)
 
 def do_install_interactive(env_type, config, detected_key):
     manager = EnvsManager()
@@ -445,15 +502,14 @@ def do_install_interactive(env_type, config, detected_key):
     print("\n--- Select Install Mode ---")
     print("1. Autoselect (Based on your GPU)")
     print("2. Manual Selection")
-    print("3. Use Latest")
 
-    mode = input("Select option (1-3) [Default: 1]: ").strip()
+    mode = input("Select option (1-2) [Default: 1]: ").strip()
 
     if mode == "2":
         base = config['gpu_profiles'][detected_key]
         py_k = menu("Python Version", config['components']['python'], base['python'])
         torch_k = menu("Torch Version", config['components']['torch'], base['torch'])
-        triton_k = menu("Triton", config['components']['triton'], base['triton'])
+        triton_k = menu("Triton", config['components']['triton'], recommended_triton(base, torch_k))
         sage_k = menu("Sage Attention", config['components']['sage'], base['sage'])
         sparge_k = menu("Sparge Attention", config['components']['sparge'], base.get('sparge'))
         flash_k = menu("Flash Attention", config['components']['flash'], base['flash'])
@@ -461,9 +517,6 @@ def do_install_interactive(env_type, config, detected_key):
 
         install_logic(name, env_type, path, py_k, torch_k, triton_k, sage_k, sparge_k, flash_k, kernels, config)
 
-    elif mode == "3":
-        p = config['gpu_profiles']['RTX_50']
-        install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('sparge'), p.get('flash'), p['kernels'], config)
     else:
         p = config['gpu_profiles'][detected_key]
         install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('sparge'), p.get('flash'), p['kernels'], config)
@@ -847,7 +900,7 @@ def do_upgrade(config):
 
     py_k = menu("Python Version", config['components']['python'], rec['python'])
     torch_k = menu("Torch Version", config['components']['torch'], rec['torch'])
-    triton_k = menu("Triton", config['components']['triton'], rec['triton'])
+    triton_k = menu("Triton", config['components']['triton'], recommended_triton(rec, torch_k))
     sage_k = menu("Sage Attention", config['components']['sage'], rec['sage'])
     sparge_k = menu("Sparge Attention", config['components']['sparge'], rec.get('sparge'))
     flash_k = menu("Flash Attention", config['components']['flash'], rec['flash'])
@@ -899,10 +952,37 @@ def get_system_specs():
         ).strip()
         vram_gb = float(out.split('\n')[0]) / 1024
     except:
-        print("[!] Warning: Could not detect VRAM via nvidia-smi. Defaulting to 8GB.")
-        vram_gb = 8
+        vram_gb = get_adapter_vram_gb()
+        if not vram_gb:
+            print("[!] Warning: Could not detect VRAM. Defaulting to 8GB.")
+            vram_gb = 8
 
     return ram_gb, vram_gb
+
+def get_adapter_vram_gb():
+    """Largest dedicated VRAM among the display adapters, for GPUs nvidia-smi does not cover."""
+    sizes = []
+    if IS_WIN:
+        import winreg
+        # Win32_VideoController.AdapterRAM is a 32-bit field that caps at 4GB
+        adapters = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, adapters) as root:
+                for i in range(winreg.QueryInfoKey(root)[0]):
+                    try:
+                        with winreg.OpenKey(root, winreg.EnumKey(root, i)) as key:
+                            size = winreg.QueryValueEx(key, "HardwareInformation.qwMemorySize")[0]
+                        sizes.append(int.from_bytes(size, "little") if isinstance(size, bytes) else int(size))
+                    except OSError: pass
+        except OSError: pass
+    else:
+        drm = "/sys/class/drm"
+        for card in os.listdir(drm) if os.path.isdir(drm) else []:
+            try:
+                with open(os.path.join(drm, card, "device", "mem_info_vram_total")) as f:
+                    sizes.append(int(f.read()))
+            except: pass
+    return max(sizes, default=0) / (1024**3)
 
 def create_wgp_config(profile_key, config_data):
     WGP_CONFIG_FILE = "wgp_config.json"
@@ -942,7 +1022,7 @@ def create_wgp_config(profile_key, config_data):
         elif "20" in profile_key:
             attn_mode = "sage"
 
-    compile_mode = ""
+    compile_mode = "disabled"
     # triton_key = prof_settings.get('triton')
     # if triton_key and triton_key != "none":
     #     compile_mode = "transformer"

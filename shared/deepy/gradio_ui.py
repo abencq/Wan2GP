@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import html
@@ -10,55 +11,15 @@ from typing import Any, Callable
 import gradio as gr
 
 from shared.deepy import tool_settings as deepy_tool_settings
-from shared.deepy.config import DEEPY_TYPE_KEY, get_deepy_config_value, normalize_deepy_type
+from shared.deepy.config import DEEPY_TYPE_KEY, DEEPY_MULTI_SESSION_CHOICES, DEEPY_MULTI_SESSION_SELECTABLE, get_deepy_config_value, normalize_deepy_type, normalize_deepy_multi_session, normalize_deepy_session_mode
 from shared.deepy import ui_settings as deepy_ui_settings
 from shared.deepy import session_store
 from shared.gradio import assistant_chat
 
 
-_TEMPLATE_TOOL_LAYOUT = (
-    ("gen_video", "gen_video_with_speech"),
-    ("gen_image", "edit_image"),
-    ("gen_song",),
-    ("gen_speech_from_description", "gen_speech_from_sample"),
-)
+_TEMPLATE_TOOL_LAYOUT = deepy_ui_settings.TEMPLATE_TOOL_LAYOUT
 _TEMPLATE_TOOL_ORDER = tuple(tool_name for row in _TEMPLATE_TOOL_LAYOUT for tool_name in row)
-_TEMPLATE_TOOL_SELECTOR_CHOICE_KEY = {
-    "gen_video": "video_generator_choices",
-    "gen_video_with_speech": "video_with_speech_choices",
-    "gen_image": "image_generator_choices",
-    "gen_song": "song_choices",
-    "edit_image": "image_editor_choices",
-    "gen_speech_from_description": "speech_from_description_choices",
-    "gen_speech_from_sample": "speech_from_sample_choices",
-}
-_TEMPLATE_TOOL_SELECTOR_SELECTED_KEY = {
-    "gen_video": "selected_video_generator",
-    "gen_video_with_speech": "selected_video_with_speech",
-    "gen_image": "selected_image_generator",
-    "gen_song": "selected_song",
-    "edit_image": "selected_image_editor",
-    "gen_speech_from_description": "selected_speech_from_description",
-    "gen_speech_from_sample": "selected_speech_from_sample",
-}
-_TEMPLATE_TOOL_UI_KEY = {
-    "gen_video": "video_generator_variant",
-    "gen_video_with_speech": "video_with_speech_variant",
-    "gen_image": "image_generator_variant",
-    "gen_song": "song_variant",
-    "edit_image": "image_editor_variant",
-    "gen_speech_from_description": "speech_from_description_variant",
-    "gen_speech_from_sample": "speech_from_sample_variant",
-}
-_TEMPLATE_TOOL_DEFAULT_GETTER = {
-    "gen_video": deepy_tool_settings.get_default_video_generator_variant,
-    "gen_video_with_speech": deepy_tool_settings.get_default_video_with_speech_variant,
-    "gen_image": deepy_tool_settings.get_default_image_generator_variant,
-    "gen_song": deepy_tool_settings.get_default_song_variant,
-    "edit_image": deepy_tool_settings.get_default_image_editor_variant,
-    "gen_speech_from_description": deepy_tool_settings.get_default_speech_from_description_variant,
-    "gen_speech_from_sample": deepy_tool_settings.get_default_speech_from_sample_variant,
-}
+_TEMPLATE_TOOL_UI_KEY = deepy_ui_settings.TEMPLATE_TOOL_UI_KEY
 _TEMPLATE_ADD_SELECTION_ERROR = "Please Select User Settings in the Lora / Settings Dropdown Box"
 _TEMPLATE_DELETE_BUILTIN_ERROR = "You cant delete a Built in Template"
 _TEMPLATE_CAPTURE_JS = """() => {
@@ -84,6 +45,7 @@ class DeepyChatUI:
     panel: Any
     settings_launcher_host: Any
     settings_save_btn: Any
+    settings_panel: Any
     html_output: Any
     chat_event: Any
     sync_btn: Any
@@ -109,6 +71,7 @@ class DeepyChatUI:
     reset_btn: Any
     multi_session: Any
     multi_session_options: Any
+    session_workspace_picker: Any
     mono_session_options: Any
     session_dropdown: Any
     session_resume_btn: Any
@@ -121,21 +84,17 @@ class DeepyChatUI:
     session_gallery_media_mode: Any
     session_reset_mode: Any
     session_status: Any
+    compact_actions: Any
     auto_cancel_queue_tasks: Any
     separate_requests_with_empty_line: Any
     use_template_properties: Any
+    model_speed: Any
+    model_size: Any
     override_height: Any
     override_width: Any
     override_num_frames: Any
     override_audio_duration: Any
     override_seed: Any
-    default_video_with_speech: Any
-    default_image_generator: Any
-    default_song: Any
-    default_image_editor: Any
-    default_video_generator: Any
-    default_speech_from_description: Any
-    default_speech_from_sample: Any
     template_controls: tuple[DeepyTemplateToolControl, ...]
     template_selection_history: Any
     template_modal_state: Any
@@ -152,7 +111,7 @@ class DeepyChatUI:
 
 @dataclass(slots=True)
 class DeepyChatHandlers:
-    prepare_request_context: Callable[[Any, Any, Any, Any, Any], Any]
+    prepare_request_context: Callable[[Any, Any, Any], Any]
     update_tool_ui_settings: Callable[..., Any]
     store_selected_video_time: Callable[[Any, Any], Any]
     ask_ai: Callable[[Any, str], Any]
@@ -171,16 +130,9 @@ class DeepyChatHandlers:
     delete_saved_session: Callable[[Any, str], Any]
 
 
-def _tool_values_from_inputs(current_video_generator: Any, current_video_with_speech: Any, current_image_generator: Any, current_image_editor: Any, current_song: Any, current_speech_from_description: Any, current_speech_from_sample: Any) -> dict[str, Any]:
-    return {
-        "gen_video": current_video_generator,
-        "gen_video_with_speech": current_video_with_speech,
-        "gen_image": current_image_generator,
-        "edit_image": current_image_editor,
-        "gen_song": current_song,
-        "gen_speech_from_description": current_speech_from_description,
-        "gen_speech_from_sample": current_speech_from_sample,
-    }
+def _tool_values_from_inputs(*current_templates: Any) -> dict[str, Any]:
+    """{task: template} of the template dropdowns' values (template_controls order: _TEMPLATE_TOOL_ORDER)."""
+    return dict(zip(_TEMPLATE_TOOL_ORDER, current_templates))
 
 
 def _tool_values_from_ui_settings(tool_ui_state: dict[str, Any]) -> dict[str, Any]:
@@ -192,7 +144,7 @@ def _normalize_tool_variant(tool_name: str, value: Any) -> str:
     if resolved is not None:
         return resolved
     try:
-        fallback = _TEMPLATE_TOOL_DEFAULT_GETTER[tool_name]()
+        fallback = deepy_tool_settings.get_default_tool_variant(tool_name)
     except Exception:
         variants = deepy_tool_settings.list_tool_variants(tool_name)
         fallback = variants[0] if len(variants) > 0 else ""
@@ -302,23 +254,15 @@ def _open_template_modal(modal_state: dict[str, Any], title_html: str, body_html
 
 
 def _template_dropdown_updates(tool_values: dict[str, Any]) -> tuple[tuple[Any, ...], dict[str, str]]:
-    refreshed = deepy_ui_settings.refresh_template_selector_state(
-        tool_values.get("gen_image"),
-        tool_values.get("edit_image"),
-        tool_values.get("gen_video"),
-        tool_values.get("gen_video_with_speech"),
-        tool_values.get("gen_song"),
-        tool_values.get("gen_speech_from_description"),
-        tool_values.get("gen_speech_from_sample"),
-    )
+    refreshed = deepy_ui_settings.refresh_template_selector_state(tool_values)
     selected_values: dict[str, str] = {}
     dropdown_updates: list[Any] = []
     for tool_name in _TEMPLATE_TOOL_ORDER:
-        selected_value = deepy_tool_settings.find_tool_variant(tool_name, refreshed.get(_TEMPLATE_TOOL_SELECTOR_SELECTED_KEY[tool_name]))
+        selected_value = deepy_tool_settings.find_tool_variant(tool_name, refreshed[tool_name]["selected"])
         if selected_value is None:
             selected_value = _normalize_tool_variant(tool_name, tool_values.get(tool_name))
         selected_values[tool_name] = str(selected_value or "")
-        dropdown_updates.append(gr.update(choices=refreshed[_TEMPLATE_TOOL_SELECTOR_CHOICE_KEY[tool_name]], value=selected_values[tool_name]))
+        dropdown_updates.append(gr.update(choices=refreshed[tool_name]["choices"], value=selected_values[tool_name]))
     return tuple(dropdown_updates), selected_values
 
 
@@ -330,7 +274,7 @@ def build_deepy_chat_ui(*, deepy_visible: bool) -> DeepyChatUI:
     saved_sessions = session_store.list_sessions(deepy_type)
     session_choices = [(str(item.get("title", "") or "Deepy session"), str(item.get("id", "") or "")) for item in saved_sessions] or [("No saved sessions", "")]
     session_value = session_choices[0][1]
-    multi_session_enabled = bool(session_ui_state["multi_session"])
+    multi_session_enabled = normalize_deepy_multi_session(session_ui_state["multi_session"])
     session_ui_state["reset_mode"] = session_store.RESET_MODE_NEW if multi_session_enabled else session_store.RESET_MODE_RESET
     if not multi_session_enabled:
         session_ui_state["gallery_media_mode"] = session_store.GALLERY_MEDIA_LINK
@@ -361,17 +305,18 @@ def build_deepy_chat_ui(*, deepy_visible: bool) -> DeepyChatUI:
             session_refresh_btn = gr.Button("Refresh Saved Sessions", visible=False, elem_id=assistant_chat.SESSION_REFRESH_BUTTON_ID)
             pause_btn = gr.Button("Pause / Resume", elem_id=assistant_chat.PAUSE_BRIDGE_ID)
             stop_btn = gr.Button("Stop", elem_id=assistant_chat.STOP_BRIDGE_ID)
-            with gr.Row(elem_id=assistant_chat.CONTROLS_ID):
+            with gr.Row(elem_id=assistant_chat.CONTROLS_ID, elem_classes=["chat__gradio-controls"]):
                 request = gr.Text(value="", label="Request", scale=3, show_label=False, elem_id=assistant_chat.REQUEST_ID)
                 ask_btn = gr.Button("Ask", scale=1, min_width=10, elem_id=assistant_chat.ASK_BUTTON_ID)
                 reset_btn = gr.Button(reset_label, scale=1, min_width=10, elem_id=assistant_chat.RESET_BUTTON_ID)
             stats_output = gr.HTML(assistant_chat.render_stats_html(), elem_id=assistant_chat.STATS_BLOCK_ID)
-            with gr.Column(elem_id=assistant_chat.SETTINGS_PANEL_ID):
+            with gr.Column(elem_id=assistant_chat.SETTINGS_PANEL_ID) as settings_panel:
                 with gr.Column(elem_classes=["chat__template-modal-card", "chat__settings-card"]):
                     gr.HTML(_settings_title_html())
                     with gr.Column(elem_classes=["chat__settings-scroll"]):
                         with gr.Tabs():
                             with gr.Tab("Generation Properties"):
+                                compact_actions = gr.Checkbox(value=bool(get_deepy_config_value("deepy_compact_actions", True)), label="Compacted View of Thoughts and Actions", elem_id="assistant_chat_compact_actions")
                                 separate_requests_with_empty_line = gr.Checkbox(
                                     value=tool_ui_state["separate_requests_with_empty_line"],
                                     label="Separate Different Requests with an Empty Line",
@@ -381,65 +326,31 @@ def build_deepy_chat_ui(*, deepy_visible: bool) -> DeepyChatUI:
                                     label="Auto-abort or remove Deepy-started generation on Stop/Reset.",
                                 )
                                 use_template_properties = gr.Dropdown(
-                                    choices=[
-                                        ("Use by Default Dimensions / Durations / Seed defined in Templates Settings Used", True),
-                                        ("Use by Default Always Dimensions / Durations / Seed Below", False),
-                                    ],
+                                    choices=deepy_ui_settings.PROPERTY_MODE_CHOICES,
                                     value=tool_ui_state["use_template_properties"],
                                     label="Default Dimensions / Durations / Seed",
+                                    elem_classes=["chat__template-tool-dropdown"],
                                 )
-                                with gr.Row():
-                                    override_width = gr.Slider(
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_DIMENSION_MIN,
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_DIMENSION_MAX,
-                                        value=tool_ui_state["width"],
-                                        step=deepy_ui_settings.ASSISTANT_OVERRIDE_DIMENSION_STEP,
-                                        label="Default Width",
-                                        interactive=not tool_ui_state["use_template_properties"],
-                                    )
-                                    override_height = gr.Slider(
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_DIMENSION_MIN,
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_DIMENSION_MAX,
-                                        value=tool_ui_state["height"],
-                                        step=deepy_ui_settings.ASSISTANT_OVERRIDE_DIMENSION_STEP,
-                                        label="Default Height",
-                                        interactive=not tool_ui_state["use_template_properties"],
-                                    )
-                                with gr.Row():
-                                    override_num_frames = gr.Slider(
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_FRAMES_MIN,
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_FRAMES_MAX,
-                                        value=tool_ui_state["num_frames"],
-                                        step=1,
-                                        label="Default Number of Frames",
-                                        interactive=not tool_ui_state["use_template_properties"],
-                                    )
-                                    override_audio_duration = gr.Slider(
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_AUDIO_DURATION_MIN,
-                                        deepy_ui_settings.ASSISTANT_OVERRIDE_AUDIO_DURATION_MAX,
-                                        value=tool_ui_state["audio_duration"],
-                                        step=1,
-                                        label="Default Audio Duration (seconds)",
-                                        interactive=not tool_ui_state["use_template_properties"],
-                                    )
-                                override_seed = gr.Slider(
-                                    -1,
-                                    999999999,
-                                    value=tool_ui_state["seed"],
-                                    step=1,
-                                    label="Seed (-1 for random)",
-                                    interactive=not tool_ui_state["use_template_properties"],
-                                )
+                                property_controls = {}
+                                for row in ((0, 1), (2, 3), (4,)):
+                                    with gr.Row():
+                                        for index in row:
+                                            field = deepy_ui_settings.GENERATION_PROPERTY_FIELDS[index]
+                                            property_controls[field["key"]] = gr.Slider(field["minimum"], field["maximum"], value=tool_ui_state[field["key"]], step=field["step"], label=field["label"], interactive=not tool_ui_state["use_template_properties"], show_reset_button=False, elem_classes=["chat__generation-property"])
+                                override_width, override_height, override_num_frames, override_audio_duration, override_seed = (property_controls[field["key"]] for field in deepy_ui_settings.GENERATION_PROPERTY_FIELDS)
                             with gr.Tab("Templates Settings used by Tools"):
+                                with gr.Row(visible=deepy_type == "prime"):
+                                    model_speed, model_size = [gr.Dropdown(choices=field["choices"], value=tool_ui_state[field["key"]], label=field["label"], info=f"{field['label']} helps Deepy choose between models.") for field in deepy_ui_settings.MODEL_SELECTION_FIELDS]
                                 with gr.Column(elem_classes=["chat__template-tool-grid"]):
                                     gr.Markdown("Please Match here Prerecorded Models Settings to each Generation Tool used by Deepy.")
                                     for tool_pair in _TEMPLATE_TOOL_LAYOUT:
-                                        with gr.Row(elem_classes=["chat__template-tool-grid-row"]):
+                                        agent_tasks = not set(tool_pair).isdisjoint(deepy_tool_settings.AGENT_TOOL_IDS)  # Deepy Zero has no tool for them
+                                        with gr.Row(elem_classes=["chat__template-tool-grid-row"], visible=deepy_type == "prime" or not agent_tasks):
                                             for tool_name in tool_pair:
                                                 with gr.Column(elem_classes=["chat__template-tool-card"]):
                                                     with gr.Row(elem_classes=["chat__template-tool-row"]):
                                                         dropdown = gr.Dropdown(
-                                                            choices=template_selector_state[_TEMPLATE_TOOL_SELECTOR_CHOICE_KEY[tool_name]],
+                                                            choices=template_selector_state[tool_name]["choices"],
                                                             value=tool_ui_state[_TEMPLATE_TOOL_UI_KEY[tool_name]],
                                                             label=deepy_tool_settings.TOOL_DISPLAY_NAMES[tool_name],
                                                             elem_classes=["chat__template-tool-dropdown"],
@@ -451,9 +362,10 @@ def build_deepy_chat_ui(*, deepy_visible: bool) -> DeepyChatUI:
                                                 controls_by_tool[tool_name] = control
                                                 template_controls.append(control)
                             with gr.Tab("Sessions"):
-                                multi_session = gr.Checkbox(value=multi_session_enabled, label="Enable multi-session mode")
+                                multi_session = gr.Dropdown(choices=DEEPY_MULTI_SESSION_CHOICES, value=normalize_deepy_session_mode(session_ui_state["multi_session"]), label="Multisessions")
                                 with gr.Column(visible=multi_session_enabled) as multi_session_options:
                                     gr.Markdown("Persistent sessions are created only when the first request is sent. Continuous saves run at safe action boundaries.")
+                                    session_workspace_picker = gr.HTML('<div id="deepy-session-workspaces"></div>', visible=normalize_deepy_session_mode(session_ui_state["multi_session"]) == DEEPY_MULTI_SESSION_SELECTABLE)
                                     with gr.Row(elem_classes=["chat__session-selector"]):
                                         session_dropdown = gr.Dropdown(choices=session_choices, value=session_value, label="Saved Sessions", interactive=multi_session_enabled, elem_id="deepy_session_dropdown")
                                     with gr.Row(equal_height=True, elem_classes=["chat__session-action-buttons"]):
@@ -489,6 +401,7 @@ def build_deepy_chat_ui(*, deepy_visible: bool) -> DeepyChatUI:
         panel=panel,
         settings_launcher_host=settings_launcher_host,
         settings_save_btn=settings_save_btn,
+        settings_panel=settings_panel,
         html_output=html_output,
         chat_event=chat_event,
         sync_btn=sync_btn,
@@ -514,6 +427,7 @@ def build_deepy_chat_ui(*, deepy_visible: bool) -> DeepyChatUI:
         reset_btn=reset_btn,
         multi_session=multi_session,
         multi_session_options=multi_session_options,
+        session_workspace_picker=session_workspace_picker,
         mono_session_options=mono_session_options,
         session_dropdown=session_dropdown,
         session_resume_btn=session_resume_btn,
@@ -526,21 +440,17 @@ def build_deepy_chat_ui(*, deepy_visible: bool) -> DeepyChatUI:
         session_gallery_media_mode=session_gallery_media_mode,
         session_reset_mode=session_reset_mode,
         session_status=session_status,
+        compact_actions=compact_actions,
         auto_cancel_queue_tasks=auto_cancel_queue_tasks,
         separate_requests_with_empty_line=separate_requests_with_empty_line,
         use_template_properties=use_template_properties,
+        model_speed=model_speed,
+        model_size=model_size,
         override_height=override_height,
         override_width=override_width,
         override_num_frames=override_num_frames,
         override_audio_duration=override_audio_duration,
         override_seed=override_seed,
-        default_video_with_speech=controls_by_tool["gen_video_with_speech"].dropdown,
-        default_image_generator=controls_by_tool["gen_image"].dropdown,
-        default_song=controls_by_tool["gen_song"].dropdown,
-        default_image_editor=controls_by_tool["edit_image"].dropdown,
-        default_video_generator=controls_by_tool["gen_video"].dropdown,
-        default_speech_from_description=controls_by_tool["gen_speech_from_description"].dropdown,
-        default_speech_from_sample=controls_by_tool["gen_speech_from_sample"].dropdown,
         template_controls=tuple(template_controls),
         template_selection_history=template_selection_history,
         template_modal_state=template_modal_state,
@@ -562,14 +472,17 @@ def bind_deepy_chat_ui(
     state: Any,
     output: Any,
     last_choice: Any,
-    audio_files_paths: Any,
-    audio_file_selected: Any,
     selected_video_time_input: Any,
     load_queue_trigger: Any,
     output_trigger: Any,
     abort_client_id: Any,
     handlers: DeepyChatHandlers,
 ) -> None:
+    from shared.deepy.hybrid import service_for
+    from shared.deepy.hybrid_ui import bind_handlers, bind_settings_sync, control_updates
+    hybrid = service_for(state.value)
+    if hybrid is not None:
+        bind_handlers(hybrid, handlers)
     template_modal_outputs = [
         ui.template_modal_state,
         ui.template_modal,
@@ -580,16 +493,7 @@ def bind_deepy_chat_ui(
         ui.template_modal_no_btn,
         ui.template_modal_close_btn,
     ]
-    template_dropdown_inputs = [
-        ui.default_video_generator,
-        ui.default_video_with_speech,
-        ui.default_image_generator,
-        ui.default_image_editor,
-        ui.default_song,
-        ui.default_speech_from_description,
-        ui.default_speech_from_sample,
-    ]
-    template_dropdown_outputs = list(template_dropdown_inputs)
+    template_dropdown_inputs = template_dropdown_outputs = [control.dropdown for control in ui.template_controls]  # _TEMPLATE_TOOL_ORDER
 
     def toggle_override_controls(use_template_properties):
         interactive = not deepy_ui_settings.normalize_assistant_use_template_properties(use_template_properties)
@@ -598,7 +502,14 @@ def bind_deepy_chat_ui(
     def recover_chat(state_value):
         from shared.deepy.engine import get_or_create_assistant_session
 
-        return assistant_chat.build_sync_event(get_or_create_assistant_session(state_value))
+        session = get_or_create_assistant_session(state_value)
+        output_queue = session.control_queue
+        if output_queue is not None:
+            with output_queue.condition:
+                if session.control_queue is output_queue:
+                    output_queue.push("chat_output", assistant_chat.build_sync_event(session))
+                    return gr.update()
+        return assistant_chat.build_sync_event(session)
 
     def _session_catalog(active_id="", active_session=None):
         sessions = handlers.list_saved_sessions()
@@ -639,7 +550,7 @@ def bind_deepy_chat_ui(
 
     def _session_preference_updates(settings):
         effective = bool(settings["effective_multi_session"])
-        requested = bool(settings["multi_session"])
+        requested = normalize_deepy_multi_session(settings["multi_session"])
         enabled = effective and requested
         reset_label = "New" if effective else "Reset"
         mode_status = "Multi-session mode is active." if effective else "Single-session mode is active; Reset clears the current temporary conversation."
@@ -655,6 +566,7 @@ def bind_deepy_chat_ui(
             *(gr.update(interactive=enabled) for _component in range(7)),
             gr.update(value=settings["gallery_media_mode"], interactive=enabled),
             gr.update(value=session_store.RESET_MODE_RESET, interactive=False),
+            gr.update(visible=normalize_deepy_session_mode(settings["multi_session"]) == DEEPY_MULTI_SESSION_SELECTABLE),
         )
 
     def update_session_preferences(state_value, multi_session, reset_mode, gallery_media_mode, persist=False):
@@ -666,6 +578,14 @@ def bind_deepy_chat_ui(
         return catalog_event, *_session_preference_updates(settings)
 
     def restore_saved_session_cards(state_value, storage_id):
+        if hybrid is not None:
+            from shared.deepy.errors import DeepyBusy
+            try:
+                hybrid.control('resume', {'id': storage_id})
+            except DeepyBusy as exc:
+                gr.Info(str(exc))
+                return gr.update(), gr.update(), gr.update(), gr.update(), {}, gr.update()
+            return gr.update(), gr.update(), gr.update(), gr.update(value=''), {}, gr.update()
         from shared.deepy.engine import get_or_create_assistant_session
 
         session = get_or_create_assistant_session(state_value)
@@ -751,7 +671,12 @@ def bind_deepy_chat_ui(
     def delete_saved_session(state_value, storage_id):
         if not str(storage_id or "").strip():
             return gr.update(), gr.update(), gr.update()
-        result = handlers.delete_saved_session(state_value, storage_id)
+        from shared.deepy.errors import DeepyBusy
+        try:
+            result = handlers.delete_saved_session(state_value, storage_id)
+        except DeepyBusy as exc:
+            gr.Info(str(exc))
+            return gr.update(), gr.update(), gr.update()
         catalog_event, dropdown_update = _session_catalog_event(result["active_id"], handlers.get_session_ui_settings()["effective_multi_session"])
         events = [catalog_event] if result["event"] is None else [result["event"], catalog_event]
         return assistant_chat.build_event_batch(events), dropdown_update, gr.update(value=f"Session moved to the recoverable trash folder: `{result['trash_path']}`")
@@ -794,13 +719,13 @@ def bind_deepy_chat_ui(
         body_html += _modal_message_html("Delete this session? It will be moved to the recoverable trash folder.", tone="warning")
         return _open_template_modal({"action": "session_delete", "storage_id": selected_id}, _session_modal_title_html("Delete Session"), body_html, yes_visible=True, yes_label="Delete", no_visible=True, no_label="Cancel", close_visible=False)
 
-    def track_template_selection(tool_name, selection_history, current_video_generator, current_video_with_speech, current_image_generator, current_image_editor, current_song, current_speech_from_description, current_speech_from_sample):
+    def track_template_selection(tool_name, selection_history, *current_templates):
         raw_history = selection_history if isinstance(selection_history, dict) else {}
         previous_current = None
         record = raw_history.get(tool_name)
         if isinstance(record, dict):
             previous_current = deepy_tool_settings.find_tool_variant(tool_name, record.get("current"))
-        tool_values = _tool_values_from_inputs(current_video_generator, current_video_with_speech, current_image_generator, current_image_editor, current_song, current_speech_from_description, current_speech_from_sample)
+        tool_values = _tool_values_from_inputs(*current_templates)
         normalized_history = _normalize_template_selection_history(selection_history, tool_values)
         current_value = normalized_history[tool_name]["current"]
         if previous_current is not None and previous_current != current_value:
@@ -814,44 +739,38 @@ def bind_deepy_chat_ui(
         state_value,
         output_value,
         last_choice_value,
-        audio_files_paths_value,
-        audio_file_selected_value,
         ask_request,
         client_submission_id,
         auto_cancel_queue_tasks,
         separate_requests_with_empty_line,
         use_template_properties,
+        model_speed,
+        model_size,
         override_height,
         override_width,
         override_num_frames,
         override_audio_duration,
         override_seed,
-        default_video_generator,
-        default_video_with_speech,
-        default_image_generator,
-        default_image_editor,
-        default_song,
-        default_speech_from_description,
-        default_speech_from_sample,
+        *current_templates,
     ):
-        handlers.prepare_request_context(state_value, output_value, last_choice_value, audio_files_paths_value, audio_file_selected_value)
+        if hybrid is not None:
+            hybrid.submit(ask_request, client_submission_id, steering=False)
+            yield gr.update(), gr.update(), gr.update(value=""), gr.update(), gr.update(), gr.update()
+            return
+        handlers.prepare_request_context(state_value, output_value, last_choice_value)
         update_session_ui_settings(
             state_value,
             auto_cancel_queue_tasks,
             separate_requests_with_empty_line,
             use_template_properties,
+            model_speed,
+            model_size,
             override_height,
             override_width,
             override_num_frames,
             override_audio_duration,
             override_seed,
-            default_video_generator,
-            default_video_with_speech,
-            default_image_generator,
-            default_image_editor,
-            default_song,
-            default_speech_from_description,
-            default_speech_from_sample,
+            *current_templates,
         )
         yield from _with_session_catalog_updates(state_value, handlers.ask_ai(state_value, ask_request, client_submission_id=client_submission_id))
 
@@ -859,44 +778,38 @@ def bind_deepy_chat_ui(
         state_value,
         output_value,
         last_choice_value,
-        audio_files_paths_value,
-        audio_file_selected_value,
         ask_request,
         client_submission_id,
         auto_cancel_queue_tasks,
         separate_requests_with_empty_line,
         use_template_properties,
+        model_speed,
+        model_size,
         override_height,
         override_width,
         override_num_frames,
         override_audio_duration,
         override_seed,
-        default_video_generator,
-        default_video_with_speech,
-        default_image_generator,
-        default_image_editor,
-        default_song,
-        default_speech_from_description,
-        default_speech_from_sample,
+        *current_templates,
     ):
-        handlers.prepare_request_context(state_value, output_value, last_choice_value, audio_files_paths_value, audio_file_selected_value)
+        if hybrid is not None:
+            hybrid.submit(ask_request, client_submission_id, steering=False)
+            yield gr.update(), gr.update(), gr.update(value=""), gr.update(), gr.update(), gr.update()
+            return
+        handlers.prepare_request_context(state_value, output_value, last_choice_value)
         update_session_ui_settings(
             state_value,
             auto_cancel_queue_tasks,
             separate_requests_with_empty_line,
             use_template_properties,
+            model_speed,
+            model_size,
             override_height,
             override_width,
             override_num_frames,
             override_audio_duration,
             override_seed,
-            default_video_generator,
-            default_video_with_speech,
-            default_image_generator,
-            default_image_editor,
-            default_song,
-            default_speech_from_description,
-            default_speech_from_sample,
+            *current_templates,
         )
         yield from _with_session_catalog_updates(state_value, handlers.enqueue_ai(state_value, ask_request, client_submission_id=client_submission_id))
 
@@ -904,44 +817,38 @@ def bind_deepy_chat_ui(
         state_value,
         output_value,
         last_choice_value,
-        audio_files_paths_value,
-        audio_file_selected_value,
         ask_request,
         client_submission_id,
         auto_cancel_queue_tasks,
         separate_requests_with_empty_line,
         use_template_properties,
+        model_speed,
+        model_size,
         override_height,
         override_width,
         override_num_frames,
         override_audio_duration,
         override_seed,
-        default_video_generator,
-        default_video_with_speech,
-        default_image_generator,
-        default_image_editor,
-        default_song,
-        default_speech_from_description,
-        default_speech_from_sample,
+        *current_templates,
     ):
-        handlers.prepare_request_context(state_value, output_value, last_choice_value, audio_files_paths_value, audio_file_selected_value)
+        if hybrid is not None:
+            hybrid.submit(ask_request, client_submission_id, steering=True)
+            yield gr.update(), gr.update(), gr.update(value=""), gr.update(), gr.update(), gr.update()
+            return
+        handlers.prepare_request_context(state_value, output_value, last_choice_value)
         update_session_ui_settings(
             state_value,
             auto_cancel_queue_tasks,
             separate_requests_with_empty_line,
             use_template_properties,
+            model_speed,
+            model_size,
             override_height,
             override_width,
             override_num_frames,
             override_audio_duration,
             override_seed,
-            default_video_generator,
-            default_video_with_speech,
-            default_image_generator,
-            default_image_editor,
-            default_song,
-            default_speech_from_description,
-            default_speech_from_sample,
+            *current_templates,
         )
         yield from _with_session_catalog_updates(state_value, handlers.ask_ai(state_value, ask_request, client_submission_id=client_submission_id, steering=True))
 
@@ -950,19 +857,14 @@ def bind_deepy_chat_ui(
         auto_cancel_queue_tasks,
         separate_requests_with_empty_line,
         use_template_properties,
+        model_speed,
+        model_size,
         override_height,
         override_width,
         override_num_frames,
         override_audio_duration,
         override_seed,
-        default_video_generator,
-        default_video_with_speech,
-        default_image_generator,
-        default_image_editor,
-        default_song,
-        default_speech_from_description,
-        default_speech_from_sample,
-        *,
+        *current_templates,
         persist,
     ):
         return handlers.update_tool_ui_settings(
@@ -970,18 +872,14 @@ def bind_deepy_chat_ui(
             auto_cancel_queue_tasks=auto_cancel_queue_tasks,
             separate_requests_with_empty_line=separate_requests_with_empty_line,
             use_template_properties=use_template_properties,
+            model_speed=model_speed,
+            model_size=model_size,
             width=override_width,
             height=override_height,
             num_frames=override_num_frames,
             audio_duration=override_audio_duration,
             seed=override_seed,
-            video_with_speech_variant=default_video_with_speech,
-            image_generator_variant=default_image_generator,
-            image_editor_variant=default_image_editor,
-            song_variant=default_song,
-            video_generator_variant=default_video_generator,
-            speech_from_description_variant=default_speech_from_description,
-            speech_from_sample_variant=default_speech_from_sample,
+            **{_TEMPLATE_TOOL_UI_KEY[tool]: template for tool, template in zip(_TEMPLATE_TOOL_ORDER, current_templates)},
             persist=persist,
         )
 
@@ -990,91 +888,81 @@ def bind_deepy_chat_ui(
         auto_cancel_queue_tasks,
         separate_requests_with_empty_line,
         use_template_properties,
+        model_speed,
+        model_size,
         override_height,
         override_width,
         override_num_frames,
         override_audio_duration,
         override_seed,
-        default_video_generator,
-        default_video_with_speech,
-        default_image_generator,
-        default_image_editor,
-        default_song,
-        default_speech_from_description,
-        default_speech_from_sample,
+        *current_templates,
     ):
         return _apply_ui_settings(
             state_value,
             auto_cancel_queue_tasks,
             separate_requests_with_empty_line,
             use_template_properties,
+            model_speed,
+            model_size,
             override_height,
             override_width,
             override_num_frames,
             override_audio_duration,
             override_seed,
-            default_video_generator,
-            default_video_with_speech,
-            default_image_generator,
-            default_image_editor,
-            default_song,
-            default_speech_from_description,
-            default_speech_from_sample,
+            *current_templates,
             persist=False,
         )
 
     def persist_ui_settings(
         state_value,
+        compact_actions,
         auto_cancel_queue_tasks,
         separate_requests_with_empty_line,
         use_template_properties,
+        model_speed,
+        model_size,
         override_height,
         override_width,
         override_num_frames,
         override_audio_duration,
         override_seed,
-        default_video_generator,
-        default_video_with_speech,
-        default_image_generator,
-        default_image_editor,
-        default_song,
-        default_speech_from_description,
-        default_speech_from_sample,
-        multi_session,
-        session_reset_mode,
-        session_gallery_media_mode,
+        *values,
     ):
+        *current_templates, multi_session, session_reset_mode, session_gallery_media_mode = values
+        if hybrid is not None:
+            hybrid.update_display_settings({"compact_actions": compact_actions})
         _apply_ui_settings(
             state_value,
             auto_cancel_queue_tasks,
             separate_requests_with_empty_line,
             use_template_properties,
+            model_speed,
+            model_size,
             override_height,
             override_width,
             override_num_frames,
             override_audio_duration,
             override_seed,
-            default_video_generator,
-            default_video_with_speech,
-            default_image_generator,
-            default_image_editor,
-            default_song,
-            default_speech_from_description,
-            default_speech_from_sample,
+            *current_templates,
             persist=True,
         )
         return update_session_preferences(state_value, multi_session, session_reset_mode, session_gallery_media_mode, persist=True)
 
     def stop_ai_with_ui(state_value):
-        return handlers.stop_ai(state_value)
+        return control_updates(hybrid, "stop") if hybrid is not None else handlers.stop_ai(state_value)
 
     def pause_ai_with_ui(state_value):
-        return handlers.stop_ai(state_value, queued_action=assistant_chat.PAUSE_TOGGLE_ACTION)
+        return control_updates(hybrid, "pause") if hybrid is not None else handlers.stop_ai(state_value, queued_action=assistant_chat.PAUSE_TOGGLE_ACTION)
 
     def queued_request_action_with_ui(state_value, action_payload):
+        if hybrid is not None:
+            import json
+            return control_updates(hybrid, "queued", json.loads(action_payload))
         return handlers.stop_ai(state_value, queued_action=action_payload)
 
     def reset_ai_with_ui(state_value, reset_mode):
+        if hybrid is not None:
+            return *control_updates(hybrid, "reset"), gr.update()
         from shared.deepy.engine import get_or_create_assistant_session
 
         result = handlers.reset_ai(state_value, reset_mode=reset_mode)
@@ -1123,8 +1011,8 @@ def bind_deepy_chat_ui(
         modal_state = {"action": "delete", "tool_name": tool_name, "variant_name": selected_variant}
         return _open_template_modal(modal_state, title_html, body_html, yes_visible=True, no_visible=True, close_visible=False)
 
-    def confirm_template_modal_action(template_modal_state, selection_history, current_video_generator, current_video_with_speech, current_image_generator, current_image_editor, current_song, current_speech_from_description, current_speech_from_sample):
-        tool_values = _tool_values_from_inputs(current_video_generator, current_video_with_speech, current_image_generator, current_image_editor, current_song, current_speech_from_description, current_speech_from_sample)
+    def confirm_template_modal_action(template_modal_state, selection_history, *current_templates):
+        tool_values = _tool_values_from_inputs(*current_templates)
         normalized_history = _normalize_template_selection_history(selection_history, tool_values)
         modal_state = template_modal_state if isinstance(template_modal_state, dict) else {}
         action = str(modal_state.get("action", "")).strip().lower()
@@ -1163,13 +1051,14 @@ def bind_deepy_chat_ui(
             modal_updates = _open_template_modal({}, _modal_title_html(tool_name), body_html, close_visible=True)
             return (*dropdown_noops, normalized_history, *modal_updates)
 
-    def confirm_modal_action(modal_state_value, modal_input, state_value, selection_history, current_video_generator, current_video_with_speech, current_image_generator, current_image_editor, current_song, current_speech_from_description, current_speech_from_sample):
+    def confirm_modal_action(modal_state_value, modal_input, state_value, selection_history, *current_templates):
         modal_state = modal_state_value if isinstance(modal_state_value, dict) else {}
         action = str(modal_state.get("action", "")).strip().lower()
         if not action.startswith("session_"):
-            template_result = confirm_template_modal_action(modal_state, selection_history, current_video_generator, current_video_with_speech, current_image_generator, current_image_editor, current_song, current_speech_from_description, current_speech_from_sample)
-            return (*template_result[:8], gr.update(), gr.update(), gr.update(), *template_result[8:])
-        tool_values = _tool_values_from_inputs(current_video_generator, current_video_with_speech, current_image_generator, current_image_editor, current_song, current_speech_from_description, current_speech_from_sample)
+            template_result = confirm_template_modal_action(modal_state, selection_history, *current_templates)
+            split = len(_TEMPLATE_TOOL_ORDER) + 1
+            return (*template_result[:split], gr.update(), gr.update(), gr.update(), *template_result[split:])
+        tool_values = _tool_values_from_inputs(*current_templates)
         normalized_history = _normalize_template_selection_history(selection_history, tool_values)
         dropdown_noops = tuple(gr.update() for _ in _TEMPLATE_TOOL_ORDER)
         storage_id = str(modal_state.get("storage_id", "")).strip()
@@ -1260,9 +1149,16 @@ def bind_deepy_chat_ui(
         ui.session_import_file,
         ui.session_gallery_media_mode,
         ui.session_reset_mode,
+        ui.session_workspace_picker,
     ]
     for component in (ui.multi_session, ui.session_reset_mode, ui.session_gallery_media_mode):
-        component.change(fn=update_session_preferences, inputs=session_preference_inputs, outputs=session_preference_outputs, show_progress="hidden", queue=False)
+        (component.input if hybrid is not None else component.change)(fn=update_session_preferences, inputs=session_preference_inputs, outputs=session_preference_outputs, show_progress="hidden", queue=False)
+
+    if hybrid is not None:
+        from types import SimpleNamespace
+        preference_view = SimpleNamespace(fn=lambda requested, mode: _session_preference_updates({**handlers.get_session_ui_settings(), 'multi_session': requested, 'gallery_media_mode': mode}), inputs=[ui.multi_session, ui.session_gallery_media_mode], outputs=session_preference_outputs[1:])
+        with ui.settings_panel:
+            settings_form = bind_settings_sync(hybrid, state, ui, _template_dropdown_updates, _session_catalog_event, preference_view)
 
     def wire_session_resume(button, storage_input):
         button.click(fn=restore_saved_session_cards, inputs=[state, storage_input], outputs=[ui.chat_event, ui.session_dropdown, ui.session_status, ui.request, ui.session_resume_state, output_trigger], show_progress="hidden")
@@ -1276,25 +1172,26 @@ def bind_deepy_chat_ui(
     ui.session_export_btn.click(fn=export_saved_session, inputs=[state, ui.session_dropdown], outputs=[ui.session_export_file, ui.session_status], show_progress="hidden")
     ui.session_import_file.upload(fn=import_saved_session, inputs=[ui.session_import_file], outputs=[ui.chat_event, ui.session_dropdown, ui.session_status, ui.session_import_file], show_progress="hidden")
     ui.session_delete_btn.click(fn=open_delete_session_modal, inputs=[ui.session_dropdown], outputs=template_modal_outputs, show_progress="hidden", queue=False)
-    ui.settings_save_btn.click(
-        fn=persist_ui_settings,
+    def save_settings(*args):
+        from shared.utils.form_sync import Saved
+        return Saved(persist_ui_settings(*args))
+
+    save_settings_event = (lambda **kwargs: settings_form.bind_save(ui.settings_save_btn.click, save_settings, **kwargs)) if hybrid is not None else (lambda **kwargs: ui.settings_save_btn.click(fn=persist_ui_settings, **kwargs))
+    save_settings_event(
         inputs=[
             state,
+            ui.compact_actions,
             ui.auto_cancel_queue_tasks,
             ui.separate_requests_with_empty_line,
             ui.use_template_properties,
+            ui.model_speed,
+            ui.model_size,
             ui.override_height,
             ui.override_width,
             ui.override_num_frames,
             ui.override_audio_duration,
             ui.override_seed,
-            ui.default_video_generator,
-            ui.default_video_with_speech,
-            ui.default_image_generator,
-            ui.default_image_editor,
-            ui.default_song,
-            ui.default_speech_from_description,
-            ui.default_speech_from_sample,
+            *template_dropdown_inputs,
             ui.multi_session,
             ui.session_reset_mode,
             ui.session_gallery_media_mode,
@@ -1308,25 +1205,19 @@ def bind_deepy_chat_ui(
             state,
             output,
             last_choice,
-            audio_files_paths,
-            audio_file_selected,
             ui.request,
             ui.submission_id,
             ui.auto_cancel_queue_tasks,
             ui.separate_requests_with_empty_line,
             ui.use_template_properties,
+            ui.model_speed,
+            ui.model_size,
             ui.override_height,
             ui.override_width,
             ui.override_num_frames,
             ui.override_audio_duration,
             ui.override_seed,
-            ui.default_video_generator,
-            ui.default_video_with_speech,
-            ui.default_image_generator,
-            ui.default_image_editor,
-            ui.default_song,
-            ui.default_speech_from_description,
-            ui.default_speech_from_sample,
+            *template_dropdown_inputs,
         ],
         outputs=[ui.chat_event, load_queue_trigger, ui.request, output_trigger, abort_client_id, ui.session_dropdown],
         show_progress="hidden",
@@ -1338,25 +1229,19 @@ def bind_deepy_chat_ui(
             state,
             output,
             last_choice,
-            audio_files_paths,
-            audio_file_selected,
             ui.busy_queue_request,
             ui.busy_queue_submission_id,
             ui.auto_cancel_queue_tasks,
             ui.separate_requests_with_empty_line,
             ui.use_template_properties,
+            ui.model_speed,
+            ui.model_size,
             ui.override_height,
             ui.override_width,
             ui.override_num_frames,
             ui.override_audio_duration,
             ui.override_seed,
-            ui.default_video_generator,
-            ui.default_video_with_speech,
-            ui.default_image_generator,
-            ui.default_image_editor,
-            ui.default_song,
-            ui.default_speech_from_description,
-            ui.default_speech_from_sample,
+            *template_dropdown_inputs,
         ],
         outputs=[ui.chat_event, load_queue_trigger, ui.request, output_trigger, abort_client_id, ui.session_dropdown],
         show_progress="hidden",
@@ -1368,25 +1253,19 @@ def bind_deepy_chat_ui(
             state,
             output,
             last_choice,
-            audio_files_paths,
-            audio_file_selected,
             ui.steer_request,
             ui.steer_submission_id,
             ui.auto_cancel_queue_tasks,
             ui.separate_requests_with_empty_line,
             ui.use_template_properties,
+            ui.model_speed,
+            ui.model_size,
             ui.override_height,
             ui.override_width,
             ui.override_num_frames,
             ui.override_audio_duration,
             ui.override_seed,
-            ui.default_video_generator,
-            ui.default_video_with_speech,
-            ui.default_image_generator,
-            ui.default_image_editor,
-            ui.default_song,
-            ui.default_speech_from_description,
-            ui.default_speech_from_sample,
+            *template_dropdown_inputs,
         ],
         outputs=[ui.chat_event, load_queue_trigger, ui.request, output_trigger, abort_client_id, ui.session_dropdown],
         show_progress="hidden",

@@ -1,9 +1,12 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import atexit
 import copy
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 import shutil
@@ -13,11 +16,15 @@ import urllib.parse
 import uuid
 import zipfile
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from shared.utils.gallery_media import disambiguate_gallery_media_ids, gallery_media_ids
+from shared.utils.gallery_sources import MESH_EXTENSIONS, WORLD_EXTENSIONS
+from shared.utils.readable_paths import available_path, safe_name
 
 
 SESSION_SCHEMA_VERSION = 1
@@ -43,6 +50,8 @@ _SESSIONS_ROOT = (Path.cwd() / DEFAULT_SESSIONS_FOLDER).resolve()
 _WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="deepy-session-save")
 _OWNED_LOCKS: dict[str, tuple[str, Path]] = {}
 _UI_JOURNAL_STATES: dict[str, dict[str, Any]] = {}
+# Sessions opened from folders outside the catalog (plugin sessions, parked conversations), by id.
+_EXTERNAL: dict[str, Path] = {}
 
 
 class SessionStoreError(RuntimeError):
@@ -123,31 +132,213 @@ def automatic_title(first_request: str, max_words: int = 10, max_chars: int = 60
     return title or "Deepy session"
 
 
+def _unique_title(title: str, storage_id: str = "") -> str:
+    title = re.sub(r"\s+", " ", str(title or "")).strip()[:120]
+    if not title:
+        raise SessionStoreError("Session title cannot be empty.")
+    used_titles = {str(item["title"]).casefold() for item in list_sessions() if item["id"] != storage_id}
+    candidate = title
+    number = 2
+    while candidate.casefold() in used_titles:
+        suffix = f" ({number})"
+        candidate = title[:120 - len(suffix)].rstrip() + suffix
+        number += 1
+    return candidate
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _new_storage_id(root: Path | None = None) -> str:
     root = sessions_root() if root is None else root
+    used = _session_manifests(root)
     while True:
         candidate = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        if not (root / candidate).exists():
+        if candidate not in used and not (root / candidate).exists():
             return candidate
 
 
-def _validated_session_dir(storage_id: str, *, must_exist: bool = True) -> Path:
+def _session_manifests(root: Path | None = None) -> dict[str, tuple[Path, dict[str, Any]]]:
+    root = sessions_root() if root is None else root
+    records = {}
+    if not root.is_dir():
+        return records
+    for directory in root.iterdir():
+        if directory.name.startswith('.') or directory.name == '_exports' or not directory.is_dir() or directory.resolve() != directory:
+            continue
+        manifest_path = directory / 'session.json'
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = _read_json(manifest_path)
+        except SessionStoreError:
+            continue
+        identity = str(manifest.get('id', ''))
+        if not _SESSION_ID_RE.fullmatch(identity):
+            continue
+        if identity in records:
+            raise SessionStoreError(f'Duplicate Deepy session identifier: {identity}')
+        records[identity] = (directory, manifest)
+    return records
+
+
+def _new_session_directory(root: Path, title: str) -> Path:
+    name = safe_name(title)
+    if _MONO_SESSION_DIR_RE.fullmatch(name):
+        name = '_' + name
+    reserved = ['_exports']
+    for _directory, manifest in _session_manifests(root).values():
+        reserved.extend(Path(path).name for path in manifest.get('previous_directories', []) if Path(path).parent == root)
+    return available_path(root, name, reserved=reserved)
+
+
+def _validated_session_dir(storage_id: str) -> Path:
     storage_id = str(storage_id or "").strip()
     if not _SESSION_ID_RE.fullmatch(storage_id):
         raise SessionStoreError("Invalid Deepy session identifier.")
-    root = sessions_root()
-    path = (root / storage_id).resolve()
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise SessionStoreError("Deepy session path escapes the sessions root.") from exc
-    if must_exist and not path.is_dir():
+    records = _session_manifests()
+    if storage_id not in records:
         raise SessionStoreError(f"Deepy session does not exist: {storage_id}")
-    return path
+    return records[storage_id][0]
+
+
+def _session_dir(storage_id: str) -> Path:
+    with _ROOT_LOCK:
+        external = _EXTERNAL.get(storage_id)
+    return external if external is not None else _validated_session_dir(storage_id)
+
+
+def open_external_session(directory: str | os.PathLike[str]) -> str | None:
+    """Register a session folder kept outside the catalog. Returns its id, or None for an empty folder."""
+    directory = Path(directory).expanduser().resolve()
+    root = sessions_root()
+    parts = directory.relative_to(root).parts if directory.is_relative_to(root) else None
+    if parts is not None and (not parts or not parts[0].startswith('.')):
+        raise SessionStoreError("Choose a session folder outside the Deepy sessions folder.")
+    if not (directory / "session.json").is_file():
+        if directory.exists() and any(directory.iterdir()):
+            raise SessionStoreError(f"{directory} is not empty and holds no Deepy session.")
+        return None
+    storage_id = str(_read_json(directory / "session.json").get("id", ""))
+    if not _SESSION_ID_RE.fullmatch(storage_id):
+        raise SessionStoreError("Invalid Deepy session identifier.")
+    with _ROOT_LOCK:
+        if _EXTERNAL.get(storage_id, directory) != directory or storage_id in _session_manifests():
+            raise SessionStoreError(f"Another Deepy session already uses the identifier {storage_id}.")
+        _EXTERNAL[storage_id] = directory
+    return storage_id
+
+
+def close_external_session(storage_id: str) -> None:
+    with _ROOT_LOCK:
+        _EXTERNAL.pop(storage_id, None)
+
+
+def session_folder_in_use(directory: Path) -> bool:
+    lock_path = directory / ".session.lock"
+    return lock_path.is_file() and _process_alive(int(_read_json(lock_path).get("pid", 0) or 0))
+
+
+class SessionReferences:
+    """Resolve persistent session IDs independently of their current folder names."""
+    def __init__(self):
+        self.records = _session_manifests()
+        self.roots = {}
+        for identity, (directory, manifest) in self.records.items():
+            for root in [str(directory), *manifest.get('previous_directories', [])]:
+                key = os.path.normcase(os.path.abspath(root))
+                if key in self.roots and self.roots[key] != identity:
+                    raise SessionStoreError(f'Ambiguous Deepy session folder: {root}')
+                self.roots[key] = identity
+
+    def encode(self, path):
+        if isinstance(path, dict):
+            self.validate(path)
+            return path
+        if not isinstance(path, str):
+            raise SessionStoreError('Invalid session media path.')
+        candidate = Path(os.path.abspath(path))
+        for parent in candidate.parents:
+            identity = self.roots.get(os.path.normcase(str(parent)))
+            if identity is not None:
+                reference = {'deepy_session_id': identity, 'path': candidate.relative_to(parent).as_posix()}
+                return reference
+        return path
+
+    @staticmethod
+    def validate(reference):
+        if not isinstance(reference, dict) or set(reference) != {'deepy_session_id', 'path'}:
+            raise SessionStoreError('Invalid Deepy session media reference.')
+        identity, relative = reference['deepy_session_id'], reference['path']
+        if not isinstance(identity, str) or not _SESSION_ID_RE.fullmatch(identity):
+            raise SessionStoreError('Invalid Deepy session identifier in media reference.')
+        if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or '..' in Path(relative.replace('\\', '/')).parts or ':' in relative or relative.startswith(('\\', '/')):
+            raise SessionStoreError('Invalid relative Deepy session media path.')
+        return identity, relative
+
+    def resolve(self, reference):
+        identity, relative = self.validate(reference)
+        if identity not in self.records:
+            return None
+        try:
+            return str(_session_member_path(self.records[identity][0], relative))
+        except (OSError, SessionStoreError):
+            # A replaced folder/link must never grant access outside this session.
+            return None
+
+    def path(self, value):
+        reference = self.encode(value)
+        return (self.resolve(reference) or reference) if isinstance(reference, dict) else reference
+
+    def rebase(self, value):
+        replacements = {}
+        for _identity, (directory, manifest) in self.records.items():
+            for original in manifest.get('previous_directories', []):
+                if original == str(directory):
+                    continue
+                for before, after in ((original, str(directory)), (Path(original).as_posix(), directory.as_posix())):
+                    # Include the separator so a sibling with the same prefix is untouched.
+                    separator = '\\' if '\\' in before else '/'
+                    replacements[before + separator] = after + separator
+                    replacements[urllib.parse.quote(before + separator, safe='/')] = urllib.parse.quote(after + separator, safe='/')
+                    replacements[json.dumps(before + separator, ensure_ascii=False)[1:-1]] = json.dumps(after + separator, ensure_ascii=False)[1:-1]
+        return _replace_paths(value, replacements)
+
+
+def migrate_session_folders(*, blocked=()):
+    """One-time rename of ID-named folders; locked/failed folders stay usable in place."""
+    logger = logging.getLogger('wangp.workspaces')
+    renamed, skipped = [], []
+    with _ROOT_LOCK:
+        for identity, (directory, manifest) in _session_manifests().items():
+            if directory.name != identity:
+                continue
+            if identity in blocked:
+                skipped.append(identity)
+                logger.warning('Deepy session folder rename skipped for %s: used as a dedicated workspace folder. No retry on later startups.', directory)
+                continue
+            lease = SimpleNamespace(session_lock_path='', session_lock_token='', pending_session_save=None, storage_session_dir='')
+            try:
+                _acquire_session_lock(lease, directory)
+                destination = _new_session_directory(directory.parent, manifest['title'])
+                aliases = list(dict.fromkeys([*manifest.get('previous_directories', []), str(directory)]))
+                # Publish the old root before moving: interruption on either side is recoverable.
+                _atomic_json(directory / 'session.json', {**manifest, 'previous_directories': aliases})
+                directory.rename(destination)
+                lease.session_lock_path = str(destination / '.session.lock')
+                _OWNED_LOCKS[lease.session_lock_token] = (str(destination), Path(lease.session_lock_path))
+                _forget_ui_journal(directory)
+                renamed.append(identity)
+            except (OSError, SessionStoreError) as error:
+                skipped.append(identity)
+                logger.warning('Deepy session folder rename skipped for %s: %s No retry on later startups.', directory, error)
+            finally:
+                try:
+                    release_session_lock(lease)
+                except OSError as error:
+                    logger.warning('Cannot release Deepy migration lock for %s: %s', directory, error)
+    return {'renamed': renamed, 'skipped': skipped}
 
 
 def _json_safe(value: Any) -> Any:
@@ -164,7 +355,10 @@ def _json_safe(value: Any) -> Any:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        # Windows cannot replace a file while another thread has it open.
+        with _ROOT_LOCK:
+            content = path.read_text(encoding="utf-8")
+        value = json.loads(content)
     except (OSError, ValueError) as exc:
         raise SessionStoreError(f"Cannot read Deepy session file: {path.name}") from exc
     if not isinstance(value, dict):
@@ -177,7 +371,8 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(json.dumps(_json_safe(value), ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.replace(temporary, path)
+        with _ROOT_LOCK:
+            os.replace(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -325,7 +520,7 @@ def _block_replay_event(record: dict[str, Any], block: dict[str, Any], message_i
         "block_type": block_type,
         "block_index": int(block_index),
         "html": assistant_chat._render_block_html(record, block, streaming=False),
-        "text": str(block.get("text", "") or "") if block_type in {"markdown", "reasoning", "context_summary"} else "",
+        "text": str(block.get("text", "") or "") if block_type in {"markdown", "reasoning", "context_summary", "context_thinking"} else "",
         "streaming": False,
     }
 
@@ -346,7 +541,7 @@ def _consolidated_ui_transcript(previous: list[dict[str, Any]], current: list[di
                 continue
             block_id = str(block.get("id", "") or "")
             block_type = str(block.get("type", "markdown") or "markdown")
-            incomplete_text = block_type in {"markdown", "reasoning", "context_summary"} and bool(block.get("streaming", False))
+            incomplete_text = block_type in {"markdown", "reasoning", "context_summary", "context_thinking"} and bool(block.get("streaming", False))
             incomplete_tool = block_type == "tool" and (bool(block.get("request_pending", False)) or str(block.get("status", "") or "").strip().lower() not in {"done", "error", "failed", "interrupted", "cancelled"})
             if incomplete_text or incomplete_tool:
                 if block_id in previous_blocks:
@@ -546,35 +741,48 @@ def bind_session_persistence(session) -> None:
     session.safe_checkpoint_callback = schedule_autosave
 
 
-def ensure_session(session, first_request: str, deepy_type: str, gallery_media_mode: str, environment: dict[str, Any] | None = None) -> dict[str, Any]:
+def ensure_session(session, first_request: str, deepy_type: str, gallery_media_mode: str, environment: dict[str, Any] | None = None, *, media_import=False, directory: Path | None = None) -> dict[str, Any]:
     deepy_type = str(deepy_type or "").strip().lower()
     if session.storage_session_id:
         if session.storage_deepy_type != deepy_type:
             raise SessionStoreError("A Deepy session cannot change between Prime and Zero.")
         session.gallery_media_mode = normalize_gallery_media_mode(gallery_media_mode or session.gallery_media_mode)
         session.session_environment = _json_safe(environment or session.session_environment)
+        if session.storage_title_pending and str(first_request or '').strip():
+            session.storage_title = _unique_title(automatic_title(first_request), session.storage_session_id)
+            session.storage_title_pending = False
         bind_session_persistence(session)
         return session_metadata(session)
     request = str(first_request or "").strip()
-    if not request:
+    if not request and not media_import:
         raise SessionStoreError("A Deepy session is created only when its first request is sent.")
     root = sessions_root()
     root.mkdir(parents=True, exist_ok=True)
-    storage_id = _new_storage_id(root)
-    directory = root / storage_id
-    directory.mkdir()
+    with _ROOT_LOCK:
+        storage_id = _new_storage_id(root)
+        title = session.storage_title or ('New Deepy session' if media_import else automatic_title(request))
+        if directory is None:
+            title = _unique_title(title, storage_id)
+            directory = _new_session_directory(root, title)
+            directory.mkdir()
+        else:
+            # An external folder (see open_external_session) keeps its caller's title.
+            directory.mkdir(parents=True, exist_ok=True)
+            _EXTERNAL[storage_id] = directory
     (directory / "workspace").mkdir()
     _acquire_session_lock(session, directory)
     now = _utc_now()
     session.storage_session_id = storage_id
     session.storage_session_dir = str(directory)
-    session.storage_title = automatic_title(request)
+    session.storage_title_pending = media_import and not session.storage_title
+    session.storage_title = title
     session.storage_deepy_type = deepy_type
     session.storage_created_at = now
     session.storage_updated_at = now
     session.gallery_media_mode = normalize_gallery_media_mode(gallery_media_mode)
     session.session_environment = _json_safe(environment or {})
     session.chat_session_id = storage_id
+    _atomic_json(directory / 'session.json', {'schema_version': SESSION_SCHEMA_VERSION, **session_metadata(session)})
     bind_session_persistence(session)
     return session_metadata(session)
 
@@ -583,10 +791,12 @@ def session_metadata(session) -> dict[str, Any]:
     return {
         "id": str(session.storage_session_id or ""),
         "title": str(session.storage_title or ""),
+        **({"title_pending": True} if session.storage_title_pending else {}),
         "deepy_type": str(session.storage_deepy_type or ""),
         "created_at": str(session.storage_created_at or ""),
         "updated_at": str(session.storage_updated_at or ""),
         "gallery_media_mode": normalize_gallery_media_mode(session.gallery_media_mode),
+        **({"gallery_workspace_id": session.gallery_workspace_id} if session.gallery_workspace_id else {}),
     }
 
 
@@ -594,11 +804,6 @@ def session_workspace(session) -> Path | None:
     if not session.storage_session_dir:
         return None
     return Path(session.storage_session_dir) / "workspace"
-
-
-def _artifact_snapshot(session) -> dict[str, Any]:
-    workspace = session.artifact_workspace
-    return workspace.snapshot_state() if workspace is not None else {}
 
 
 def _pending_action_from_runtime(runtime: Any) -> dict[str, Any] | None:
@@ -648,18 +853,21 @@ def _capture_snapshot(session) -> dict[str, Any] | None:
             "chat": {
                 "messages": saved_messages,
                 "transcript": saved_transcript,
+                "turn_durations": dict(session.chat_turn_durations),
                 "transcript_counter": int(session.chat_transcript_counter or 0),
                 "revision": int(session.chat_revision or 0),
                 "interruption_notice": str(session.interruption_notice or ""),
                 "interruption_history": copy.deepcopy(session.interruption_history),
             },
             "media": copy.deepcopy(session.media_registry),
-            "artifacts": _artifact_snapshot(session),
-            "ui": {"tool_settings": copy.deepcopy(session.tool_ui_settings)},
+            "ui": {"tool_settings": copy.deepcopy(session.tool_ui_settings), "model_selection_runtime_signature": session.model_selection_runtime_signature},
             "runtime": {
+                "pending_chat_media": copy.deepcopy(session.pending_chat_media),
                 "generated_client_ids": list(session.generated_client_ids),
                 "selected_visual_signature": str(session.selected_visual_runtime_signature or ""),
                 "selected_audio_signature": str(session.selected_audio_runtime_signature or ""),
+                "selected_mesh_signature": str(session.selected_mesh_runtime_signature or ""),
+                "selected_world_signature": str(session.selected_world_runtime_signature or ""),
                 "pending_action": pending_action,
             },
             "environment": copy.deepcopy(session.session_environment),
@@ -680,9 +888,10 @@ def _workspace_media(directory: Path) -> list[dict[str, Any]]:
     workspace = directory / "workspace"
     if not workspace.is_dir():
         return []
+    sandbox = workspace / "sandbox"  # the Python sandbox's scratch (frames, work files) stays private; its deliverables are published to the outputs
     records = []
     for path in sorted(workspace.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in _MEDIA_EXTENSIONS:
+        if not path.is_file() or path.suffix.lower() not in _MEDIA_EXTENSIONS or path.is_relative_to(sandbox):
             continue
         relative = path.relative_to(directory).as_posix()
         digest = hashlib.sha1(relative.casefold().encode("utf-8")).hexdigest()[:12]
@@ -693,8 +902,9 @@ def _workspace_media(directory: Path) -> list[dict[str, Any]]:
 def _prepare_media(directory: Path, records: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
     prepared = []
     known_paths = set()
+    references = SessionReferences()
     for raw_record in records:
-        if not isinstance(raw_record, dict):
+        if not isinstance(raw_record, dict) or raw_record.get("source") == "workspace":  # rescanned from the workspace folder below
             continue
         record = _json_safe(copy.deepcopy(raw_record))
         accesses = {str(value).strip().lower() for value in list(record.get("access", []) or [])}
@@ -705,6 +915,11 @@ def _prepare_media(directory: Path, records: list[dict[str, Any]], mode: str) ->
         record["access"] = sorted(accesses)
         raw_path = str(record.get("path", "") or "").strip()
         path = Path(raw_path) if raw_path else None
+        reference = references.encode(raw_path) if raw_path else None
+        if isinstance(reference, dict):
+            record['session_reference'] = reference
+        elif path is not None and path.is_file():
+            record.pop('session_reference', None)
         if path is not None and path.is_file():
             try:
                 record["fingerprint"] = _fingerprint(path)
@@ -725,6 +940,10 @@ def _prepare_media(directory: Path, records: list[dict[str, Any]], mode: str) ->
         prepared.append(record)
     for record in _workspace_media(directory):
         if record["path_key"] not in known_paths:
+            # Folders outside the catalog have no references; their workspace media keep a session-relative path.
+            reference = references.encode(record['path'])
+            if isinstance(reference, dict):
+                record['session_reference'] = reference
             prepared.append(record)
     return prepared
 
@@ -771,16 +990,21 @@ def _write_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "schema_version": SESSION_SCHEMA_VERSION,
         "id": metadata["id"],
         "title": metadata["title"],
+        **({"title_pending": True} if metadata.get("title_pending") else {}),
         "deepy_type": metadata["deepy_type"],
         "created_at": metadata["created_at"],
         "updated_at": updated_at,
         "gallery_media_mode": mode,
+        **({"gallery_workspace_id": metadata["gallery_workspace_id"]} if metadata.get("gallery_workspace_id") else {}),
         "context_revision": int(snapshot["revision"]),
         "message_count": len(context["chat"]["messages"]),
         "card_count": card_count,
         "replay_sequence": replay_sequence,
         "media_count": len(media),
     }
+    previous_directories = _read_json(directory / 'session.json').get('previous_directories', [])
+    if previous_directories:
+        manifest['previous_directories'] = previous_directories
     context["saved_at"] = updated_at
     context["checkpoint_revision"] = int(snapshot["revision"])
     _atomic_json(directory / "context.json", context)
@@ -828,17 +1052,8 @@ def list_sessions(deepy_type: str | None = None) -> list[dict[str, Any]]:
         return []
     normalized_type = str(deepy_type or "").strip().lower()
     sessions = []
-    for directory in root.iterdir():
-        if not directory.is_dir() or not _SESSION_ID_RE.fullmatch(directory.name):
-            continue
-        manifest_path = directory / "session.json"
-        if not manifest_path.is_file():
-            continue
-        try:
-            manifest = _read_json(manifest_path)
-        except SessionStoreError:
-            continue
-        if str(manifest.get("id", "")) != directory.name:
+    for _directory, manifest in _session_manifests(root).values():
+        if manifest.get("archived_at"):
             continue
         if normalized_type and str(manifest.get("deepy_type", "")).strip().lower() != normalized_type:
             continue
@@ -862,6 +1077,16 @@ def _replace_paths(value: Any, replacements: dict[str, str]) -> Any:
     return value
 
 
+def _rebind_session_references(value, old_id, new_id):
+    if isinstance(value, dict):
+        if set(value) == {'deepy_session_id', 'path'} and value['deepy_session_id'] == old_id:
+            return {**value, 'deepy_session_id': new_id}
+        return {key: _rebind_session_references(child, old_id, new_id) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_rebind_session_references(child, old_id, new_id) for child in value]
+    return value
+
+
 def _register_path_replacement(replacements: dict[str, str], original: str, replacement: str) -> None:
     if not original or original == replacement:
         return
@@ -870,6 +1095,7 @@ def _register_path_replacement(replacements: dict[str, str], original: str, repl
     normalized_replacement = os.path.normpath(replacement).replace("\\", "/")
     replacements[normalized_original] = normalized_replacement
     replacements[urllib.parse.quote(normalized_original, safe="/")] = urllib.parse.quote(normalized_replacement, safe="/")
+    replacements[json.dumps(original, ensure_ascii=False)[1:-1]] = json.dumps(replacement, ensure_ascii=False)[1:-1]
 
 
 def _session_member_path(directory: Path, relative_path: str) -> Path:
@@ -898,8 +1124,10 @@ def _session_replay_commands(directory: Path, context: dict[str, Any]) -> tuple[
 
 
 def validate_session(storage_id: str, deepy_type: str, active_session=None) -> dict[str, Any]:
-    directory = _validated_session_dir(storage_id)
+    directory = _session_dir(storage_id)
     manifest = _read_json(directory / "session.json")
+    if manifest.get("archived_at"):
+        raise SessionStoreError("Restore this archived session and its workspace before resuming it.")
     context = _read_json(directory / "context.json")
     if str(manifest.get("id", "")) != storage_id or str(context.get("session_id", "")) != storage_id:
         raise SessionStoreError("Deepy session identifiers do not match its directory.")
@@ -916,13 +1144,12 @@ def validate_session(storage_id: str, deepy_type: str, active_session=None) -> d
     for record in list(context.get("media", []) or []):
         if not isinstance(record, dict):
             continue
+        if 'session_reference' in record:
+            SessionReferences.validate(record['session_reference'])
         for key in ("session_relative_path", "session_copy_path"):
             relative_path = str(record.get(key, "") or "")
             if relative_path:
                 _session_member_path(directory, relative_path)
-    from shared.deepy.artifacts import ArtifactWorkspace
-
-    ArtifactWorkspace().restore_state(context.get("artifacts", {}))
     lock_path = directory / ".session.lock"
     active_lock = active_session is not None and active_session.storage_session_id == storage_id and Path(str(active_session.session_lock_path or "")) == lock_path
     if lock_path.is_file() and not active_lock:
@@ -933,8 +1160,10 @@ def validate_session(storage_id: str, deepy_type: str, active_session=None) -> d
 
 
 def load_session(session, storage_id: str, deepy_type: str) -> dict[str, Any]:
-    directory = _validated_session_dir(storage_id)
+    directory = _session_dir(storage_id)
     manifest = _read_json(directory / "session.json")
+    if manifest.get("archived_at"):
+        raise SessionStoreError("Restore this archived session and its workspace before resuming it.")
     context = _read_json(directory / "context.json")
     if str(manifest.get("id", "")) != storage_id or str(context.get("session_id", "")) != storage_id:
         raise SessionStoreError("Deepy session identifiers do not match its directory.")
@@ -945,13 +1174,24 @@ def load_session(session, storage_id: str, deepy_type: str) -> dict[str, Any]:
     if requested_type != stored_type:
         raise SessionStoreError(f"This is a Deepy {stored_type.title()} session and cannot be opened in Deepy {requested_type.title()}.")
     _preserve_gallery_media_ids(context)
+    references = SessionReferences()
+    context = references.rebase(context)
     replacements = {}
     media_records = list(context.get("media", []) or [])
     missing_media = []
     for record in media_records:
         if not isinstance(record, dict):
             continue
-        original = str(record.get("path", "") or "")
+        original = str(record.get("path", "") or record.get('unavailable_path', '') or "")
+        if 'session_reference' in record:
+            resolved = references.resolve(record['session_reference'])
+            if resolved and Path(resolved).is_file():
+                if original:
+                    _register_path_replacement(replacements, original, resolved)
+                record['path'] = resolved
+                record['path_key'] = os.path.normcase(resolved)
+                record.pop('unavailable_path', None)
+                continue
         session_relative = str(record.get("session_relative_path", "") or "")
         if session_relative:
             relative_path = _session_member_path(directory, session_relative)
@@ -961,7 +1201,7 @@ def load_session(session, storage_id: str, deepy_type: str) -> dict[str, Any]:
                 record["path"] = str(relative_path)
                 record["path_key"] = os.path.normcase(str(relative_path))
                 continue
-        if original and Path(original).is_file():
+        if 'session_reference' not in record and original and Path(original).is_file():
             continue
         copied = str(record.get("session_copy_path", "") or "")
         copied_path = _session_member_path(directory, copied) if copied else None
@@ -972,28 +1212,33 @@ def load_session(session, storage_id: str, deepy_type: str) -> dict[str, Any]:
             record["path_key"] = os.path.normcase(str(copied_path.resolve()))
         elif original:
             missing_media.append(original)
+            if 'session_reference' in record:
+                record['unavailable_path'] = original
+                record['path'] = record['path_key'] = ''
     context = _replace_paths(context, replacements)
     _preserve_gallery_media_ids(context, rebind_paths=True)
     replay_commands, replay_sequence = _session_replay_commands(directory, context)
-    replay_commands = _replace_paths(replay_commands, replacements)
+    replay_commands = references.rebase(_replace_paths(replay_commands, replacements))
     chat = context.get("chat", {})
     if not isinstance(chat, dict):
         raise SessionStoreError("Invalid Deepy session chat context.")
-    from shared.deepy.artifacts import ArtifactWorkspace
-
-    artifact_workspace = ArtifactWorkspace()
-    artifact_workspace.restore_state(context.get("artifacts", {}))
+    durations = chat.get("turn_durations", {})
+    if not isinstance(durations, dict) or any(not isinstance(key, str) or type(value) not in (int, float) or not math.isfinite(value) or value < 0 for key, value in durations.items()):
+        raise SessionStoreError("Invalid Deepy session turn durations.")
     _acquire_session_lock(session, directory)
     session.storage_session_id = storage_id
     session.storage_session_dir = str(directory)
     session.storage_title = str(manifest.get("title", "") or "Deepy session")
+    session.storage_title_pending = bool(manifest.get("title_pending", False))
     session.storage_deepy_type = stored_type
     session.storage_created_at = str(manifest.get("created_at", "") or "")
     session.storage_updated_at = str(manifest.get("updated_at", "") or "")
     session.gallery_media_mode = normalize_gallery_media_mode(manifest.get("gallery_media_mode"))
+    session.gallery_workspace_id = str(manifest.get("gallery_workspace_id", "") or "")
     session.session_environment = _json_safe(context.get("environment", {}))
     session.chat_session_id = storage_id
     session.messages = list(chat.get("messages", []) or [])
+    session.chat_turn_durations = dict(durations)
     session.chat_transcript = list(chat.get("transcript", []) or [])
     for record_index, record in enumerate(session.chat_transcript):
         if isinstance(record, dict) and record.get("queued"):
@@ -1008,13 +1253,20 @@ def load_session(session, storage_id: str, deepy_type: str) -> dict[str, Any]:
     session.interruption_notice = str(chat.get("interruption_notice", "") or "")
     session.interruption_history = list(chat.get("interruption_history", []) or [])
     session.media_registry = list(context.get("media", []) or [])
+    from shared.deepy.media_links import restore_media_links
+
+    restore_media_links(session.chat_transcript, replay_commands, session.media_registry)
     session.media_registry_counter = max([int(str(record.get("media_id", "_0")).rsplit("_", 1)[-1]) for record in session.media_registry if str(record.get("media_id", "")).rsplit("_", 1)[-1].isdigit()] or [0])
     session.tool_ui_settings = dict(context.get("ui", {}).get("tool_settings", {}) or {})
+    session.model_selection_runtime_signature = str(context.get("ui", {}).get("model_selection_runtime_signature", ""))
     runtime = context.get("runtime", {})
+    session.pending_chat_media = list(runtime.get("pending_chat_media", []))
     pending_action = _pending_action_from_runtime(runtime)
     session.generated_client_ids = list(runtime.get("generated_client_ids", []) or [])
     session.selected_visual_runtime_signature = str(runtime.get("selected_visual_signature", "") or "")
     session.selected_audio_runtime_signature = str(runtime.get("selected_audio_signature", "") or "")
+    session.selected_mesh_runtime_signature = str(runtime.get("selected_mesh_signature", "") or "")
+    session.selected_world_runtime_signature = str(runtime.get("selected_world_signature", "") or "")
     session.rendered_token_ids = []
     session.rendered_messages_len = 0
     session.runtime_snapshot = None
@@ -1027,28 +1279,29 @@ def load_session(session, storage_id: str, deepy_type: str) -> dict[str, Any]:
     session.saved_checkpoint_revision = session.safe_checkpoint_revision
     session.chat_epoch = int(session.chat_epoch or 0) + 1
     session.active_skills = list(session.session_environment.get("skills", []) or [])
-    session.artifact_workspace = artifact_workspace
     bind_session_persistence(session)
     return {"manifest": manifest, "missing_media": missing_media, "environment": session.session_environment, "replay_commands": replay_commands}
 
 
 def inject_session_media(session, gen: dict[str, Any]) -> dict[str, Any]:
     from shared.deepy import media_registry
+    from shared.utils.media_settings import peek_settings
 
-    visual_paths = gen.setdefault("file_list", [])
-    visual_settings = gen.setdefault("file_settings_list", [])
-    audio_paths = gen.setdefault("audio_file_list", [])
-    audio_settings = gen.setdefault("audio_file_settings_list", [])
+    from shared.utils.gallery_sources import GALLERY_SOURCES, source_for_kind
+
+    galleries = {source.id: (gen.setdefault(source.files_key, []), gen.setdefault(source.settings_key, [])) for source in GALLERY_SOURCES}
+    visual_paths, _visual_settings = galleries["video"]
     canonical_paths = {}
+    settings_locations = {}
     client_keys = {}
     fingerprints = {}
-    for paths, settings_list in ((visual_paths, visual_settings), (audio_paths, audio_settings)):
+    for paths, settings_list in galleries.values():
         for index, path in enumerate(paths):
-            settings = settings_list[index]
-            if settings is None:
-                settings = settings_list[index] = {}
+            settings = peek_settings(settings_list, index) or {}
             entry = (str(path), settings)
-            canonical_paths[os.path.normcase(str(Path(str(path)).resolve()))] = entry
+            canonical = os.path.normcase(str(Path(str(path)).resolve()))
+            canonical_paths[canonical] = entry
+            settings_locations[canonical] = (settings_list, index)
             client_id = str(settings.get("client_id", "") or "")
             if client_id:
                 client_keys[(_detect_media_type(Path(str(path))), client_id)] = entry
@@ -1060,7 +1313,8 @@ def inject_session_media(session, gen: dict[str, Any]) -> dict[str, Any]:
                 fingerprints[fingerprint] = entry
     injected = 0
     missing = []
-    for record in session.media_registry:
+    # The registry is newest-first; Gallery appends in chronological order.
+    for record in reversed(session.media_registry):
         if not isinstance(record, dict):
             continue
         path = Path(str(record.get("path", "") or ""))
@@ -1071,44 +1325,60 @@ def inject_session_media(session, gen: dict[str, Any]) -> dict[str, Any]:
         canonical = os.path.normcase(str(path.resolve()))
         client_id = str(record.get("client_id", "") or "")
         fingerprint = str(record.get("fingerprint", "") or "")
-        settings = dict(record.get("settings", {}) or {})
+        settings = dict(media_registry._resolve_settings(str(path), record.get("settings")))
         settings.update({"deepy_session_id": session.storage_session_id, "deepy_media_id": record.get("media_id", ""), "deepy_media_fingerprint": fingerprint})
-        gallery = "audio" if media_type == "audio" else "visual"
+        target = source_for_kind(media_type)
+        gallery = target.media_ids
         settings["gallery_media_ids"] = gallery_media_ids(str(path), gallery, settings)
-        existing = canonical_paths.get(canonical) or client_keys.get((media_type, client_id)) or fingerprints.get(fingerprint)
+        existing = canonical_paths.get(canonical)
+        candidate = client_keys.get((media_type, client_id)) or fingerprints.get(fingerprint)
+        # A job can produce several files; matching size/mtime also does not establish identity.
+        if existing is None and candidate is not None and Path(candidate[0]).is_file():
+            with path.open("rb") as source_file, open(candidate[0], "rb") as candidate_file:
+                while True:
+                    chunk = source_file.read(1024 * 1024)
+                    if chunk != candidate_file.read(1024 * 1024):
+                        break
+                    if not chunk:
+                        existing = candidate
+                        break
         if existing is not None:
             existing_path, existing_settings = existing
+            existing_settings.update(media_registry._resolve_settings(existing_path, {**settings, **existing_settings}))
+            target_list, target_index = settings_locations[os.path.normcase(str(Path(existing_path).resolve()))]
+            target_list[target_index] = existing_settings
             ids = gallery_media_ids(existing_path, gallery, existing_settings)
             existing_settings["gallery_media_ids"] = list(dict.fromkeys([*settings["gallery_media_ids"], *ids]))
             record.update(path=existing_path, path_key=os.path.normcase(str(Path(existing_path).resolve())))
-            record["settings"] = {**settings, "gallery_media_ids": existing_settings["gallery_media_ids"]}
+            record["settings"] = {**settings, **existing_settings}
             continue
         if client_id:
             settings["client_id"] = client_id
-        if media_type == "audio":
-            audio_paths.append(str(path))
-            audio_settings.append(settings)
-        else:
-            visual_paths.append(str(path))
-            visual_settings.append(settings)
+        record["settings"] = settings.copy()
+        target_paths, target_settings = galleries[target.id]
+        target_paths.append(str(path))
+        target_settings.append(settings)
         entry = (str(path), settings)
         canonical_paths[canonical] = entry
+        settings_locations[canonical] = (target_settings, len(target_settings) - 1)
         if client_id:
             client_keys[(media_type, client_id)] = entry
         if fingerprint:
             fingerprints[fingerprint] = entry
         injected += 1
+    for source in GALLERY_SOURCES:
+        gen[source.selected_key] = len(galleries[source.id][0]) - 1
+        gen[source.last_selected_key] = True
+    gen["selected_video_time"] = 0.0 if visual_paths and _detect_media_type(Path(visual_paths[-1])) == "video" else None
     media_registry.sync_tool_call_gallery_media(session, gen)
-    session.seen_video_gallery_paths = [str(path) for path in visual_paths]
-    session.seen_audio_gallery_paths = [str(path) for path in audio_paths]
+    for source, (paths, _settings) in galleries.items():
+        setattr(session, f"seen_{source}_gallery_paths", [str(path) for path in paths])
     return {"injected": injected, "missing": missing}
 
 
 def rename_session(session, title: str) -> dict[str, Any]:
-    title = re.sub(r"\s+", " ", str(title or "")).strip()
-    if not title:
-        raise SessionStoreError("Session title cannot be empty.")
-    session.storage_title = title[:120]
+    session.storage_title = _unique_title(title, session.storage_session_id)
+    session.storage_title_pending = False
     manifest = flush_session(session)
     return manifest or session_metadata(session)
 
@@ -1121,11 +1391,10 @@ def rename_stored_session(storage_id: str, title: str, active_session=None) -> d
         lock = _read_json(directory / ".session.lock")
         if _process_alive(int(lock.get("pid", 0) or 0)):
             raise SessionLockedError("Close this Deepy session before renaming it.")
-    normalized_title = re.sub(r"\s+", " ", str(title or "")).strip()
-    if not normalized_title:
-        raise SessionStoreError("Session title cannot be empty.")
+    normalized_title = _unique_title(title, storage_id)
     manifest = _read_json(directory / "session.json")
-    manifest["title"] = normalized_title[:120]
+    manifest["title"] = normalized_title
+    manifest.pop("title_pending", None)
     manifest["updated_at"] = _utc_now()
     _atomic_json(directory / "session.json", manifest)
     return manifest
@@ -1138,9 +1407,10 @@ def duplicate_stored_session(storage_id: str, active_session=None) -> dict[str, 
     manifest = validate_session(storage_id, str(_read_json(directory / "session.json").get("deepy_type", "")), active_session=active_session)
     context = _read_json(directory / "context.json")
     _preserve_gallery_media_ids(context)
+    references = SessionReferences()
+    context = references.rebase(context)
     root = sessions_root()
     new_id = _new_storage_id(root)
-    destination = root / new_id
     existing_titles = {str(item.get("title", "") or "").casefold() for item in list_sessions()}
     base_title = re.sub(r"\s+\(copy(?: \d+)?\)$", "", str(manifest.get("title", "") or "Deepy session"), flags=re.IGNORECASE).strip()
     copy_number = 1
@@ -1150,26 +1420,32 @@ def duplicate_stored_session(storage_id: str, active_session=None) -> dict[str, 
         if duplicate_title.casefold() not in existing_titles:
             break
         copy_number += 1
+    with _ROOT_LOCK:
+        destination = _new_session_directory(root, duplicate_title)
+        destination.mkdir()
     now = _utc_now()
     manifest.update(id=new_id, title=duplicate_title, created_at=now, updated_at=now)
+    manifest.pop('previous_directories', None)
     context["session_id"] = new_id
     context["saved_at"] = now
     replacements: dict[str, str] = {}
     _register_path_replacement(replacements, str(directory), str(destination))
     context = _replace_paths(context, replacements)
+    context = _rebind_session_references(context, storage_id, new_id)
     _preserve_gallery_media_ids(context, rebind_paths=True)
     try:
-        shutil.copytree(directory, destination, ignore=shutil.ignore_patterns(".session.lock"))
+        shutil.copytree(directory, destination, dirs_exist_ok=True, ignore=lambda source, names: ['.session.lock', *(['session.json', 'context.json'] if Path(source) == directory else [])])
         journal = destination / UI_JOURNAL_FILENAME
         if journal.is_file():
-            journal_text = journal.read_text(encoding="utf-8")
+            journal_text = references.rebase(journal.read_text(encoding="utf-8"))
             for original, replacement in replacements.items():
                 journal_text = journal_text.replace(original, replacement)
             journal.write_text(journal_text, encoding="utf-8", newline="\n")
-        _atomic_json(destination / "session.json", manifest)
         _atomic_json(destination / "context.json", context)
+        _atomic_json(destination / "session.json", manifest)
     except Exception:
         if destination.is_dir():
+            destination.resolve().relative_to(root)
             shutil.rmtree(destination)
         raise
     return manifest
@@ -1187,10 +1463,12 @@ def start_new_session(session, *, save_current: bool = True) -> None:
     session.storage_session_id = ""
     session.storage_session_dir = ""
     session.storage_title = ""
+    session.storage_title_pending = False
     session.storage_deepy_type = ""
     session.storage_created_at = ""
     session.storage_updated_at = ""
     session.session_environment = {}
+    session.model_selection_runtime_signature = ""
     session.safe_checkpoint_revision = 0
     session.saved_checkpoint_revision = 0
     session.pending_session_save = None
@@ -1225,6 +1503,27 @@ def reset_session_files(session) -> None:
     flush_session(session)
 
 
+@contextmanager
+def archiving_session(storage_id: str):
+    """Hide a session without moving linked artifacts; undo if its workspace cannot move."""
+    directory = _validated_session_dir(storage_id)
+    lease = SimpleNamespace(session_lock_path="", session_lock_token="", pending_session_save=None, storage_session_dir="")
+    _acquire_session_lock(lease, directory)
+    try:
+        path = directory / "session.json"
+        manifest = _read_json(path)
+        if manifest.get("id") != storage_id:
+            raise SessionStoreError("Deepy session identifier does not match its directory.")
+        _atomic_json(path, {**manifest, "archived_at": _utc_now()})
+        try:
+            yield
+        except Exception:
+            _atomic_json(path, manifest)
+            raise
+    finally:
+        release_session_lock(lease)
+
+
 def delete_session(storage_id: str, active_session=None) -> Path:
     directory = _validated_session_dir(storage_id)
     _forget_ui_journal(directory)
@@ -1237,7 +1536,7 @@ def delete_session(storage_id: str, active_session=None) -> Path:
         (directory / ".session.lock").unlink(missing_ok=True)
     trash = sessions_root() / ".trash"
     trash.mkdir(parents=True, exist_ok=True)
-    destination = trash / f"{storage_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    destination = available_path(trash, directory.name)
     shutil.move(str(directory), str(destination))
     return destination
 
@@ -1264,17 +1563,27 @@ def export_stored_session(storage_id: str, active_session=None) -> Path:
     destination = exports / f"{directory.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
     manifest = _read_json(directory / "session.json")
     context = _read_json(directory / "context.json")
-    directory_files = [path for path in directory.rglob("*") if path.is_file() and path.name not in {".session.lock", "context.json", "session.json"}]
+    references = SessionReferences()
+    _preserve_gallery_media_ids(context)
+    context = references.rebase(context)
+    directory_files = [path for path in directory.rglob("*") if path.is_file() and path.name != '.session.lock' and path not in (directory / 'context.json', directory / 'session.json')]
     archive_names = {path.relative_to(directory).as_posix() for path in directory_files}
     external_files: list[tuple[Path, str]] = []
     missing_media = []
     for record in list(context.get("media", []) or []):
-        if not isinstance(record, dict) or str(record.get("source", "")) == "workspace":
+        if not isinstance(record, dict):
+            continue
+        reference = references.encode(record['path']) if record.get('path') else None
+        if isinstance(reference, dict):
+            record['session_reference'] = reference
+        if str(record.get("source", "")) == "workspace":
             continue
         copied = str(record.get("session_copy_path", "") or "")
         if copied and _session_member_path(directory, copied).is_file():
             continue
         source_text = str(record.get("path", "") or "").strip()
+        if 'session_reference' in record:
+            source_text = references.resolve(record['session_reference']) or ''
         source = Path(source_text) if source_text else None
         if source is None or not source.is_file():
             if source_text:
@@ -1295,7 +1604,10 @@ def export_stored_session(storage_id: str, active_session=None) -> Path:
         archive.writestr("session.json", json.dumps(_json_safe(manifest), ensure_ascii=False, indent=2))
         archive.writestr("context.json", json.dumps(_json_safe(context), ensure_ascii=False, indent=2))
         for path in directory_files:
-            archive.write(path, path.relative_to(directory).as_posix(), compress_type=zipfile.ZIP_STORED if path.suffix.lower() in _MEDIA_EXTENSIONS else zipfile.ZIP_DEFLATED)
+            if path == directory / UI_JOURNAL_FILENAME:
+                archive.writestr(UI_JOURNAL_FILENAME, references.rebase(path.read_text(encoding='utf-8')))
+            else:
+                archive.write(path, path.relative_to(directory).as_posix(), compress_type=zipfile.ZIP_STORED if path.suffix.lower() in _MEDIA_EXTENSIONS else zipfile.ZIP_DEFLATED)
         for path, archive_name in external_files:
             archive.write(path, archive_name, compress_type=zipfile.ZIP_STORED)
     return destination
@@ -1337,22 +1649,30 @@ def import_session(archive_path: str | os.PathLike[str]) -> dict[str, Any]:
             for record in list(context.get("media", []) or []):
                 if not isinstance(record, dict):
                     continue
+                if 'session_reference' in record:
+                    SessionReferences.validate(record['session_reference'])
                 for key in ("session_relative_path", "session_copy_path"):
                     relative_path = str(record.get(key, "") or "")
                     if relative_path:
                         _session_member_path(content_root, relative_path)
-            from shared.deepy.artifacts import ArtifactWorkspace
-
-            ArtifactWorkspace().restore_state(context.get("artifacts", {}))
-            storage_id = original_id if _SESSION_ID_RE.fullmatch(original_id) and not (root / original_id).exists() else _new_storage_id(root)
+            storage_id = original_id if _SESSION_ID_RE.fullmatch(original_id) and original_id not in _session_manifests(root) and not (root / original_id).exists() else _new_storage_id(root)
             manifest["id"] = storage_id
+            manifest.pop('previous_directories', None)
             manifest["title"] = str(manifest.get("title", "") or "Imported Deepy session")
             manifest["updated_at"] = _utc_now()
             context["session_id"] = storage_id
-            destination = root / storage_id
-            shutil.copytree(content_root, destination, ignore=shutil.ignore_patterns(".session.lock"))
-            _atomic_json(destination / "session.json", manifest)
-            _atomic_json(destination / "context.json", context)
+            context = _rebind_session_references(context, original_id, storage_id)
+            with _ROOT_LOCK:
+                destination = _new_session_directory(root, manifest['title'])
+                destination.mkdir()
+            try:
+                shutil.copytree(content_root, destination, dirs_exist_ok=True, ignore=lambda source, names: ['.session.lock', *(['session.json', 'context.json'] if Path(source) == content_root else [])])
+                _atomic_json(destination / "context.json", context)
+                _atomic_json(destination / "session.json", manifest)
+            except Exception:
+                destination.resolve().relative_to(root)
+                shutil.rmtree(destination)
+                raise
     return manifest
 
 
@@ -1362,6 +1682,10 @@ def _detect_media_type(path: Path) -> str:
         return "audio"
     if suffix in {".mkv", ".mov", ".mp4", ".m4v", ".webm", ".avi"}:
         return "video"
+    if suffix in MESH_EXTENSIONS:
+        return "3d"
+    if suffix in WORLD_EXTENSIONS:
+        return "world"
     return "image"
 
 
@@ -1378,8 +1702,10 @@ __all__ = [
     "UI_JOURNAL_SCHEMA_VERSION",
     "SessionLockedError",
     "SessionStoreError",
+    "archiving_session",
     "automatic_title",
     "bind_session_persistence",
+    "close_external_session",
     "configure_sessions_root",
     "delete_session",
     "duplicate_stored_session",
@@ -1394,11 +1720,13 @@ __all__ = [
     "load_session",
     "normalize_gallery_media_mode",
     "normalize_reset_mode",
+    "open_external_session",
     "release_session_lock",
     "rename_session",
     "rename_stored_session",
     "reset_session_files",
     "schedule_autosave",
+    "session_folder_in_use",
     "session_metadata",
     "session_workspace",
     "sessions_root",

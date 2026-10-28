@@ -1,3 +1,4 @@
+from shared.utils.phase_progress import generation_progress
 import json
 import os
 from functools import lru_cache
@@ -6,7 +7,7 @@ import torch
 from accelerate import init_empty_weights
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import logging
-from mmgp import offload
+from mmgp import offload, runtime
 from shared.utils import files_locator as fl
 from shared.utils.gguf_mapping import has_standard_gguf_tensor_names, remap_state_dict_triplet
 from transformers import AutoConfig, AutoTokenizer, Qwen3ForCausalLM
@@ -142,7 +143,9 @@ class model_factory:
 
         model_class = ZImageTransformer2DModel
 
-        kwargs_light= { "writable_tensors": False, "default_dtype": torch.bfloat16, "preprocess_sd": preprocess_sd, "fused_split_map": _ZIMAGE_FUSED_SPLIT_MAP }
+        # the loader converts the unquantized weights to dtype and gives it to the quantized formats as their compute dtype, without
+        # dequantizing them (a transformer.to(dtype) would)
+        kwargs_light= { "writable_tensors": False, "default_dtype": dtype, "preprocess_sd": preprocess_sd, "fused_split_map": _ZIMAGE_FUSED_SPLIT_MAP }
         # model_filename contains all files to load (transformer + modules merged by loader)
         import json
         import accelerate
@@ -163,8 +166,6 @@ class model_factory:
 
         from wgp import save_model
         from mmgp.safetensors2 import torch_load_file
-
-        transformer.to(dtype)
 
         if module_source is not None:
             save_model(transformer, model_type, dtype, None, is_module=True, filter=list(torch_load_file(fl.locate_file(module_source))), module_source_no=1)
@@ -191,11 +192,15 @@ class model_factory:
 
         text_encoder = offload.fast_load_transformers_model(
             text_encoder_filename,
-            writable_tensors=True,
+            writable_tensors=False,
             modelClass=Qwen3ForCausalLM,
             defaultConfigPath=text_encoder_config,
             preprocess_sd=_build_qwen3_state_dict_preprocessor(text_encoder_config),
         )
+        # the token table stays in RAM (mmgp looks up the prompt's rows on the CPU) with the output head tied to it, which never runs:
+        # the hidden states come from the base model
+        runtime.lookup_on_cpu(text_encoder.model.embed_tokens)
+        runtime.unused(text_encoder.lm_head)
 
         # Tokenizer
         tokenizer = AutoTokenizer.from_pretrained(text_encoder_path, trust_remote_code=True)
@@ -206,7 +211,7 @@ class model_factory:
 
         vae = offload.fast_load_transformers_model(
             vae_filename,
-            writable_tensors=True,
+            writable_tensors=False,
             modelClass=AutoencoderKL,
             defaultConfigPath=vae_config_path,
             default_dtype=None,
@@ -227,6 +232,7 @@ class model_factory:
         self.vae = vae
         self.scheduler = scheduler
 
+    @generation_progress
     def generate(
         self,
         seed: int | None = None,
@@ -285,11 +291,11 @@ class model_factory:
             if callable(set_progress_status):
                 progress_label = getattr(vae_upsampler, "progress_label", "VAE Spatial Upsampling")
                 if current_step is None or total_steps is None:
-                    set_progress_status(f"{progress_label} in progress")
+                    set_progress_status(f"{progress_label} in Progress")
                 else:
                     total_steps = int(total_steps)
                     step_no = min(int(current_step) + 1, total_steps)
-                    set_progress_status(f"{progress_label} in progress ({step_no}/{total_steps})")
+                    set_progress_status(f"{progress_label} in Progress ({step_no}/{total_steps})")
 
         images = self.pipeline(
             prompt=input_prompt,
@@ -324,9 +330,6 @@ class model_factory:
 
         if images is None:
             return None
-
-        if not torch.is_tensor(images):
-            images = torch.tensor(images)
 
         return images.transpose(0, 1)
 

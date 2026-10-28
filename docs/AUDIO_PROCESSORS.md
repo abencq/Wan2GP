@@ -75,8 +75,10 @@ per-method progress text. Discovery evaluates the historical `enabled()` method
 first: `True` maps to `enabled` and `False` to `disabled`. Only handlers without
 `enabled()` use the optional instance `status` property; `unknown` means neither
 mechanism supplied a valid status.
-`reason_disabled` is returned only for disabled handlers. Deepy lists all
-registered audio processors with this metadata and refuses disabled ones.
+`reason_disabled` is returned only for disabled handlers. The internal processor
+catalog includes this availability metadata. Prime's post-processing toolbox
+omits disabled processors from callable discovery; internal/compatibility views
+may include them for diagnostics, but disabled processors cannot be dispatched.
 
 The supported processor type constants are:
 
@@ -178,12 +180,19 @@ Only enabled/loaded plugins are considered. The plugin manager reuses cached
 Audio processor settings are stored under
 `wgp_config["audio_processors"][config_key]`.
 
-Model persistence is shared by all processors at
-`wgp_config["audio_processors"]["persistence"]`; handlers must not add their own
-persistence control. The registry retains at most one audio processor handler and
-fully releases it before dispatching a different handler. Model-backed handlers
-should obtain the policy through `audio_processors.persistent_models(...)` when
-deciding whether their runtime may keep weights in RAM after use.
+**Postprocessor VRAM Usage**, at the top of Configuration > Extensions, is shared
+with temporal and spatial processors. **Minimum** (default) uses each processor's
+minimum; **Manual Choice** uses the greater of that minimum and the selected MB
+amount; **Dynamic** adapts profile 0 preload to available VRAM. This controls
+preloaded weights rather than imposing a limit on total VRAM use.
+
+The most recently used audio processor stays loaded in RAM for reuse and is
+released when a different processor runs or the shared VRAM policy changes.
+Processors without MMGP-managed weights retain their own memory requirements.
+
+An extension can hide alternative methods from normal menus while keeping them
+available. Extracting settings restores the exact saved method, including a
+hidden one. Selecting another method hides the restored alternative again.
 
 Handlers with configuration should implement `default_config()` and
 `normalize_config_section(...)`. If they expose Configuration-tab controls, return
@@ -217,9 +226,10 @@ use the normalized method ids.
 | `custom` | `soundtrack` | `postprocessing/custom_soundtrack/audio_processor.py` |
 | `mmaudio` | `soundtrack` | `postprocessing/mmaudio/audio_processor.py` |
 | `prismaudio` | `soundtrack` | `postprocessing/prismaudio/audio_processor.py` |
-| `seedvc_one_speaker` | `voice_replacement`, `audio_edit` | `postprocessing/seedvc/audio_processor.py` |
-| `seedvc_two_speakers` | `voice_replacement`, `audio_edit` | `postprocessing/seedvc/audio_processor.py` |
+| `seedvc_one_speaker` | `voice_replacement`, `audio_edit` | `postprocessing/seedvc_processor/audio_processor.py` |
+| `seedvc_two_speakers` | `voice_replacement`, `audio_edit` | `postprocessing/seedvc_processor/audio_processor.py` |
 | `remove_background` | `audio_edit` | `postprocessing/audio_background_removal/audio_processor.py` |
+| `remove_vocals` | `audio_edit` | `postprocessing/audio_background_removal/audio_processor.py` |
 
 ## Extension Offload Object Registry
 
@@ -235,3 +245,7 @@ offload_registry.unregister_offloadobj("MyAudioProcessor", offloadobj)  # in rel
 This lets WanGP track every extension offload object and release all extension
 resources centrally: the toolbar "Unload Models" tool and Configuration plugin
 release button call `offload_registry.release_all()`.
+
+---
+
+> Applies to: Developing audio processor plugins: handler methods, registration and shared configuration. Installed processing options are available through WanGP's post-processing controls and API.

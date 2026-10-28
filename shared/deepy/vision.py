@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import math
@@ -7,7 +8,7 @@ from typing import Any
 import torch
 from PIL import Image
 
-from shared.llm_engines.nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM
+from shared.llm_engines.lmgp.models.qwen3_5 import Qwen3_5ForCausalLM
 from shared.prompt_enhancer.qwen35_vl import _prepare_multimodal_vllm_prompt
 from shared.utils.video_decode import decode_video_frame_indices_ffmpeg
 
@@ -25,6 +26,7 @@ VISION_VIDEO_MAX_IMAGE_EDGE = 256
 VISION_VIDEO_MID_RES_MAX_IMAGE_EDGE = 512
 VISION_VIDEO_MID_RES_SAMPLE_DIVISOR = 4
 VISION_VIDEO_MAX_SAMPLES_PER_SECOND = 2
+VISION_VIDEO_SHORT_RANGE_SECONDS, VISION_VIDEO_SHORT_RANGE_SAMPLES_PER_SECOND = 3.0, 8  # joins and cuts need dense frames
 VISION_VIDEO_DECODE_BATCH_SIZE = 8
 VISION_QA_SYSTEM_PROMPT = "Answer the user's question about the labeled visual inputs accurately and concisely. Inputs may be images or ordered frames from one or more videos. If the answer is uncertain, say so."
 _TEXT_MODEL_ID = "prompt_enhancer_llm_model"
@@ -36,6 +38,10 @@ def can_keep_text_resident(runtime, manager) -> bool:
         return False
     if manager.models.get(_TEXT_MODEL_ID) is not runtime.model or _TEXT_MODEL_ID not in manager.active_models_ids:
         return False
+    from mmgp import runtime as mmgp_runtime
+    if mmgp_runtime.dynamic_preload(runtime.model):
+        # its dynamic preload releases only the blocks the vision tower needs beyond the lent cache, and keeps them again afterwards
+        return runtime._get_live_llm() is not None
     prefix = _TEXT_MODEL_ID + "/"
     preloaded = manager.preloaded_blocks_per_model[_TEXT_MODEL_ID]
     if not all(name[len(prefix):] in preloaded for name in manager.blocks_of_modules if name.startswith(prefix)) or not all(parameter.is_cuda for parameter in runtime.model.parameters()):
@@ -52,14 +58,12 @@ def can_keep_text_resident(runtime, manager) -> bool:
 
 
 @contextmanager
-def resident_inspection(runtime, caption_model, manager, semantic_boundaries):
+def resident_inspection(runtime, caption_model, manager):
     """Lend the assistant's cache memory to vision without moving its weights."""
     from shared.prompt_enhancer.qwen35_assistant_runtime import _ASSISTANT_PREFILL_CHUNK_TOKENS
 
     model = runtime.model
     snapshot = runtime.snapshot_context()
-    signature = runtime._get_live_llm().model_runner._get_graph_capture_signature()
-    boundaries = [item for item in semantic_boundaries if item["runtime_signature"] == signature]
     min_model_len = model._prompt_enhancer_min_model_len_hint
     prefill_chunk_tokens = model.__dict__.get("_prefill_chunk_tokens")
     cotenants = manager.cotenants_map
@@ -89,7 +93,7 @@ def resident_inspection(runtime, caption_model, manager, semantic_boundaries):
         manager.cotenants_map = {**cotenants, _TEXT_MODEL_ID: [*cotenants.get(_TEXT_MODEL_ID, []), _VISION_MODEL_ID], _VISION_MODEL_ID: [*cotenants.get(_VISION_MODEL_ID, []), _TEXT_MODEL_ID]}
         # The enhancer's separate MMGP embedding alias would load a second copy.
         object.__setattr__(adapter, "_input_embedding_model", model.token_embd)
-        runtime._log("Inspection: keeping Qwen weights resident; lending assistant cache memory to vision.")
+        runtime._log("Inspection: keeping Qwen weights resident; lending assistant cache memory to vision (and Qwen blocks if it needs more).")
         yield unload_vision
     finally:
         unload_vision()
@@ -103,12 +107,6 @@ def resident_inspection(runtime, caption_model, manager, semantic_boundaries):
             model._prefill_chunk_tokens = prefill_chunk_tokens
         if snapshot is not None:
             runtime.restore_snapshot(snapshot)
-            runner = runtime._get_live_llm().model_runner
-            # Exact KV/block-table restoration preserves these prefixes, even though
-            # the replacement cache and its newly captured graphs have new addresses.
-            for boundary in boundaries:
-                boundary["runtime_signature"] = runner._get_graph_capture_signature()
-                boundary["kv_cache_ptr"] = int(runner.kv_cache.data_ptr())
 
 
 def normalize_inspection_bbox(bbox: Any) -> list[int] | None:
@@ -126,7 +124,7 @@ def normalize_inspection_bbox(bbox: Any) -> list[int] | None:
     if not all(0 <= value <= 1000 for value in values):
         raise ValueError("bbox values must be integers from 0 to 1000.")
     if x_max <= x_min or y_max <= y_min:
-        raise ValueError("bbox maximums must be greater than its minimums.")
+        raise ValueError("bbox=[x_min,y_min,x_max,y_max] uses integers 0..1000 relative to the full image; x_max must be greater than x_min and y_max greater than y_min.")
     return values
 
 
@@ -244,6 +242,6 @@ def build_image_question_prompt(caption_model: Any, processor: Any, image: Any, 
 __all__ = [
     "VISION_ANSWER_MAX_NEW_TOKENS", "VISION_MAX_IMAGES", "VISION_MAX_VISUAL_TOKENS_PER_IMAGE", "VISION_QA_SYSTEM_PROMPT",
     "VISION_REMOTE_MAX_IMAGES", "VISION_REMOTE_MAX_IMAGE_EDGE", "VISION_VIDEO_MAX_IMAGE_EDGE", "VISION_VIDEO_MAX_IMAGES",
-    "VISION_VIDEO_MAX_SAMPLES_PER_SECOND", "VISION_VIDEO_MID_RES_MAX_IMAGE_EDGE", "VISION_VIDEO_MID_RES_SAMPLE_DIVISOR", "VISION_VIDEO_REMOTE_MAX_IMAGES", "build_image_question_prompt",
+    "VISION_VIDEO_MAX_SAMPLES_PER_SECOND", "VISION_VIDEO_SHORT_RANGE_SAMPLES_PER_SECOND", "VISION_VIDEO_SHORT_RANGE_SECONDS", "VISION_VIDEO_MID_RES_MAX_IMAGE_EDGE", "VISION_VIDEO_MID_RES_SAMPLE_DIVISOR", "VISION_VIDEO_REMOTE_MAX_IMAGES", "build_image_question_prompt",
     "decode_inspection_video_frames", "normalize_inspection_bbox", "prepare_inspection_image", "resize_inspection_image", "video_inspection_sample_count",
 ]

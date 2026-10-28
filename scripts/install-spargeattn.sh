@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 # Installs SpargeAttn (spas_sage_attn) from source.
 #
-# A plain `pip install git+https://github.com/woct0rdho/SpargeAttn.git` fails
+# A plain `pip install git+https://github.com/woct0rdho/SpargeAttn.git` can fail
 # to build on CUDA 13 with:
 #
 #   /usr/local/cuda/include/cuda_fp8.hpp(...): error: identifier "__assert_fail" is undefined
@@ -60,16 +61,18 @@ source = path.read_text(encoding="utf-8")
 changed = False
 
 if '"-DNDEBUG"' not in source:
-    if 'NVCC_FLAGS_COMMON' in source:
+    marker = 'NVCC_FLAGS_COMMON = [\n'
+    if marker in source:
         source = source.replace(
-            '    "-std=c++17",\n',
-            '    "-std=c++17",\n    "-DNDEBUG",\n',
+            marker,
+            marker + '    "-DNDEBUG",\n',
             1,
         )
         changed = True
         print("patched: added -DNDEBUG to NVCC_FLAGS_COMMON")
     else:
-        print("warning: NVCC_FLAGS_COMMON not found, skipped NDEBUG patch", file=sys.stderr)
+        print("error: NVCC_FLAGS_COMMON not found, cannot add -DNDEBUG", file=sys.stderr)
+        sys.exit(1)
 
 if 'os.system(f"python {py_file}")' in source:
     source = source.replace(
@@ -80,6 +83,7 @@ if 'os.system(f"python {py_file}")' in source:
         source = source.replace('import os\n', 'import os\nimport sys\n', 1)
     changed = True
     print("patched: autogen runs with sys.executable and fails loudly")
+
 
 if changed:
     path.write_text(source, encoding="utf-8")

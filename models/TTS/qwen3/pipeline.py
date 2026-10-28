@@ -133,11 +133,11 @@ class Qwen3TTSPipeline:
         *,
         ckpt_root: Optional[Path] = None,
         device: Optional[torch.device] = None,
-        lm_decoder_engine: Optional[str] = None,
+        cuda_graphs: bool = False,
     ) -> None:
         self.device = device or torch.device("cpu")
         self.base_model_type = base_model_type
-        self.lm_decoder_engine = str(lm_decoder_engine or "legacy").strip().lower()
+        self.cuda_graphs = bool(cuda_graphs)
         self.ckpt_root = Path(ckpt_root) if ckpt_root is not None else Path(fl.get_download_location())
         self._interrupt = False
         self._early_stop = False
@@ -149,7 +149,7 @@ class Qwen3TTSPipeline:
         self.processor = self._load_text_processor(assets)
 
         self.model.load_speech_tokenizer(self.speech_tokenizer)
-        self.model.set_lm_decoder_engine(self.lm_decoder_engine)
+        self.model.set_cuda_graphs(self.cuda_graphs)
         self.tts = Qwen3TTSModel(
             model=self.model,
             processor=self.processor,
@@ -163,8 +163,7 @@ class Qwen3TTSPipeline:
 
         self.supported_speakers = sorted(self.tts.get_supported_speakers() or [])
         self.supported_languages = sorted(self.tts.get_supported_languages() or [])
-        engine = "cg" if self.lm_decoder_engine == "cg" else "legacy"
-        print(f"[Qwen3TTS] LM Engine='{engine}'")
+        print(f"[Qwen3TTS] CUDA graphs: {'on' if self.cuda_graphs else 'off'}")
 
     def _abort_requested(self) -> bool:
         return bool(self._interrupt)
@@ -392,39 +391,15 @@ class Qwen3TTSPipeline:
         return mode
 
     @staticmethod
-    def _parse_two_speaker_dialogue(text: str) -> list[tuple[int, str]]:
-        speaker_matches = list(re.finditer(r"Speaker\s*(\d+)\s*:\s*", text, flags=re.IGNORECASE))
-        if not speaker_matches:
-            raise ValueError(
-                "Two-speaker mode requires prompt lines using Speaker 1: and Speaker 2: "
-                "(or any two numeric speaker IDs)."
-            )
-        speaker_ids = sorted({int(match.group(1)) for match in speaker_matches})
-        if len(speaker_ids) != 2:
-            raise ValueError("Two-speaker mode requires exactly two speaker IDs. Use Speaker 1: and Speaker 2:.")
-        speaker_id_to_internal = {speaker_ids[0]: 0, speaker_ids[1]: 1}
-
-        segments: list[tuple[int, str]] = []
-        for index, match in enumerate(speaker_matches):
-            start = match.end()
-            end = speaker_matches[index + 1].start() if index + 1 < len(speaker_matches) else len(text)
-            segment_text = text[start:end].strip()
-            if segment_text:
-                segments.append((speaker_id_to_internal[int(match.group(1))], segment_text))
-        if not segments:
-            raise ValueError("No dialogue text found after Speaker tags.")
-        return segments
+    def _parse_two_speaker_dialogue(text: str, speaker_count: int = 2) -> list[tuple[int, str]]:
+        from shared.utils.speech_dialogue import parse_dialogue
+        return parse_dialogue(text, speaker_count)
 
     @staticmethod
-    def _resolve_two_speaker_ref_scripts(raw_ref_text: str) -> tuple[list[Optional[str]], list[bool]]:
+    def _resolve_two_speaker_ref_scripts(raw_ref_text: str, speaker_count: int = 2) -> tuple[list[Optional[str]], list[bool]]:
         normalized = str(raw_ref_text or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = [line.strip() for line in normalized.split("\n") if line.strip()]
-        if not lines:
-            return [None, None], [True, True]
-
-        first = lines[0] if len(lines) > 0 else None
-        second = lines[1] if len(lines) > 1 else None
-        speaker_ref_texts = [first, second]
+        speaker_ref_texts = (lines + [None] * speaker_count)[:speaker_count]
         speaker_xvector_only = [text is None for text in speaker_ref_texts]
         return speaker_ref_texts, speaker_xvector_only
 
@@ -453,8 +428,7 @@ class Qwen3TTSPipeline:
         *,
         text: str,
         language: str,
-        audio_guide: str,
-        audio_guide2: str,
+        reference_audios: list[str],
         speaker_ref_texts: list[Optional[str]],
         speaker_xvector_only: list[bool],
         max_new_tokens: int,
@@ -466,7 +440,7 @@ class Qwen3TTSPipeline:
         auto_split_tokens: Optional[int],
         callback,
     ):
-        dialogue_segments_raw = self._parse_two_speaker_dialogue(text)
+        dialogue_segments_raw = self._parse_two_speaker_dialogue(text, len(reference_audios))
         dialogue_segments: list[tuple[int, str]] = []
         for speaker_id, segment_text in dialogue_segments_raw:
             split_segments = self._split_text_sequence(segment_text, auto_split_tokens)
@@ -477,7 +451,7 @@ class Qwen3TTSPipeline:
             return None
         try:
             prompt_items = self.tts.create_voice_clone_prompt(
-                ref_audio=[audio_guide, audio_guide2],
+                ref_audio=reference_audios,
                 ref_text=speaker_ref_texts,
                 x_vector_only_mode=speaker_xvector_only,
             )
@@ -485,9 +459,9 @@ class Qwen3TTSPipeline:
             if _is_abort_exception(exc):
                 return None
             raise
-        speaker_prompts = {0: prompt_items[0], 1: prompt_items[1]}
+        speaker_prompts = dict(enumerate(prompt_items))
 
-        keep_shared_graph = self.lm_decoder_engine == "cg"
+        keep_shared_graph = self.cuda_graphs
         shared_gen_kwargs = {}
         if keep_shared_graph:
             max_prompt_tokens = self._estimate_two_speaker_prompt_tokens(
@@ -684,6 +658,7 @@ class Qwen3TTSPipeline:
         seed: int = -1,
         callback=None,
         audio_prompt_type="A",
+        audio_guide3=None,
         **kwargs,
     ):
         self._interrupt = False
@@ -728,13 +703,13 @@ class Qwen3TTSPipeline:
             if not audio_guide2:
                 raise ValueError("Speaker 2 reference audio is required for two-speaker Qwen3 Base mode.")
             language = (model_mode or "auto").lower()
+            reference_audios = [audio_guide, audio_guide2] + ([audio_guide3] if "D" in audio_prompt_type else [])
             ref_text = _read_text_or_file(alt_prompt, "Reference transcript(s)")
-            speaker_ref_texts, speaker_xvector_only = self._resolve_two_speaker_ref_scripts(ref_text)
+            speaker_ref_texts, speaker_xvector_only = self._resolve_two_speaker_ref_scripts(ref_text, len(reference_audios))
             return self._generate_base_two_speaker(
                 text=text,
                 language=language,
-                audio_guide=audio_guide,
-                audio_guide2=audio_guide2,
+                reference_audios=reference_audios,
                 speaker_ref_texts=speaker_ref_texts,
                 speaker_xvector_only=speaker_xvector_only,
                 max_new_tokens=max_new_tokens,
@@ -900,7 +875,7 @@ class Qwen3TTSPipeline:
                     if max_total_samples is not None and elapsed_samples >= max_total_samples:
                         break
             finally:
-                if self.base_model_type == "qwen3_tts_base" and self.lm_decoder_engine == "cg":
+                if self.base_model_type == "qwen3_tts_base" and self.cuda_graphs:
                     self.model.release_decode_cuda_graph()
 
             if len(audio_segments) == 0:

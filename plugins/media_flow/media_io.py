@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import json
@@ -18,6 +19,8 @@ from shared.utils.video_decode import resolve_media_binary
 from shared.utils.video_metadata import DEFAULT_RESERVED_VIDEO_METADATA_BYTES, write_reserved_video_ffmetadata
 
 from . import constants
+
+DEFAULT_FFMPEG_TIMEOUT_SECONDS = float(os.getenv("WAN2GP_FFMPEG_TIMEOUT", "300.0"))
 
 class ContinuationMergeOutputLockedError(PermissionError):
     def __init__(self, output_path: str) -> None:
@@ -217,7 +220,7 @@ def validate_audio_copy_container(ffprobe_path: str, source_path: str, video_con
     video_container = normalize_container_name(video_container)
     if video_container not in {"mp4", "mov"}:
         return
-    supported_codecs = {"aac", "ac3", "alac", "eac3", "mp3", "opus"} if video_container == "mp4" else {"aac", "ac3", "alac", "eac3", "mp3", "pcm_s16le", "pcm_s24le", "pcm_s32le"}
+    supported_codecs = {"aac", "ac3", "alac", "eac3", "flac", "mp3", "opus"} if video_container == "mp4" else {"aac", "ac3", "alac", "eac3", "mp3", "pcm_s16le", "pcm_s24le", "pcm_s32le"}
     audio_codecs = _probe_audio_stream_codecs(ffprobe_path, source_path)
     if audio_track_no is None:
         selected_codecs = [codec for codec in audio_codecs if len(codec) > 0]
@@ -307,6 +310,8 @@ def start_av_mux_process(ffmpeg_path: str, output_path: str, width: int, height:
     else:
         command += ["-map", f"1:a:{max(0, int(audio_track_no) - 1)}?"]
     command += get_video_encode_args(video_codec, video_container) + ["-c:a", "copy", "-shortest"]
+    if normalize_container_name(video_container) == "mp4":
+        command += ["-strict", "-2"]
     command += _get_live_mux_output_args(video_container)
     command += [output_path]
     return subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, bufsize=0)
@@ -381,17 +386,20 @@ def start_hdr_av_mux_process(ffmpeg_path: str, output_path: str, width: int, hei
     return subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, bufsize=0)
 
 
-def finalize_mux_process(process: subprocess.Popen, *, timeout_seconds: float = 30.0) -> tuple[int, str, bool]:
+def finalize_mux_process(process: subprocess.Popen, *, timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS, label: str = "") -> tuple[int, str, bool]:
     if process.stdin is not None and not process.stdin.closed:
         try:
             process.stdin.close()
         except OSError:
             pass
     forced_termination = False
+    target_desc = label.strip() if label and label.strip() else "output"
+    print(f"[MediaFlow] Finalizing ffmpeg {target_desc} (timeout: {timeout_seconds:.0f}s)...")
     try:
         return_code = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         forced_termination = True
+        print(f"[MediaFlow] Warning: ffmpeg did not exit within {timeout_seconds}s timeout; terminating process.")
         process.kill()
         return_code = process.wait(timeout=5)
     stderr = process.stderr.read().decode("utf-8", errors="ignore").strip() if process.stderr is not None else ""
@@ -803,7 +811,7 @@ def concat_video_segments(
                     segment_stderr = segment_process.stderr.read().decode("utf-8", errors="ignore").strip() if segment_process.stderr is not None else ""
                     if segment_returncode != 0:
                         raise gr.Error((segment_stderr or f"ffmpeg failed to stream {segment_path} for concat").strip())
-                mux_returncode, mux_stderr, _ = finalize_mux_process(mux_process)
+                mux_returncode, mux_stderr, _ = finalize_mux_process(mux_process, label="merged continuation")
             except Exception:
                 try:
                     if mux_process.stdin is not None and not mux_process.stdin.closed:

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 from typing import Any
@@ -57,6 +58,7 @@ def clean_metadata_settings(settings: dict[str, Any], model_def: dict[str, Any],
         (audio_only and model_def.get("temperature", True), {"temperature"}),
         (model_def.get("duration_slider") is not None, {"duration_seconds"}),
         (model_def.get("pause_between_sentences", False), {"pause_seconds"}),
+        (model_def.get("world_outputs", False), {"world_output"}),
         (model_def.get("inference_steps", True), {"num_inference_steps"}),
         (model_def.get("sample_solvers") is not None, {"sample_solver"}),
         (model_def.get("self_refiner", False), {"self_refiner_setting", "self_refiner_plan", "self_refiner_f_uncertainty", "self_refiner_certain_percentage"}),

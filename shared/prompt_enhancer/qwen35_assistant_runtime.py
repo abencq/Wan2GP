@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import json
@@ -8,12 +9,14 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import torch
 
-from shared.llm_engines.nanovllm import SamplingParams
-from shared.llm_engines.nanovllm.engine.block_manager import BlockManager
-from shared.llm_engines.nanovllm.engine.sequence import Sequence, SequenceStatus
+from shared.llm_engines.lmgp import SamplingParams
+from shared.llm_engines.lmgp.engine.block_manager import BlockManager
+from shared.llm_engines.lmgp.layers.kv_formats import overlay_slots as _kv_overlay_slots
+from shared.llm_engines.lmgp.engine.sequence import Sequence, SequenceStatus
 from shared.prompt_enhancer import qwen35_text
 from shared.prompt_enhancer.streaming import ThrottledStreamEmitter
 
@@ -28,8 +31,11 @@ _ASSISTANT_PREFILL_CHUNK_TOKENS = 1024
 ASSISTANT_THOUGHT_BUDGET_TOKENS = 4096
 ASSISTANT_STATEMENT_BUDGET_TOKENS = 4096
 ASSISTANT_TOOL_BATCH_BUDGET_TOKENS = 4096
+ASSISTANT_ACTION_BUDGET_SMALL_CONTEXT_TOKENS = 16386
+ASSISTANT_ACTION_BUDGET_BASE_CONTEXT_TOKENS = 32000
 ASSISTANT_ACTION_BUDGET_MEDIUM_CONTEXT_TOKENS = 48000
 ASSISTANT_ACTION_BUDGET_LARGE_CONTEXT_TOKENS = 64000
+ASSISTANT_ACTION_BUDGET_SMALL_TOKENS = 2048
 ASSISTANT_ACTION_BUDGET_MEDIUM_TOKENS = 6144
 ASSISTANT_ACTION_BUDGET_LARGE_TOKENS = 8192
 DEEPY_TELEMETRY_ENV = "WAN2GP_DEEPY_TELEMETRY"
@@ -47,8 +53,14 @@ ASSISTANT_THOUGHT_BUDGET_UPDATE = assistant_thought_budget_update(ASSISTANT_THOU
 
 def assistant_action_budget_tokens(context_window_tokens: int) -> int:
     context_window_tokens = int(context_window_tokens)
+    if context_window_tokens <= ASSISTANT_ACTION_BUDGET_SMALL_CONTEXT_TOKENS:
+        return ASSISTANT_ACTION_BUDGET_SMALL_TOKENS
+    if context_window_tokens < ASSISTANT_ACTION_BUDGET_BASE_CONTEXT_TOKENS:
+        context_growth = context_window_tokens - ASSISTANT_ACTION_BUDGET_SMALL_CONTEXT_TOKENS
+        budget_growth = ASSISTANT_THOUGHT_BUDGET_TOKENS - ASSISTANT_ACTION_BUDGET_SMALL_TOKENS
+        return ASSISTANT_ACTION_BUDGET_SMALL_TOKENS + budget_growth * context_growth // (ASSISTANT_ACTION_BUDGET_BASE_CONTEXT_TOKENS - ASSISTANT_ACTION_BUDGET_SMALL_CONTEXT_TOKENS)
     if context_window_tokens >= ASSISTANT_ACTION_BUDGET_LARGE_CONTEXT_TOKENS:
-        return ASSISTANT_ACTION_BUDGET_LARGE_TOKENS
+        return ASSISTANT_ACTION_BUDGET_LARGE_TOKENS * context_window_tokens // ASSISTANT_ACTION_BUDGET_LARGE_CONTEXT_TOKENS
     if context_window_tokens >= ASSISTANT_ACTION_BUDGET_MEDIUM_CONTEXT_TOKENS:
         return ASSISTANT_ACTION_BUDGET_MEDIUM_TOKENS
     return ASSISTANT_THOUGHT_BUDGET_TOKENS
@@ -209,8 +221,9 @@ def strip_tool_blocks(raw_text: str) -> str:
     return "\n".join(parts).strip()
 
 
-def strip_trailing_stop_markup(raw_text: str) -> str:
-    return _TRAILING_STOP_RE.sub("", str(raw_text or "")).rstrip()
+def strip_trailing_stop_markup(raw_text: str, *, keep_trailing_newlines: bool = False) -> str:
+    text = _TRAILING_STOP_RE.sub("", str(raw_text or ""))
+    return text.rstrip(" \t") if keep_trailing_newlines else text.rstrip()
 
 
 def _clean_tag_name(name: str) -> str:
@@ -256,7 +269,7 @@ def _load_json_with_missing_closers(source: str):
         return _JSON_PARSE_FAILED
 
 
-def _parse_tagged_tool_call(payload: str, allow_incomplete_function: bool = False, tool_parameters: dict[str, set[str]] | None = None) -> dict[str, Any] | None:
+def _parse_tagged_tool_call(payload: str, allow_incomplete_function: bool = False, tool_parameters: dict[str, set[str]] | None = None, *, preserve_unknown_parameters: bool = False) -> dict[str, Any] | None:
     function_match = _FUNCTION_TAG_RE.search(str(payload or ""))
     function_body = ""
     matched_closed_function = function_match is not None
@@ -277,7 +290,7 @@ def _parse_tagged_tool_call(payload: str, allow_incomplete_function: bool = Fals
         param_name, param_value = match.groups()
         clean_name = _clean_tag_name(param_name)
         clean_value = str(param_value or "").strip()
-        if len(clean_name) == 0 or allowed_parameters is not None and clean_name not in allowed_parameters:
+        if len(clean_name) == 0 or not preserve_unknown_parameters and allowed_parameters is not None and clean_name not in allowed_parameters:
             continue
         parsed_value = _load_json_with_missing_closers(clean_value)
         arguments[clean_name] = clean_value if parsed_value is _JSON_PARSE_FAILED else parsed_value
@@ -286,7 +299,7 @@ def _parse_tagged_tool_call(payload: str, allow_incomplete_function: bool = Fals
         for param_name, param_value in _GENERIC_PARAM_TAG_RE.findall(generic_body):
             clean_name = _clean_tag_name(param_name)
             clean_value = str(param_value or "").strip()
-            if clean_name not in allowed_parameters or clean_name in arguments:
+            if not clean_name or (not preserve_unknown_parameters and clean_name not in allowed_parameters) or clean_name in arguments:
                 continue
             parsed_value = _load_json_with_missing_closers(clean_value)
             arguments[clean_name] = clean_value if parsed_value is _JSON_PARSE_FAILED else parsed_value
@@ -403,7 +416,7 @@ def extract_incomplete_tool_arguments(raw_text: str) -> dict[str, Any]:
     return {} if open_brace_index < 0 else _decode_completed_object_members(candidate, open_brace_index)
 
 
-def _extract_bare_json_tool_call(text: str) -> tuple[dict[str, Any] | None, tuple[int, int] | None]:
+def _extract_bare_json_tool_call(text: str, tool_names=None) -> tuple[dict[str, Any] | None, tuple[int, int] | None]:
     decoder = json.JSONDecoder()
     source_text = str(text or "")
     for start_idx, ch in enumerate(source_text):
@@ -413,24 +426,29 @@ def _extract_bare_json_tool_call(text: str) -> tuple[dict[str, Any] | None, tupl
             parsed, end_idx = decoder.raw_decode(source_text[start_idx:])
         except Exception:
             continue
+        # An untagged object with a "name" is ordinary data (a drafted answer, a
+        # quoted setting) unless it is the whole text or carries its arguments.
+        whole_text = start_idx == 0 and len(source_text[end_idx:].strip()) == 0
+        if not whole_text and not (isinstance(parsed, dict) and isinstance(parsed.get("arguments"), dict)):
+            continue
         tool_call = _normalize_tool_call_dict(parsed)
-        if tool_call is None:
+        if tool_call is None or tool_names is not None and tool_call["name"] not in tool_names:
             continue
         return tool_call, (start_idx, start_idx + end_idx)
     return None, None
 
 
-def _extract_inline_tool_call(text: str, allow_incomplete_function: bool = False, tool_parameters: dict[str, set[str]] | None = None) -> tuple[dict[str, Any] | None, tuple[int, int] | None]:
+def _extract_inline_tool_call(text: str, allow_incomplete_function: bool = False, tool_parameters: dict[str, set[str]] | None = None, *, preserve_unknown_parameters: bool = False) -> tuple[dict[str, Any] | None, tuple[int, int] | None]:
     candidate = strip_trailing_stop_markup(str(text or "")).strip()
     if len(candidate) == 0:
         return None, None
-    tagged_tool_call = _parse_tagged_tool_call(candidate, allow_incomplete_function=allow_incomplete_function, tool_parameters=tool_parameters)
+    tagged_tool_call = _parse_tagged_tool_call(candidate, allow_incomplete_function=allow_incomplete_function, tool_parameters=tool_parameters, preserve_unknown_parameters=preserve_unknown_parameters)
     if tagged_tool_call is not None:
         return tagged_tool_call, (0, len(candidate))
-    return _extract_bare_json_tool_call(candidate)
+    return _extract_bare_json_tool_call(candidate, None if tool_parameters is None else set(tool_parameters))
 
 
-def extract_tool_calls(raw_text: str, tool_parameters: dict[str, set[str]] | None = None) -> list[dict[str, Any]]:
+def extract_tool_calls(raw_text: str, tool_parameters: dict[str, set[str]] | None = None, *, preserve_unknown_parameters: bool = False) -> list[dict[str, Any]]:
     tool_calls = []
     source_text = str(raw_text or "")
     if _tool_call_markers(source_text) and validate_tool_call_structure(source_text):
@@ -440,19 +458,16 @@ def extract_tool_calls(raw_text: str, tool_parameters: dict[str, set[str]] | Non
             continue
         parsed = _load_json_with_missing_closers(payload)
         if parsed is _JSON_PARSE_FAILED:
-            parsed = _parse_tagged_tool_call(payload, tool_parameters=tool_parameters)
+            parsed = _parse_tagged_tool_call(payload, tool_parameters=tool_parameters, preserve_unknown_parameters=preserve_unknown_parameters)
         tool_call = _normalize_tool_call_dict(parsed)
         if tool_call is None:
             continue
         tool_calls.append(tool_call)
     if len(tool_calls) > 0:
         return tool_calls
-    inline_tool_call, _inline_span = _extract_inline_tool_call(source_text, allow_incomplete_function=True, tool_parameters=tool_parameters)
-    if inline_tool_call is not None:
-        tool_calls.append(inline_tool_call)
-        return tool_calls
+    # Untagged calls count only in the answer, never inside reasoning.
     _thinking_text, answer_text = qwen35_text._split_generated_text(source_text)
-    inline_tool_call, _inline_span = _extract_inline_tool_call(answer_text, allow_incomplete_function=True, tool_parameters=tool_parameters)
+    inline_tool_call, _inline_span = _extract_inline_tool_call(answer_text, allow_incomplete_function=True, tool_parameters=tool_parameters, preserve_unknown_parameters=preserve_unknown_parameters)
     if inline_tool_call is not None:
         tool_calls.append(inline_tool_call)
     return tool_calls
@@ -468,7 +483,7 @@ def strip_inline_tool_call_text(raw_text: str) -> str:
     return stripped_text
 
 
-def has_complete_tool_call(raw_text: str) -> bool:
+def has_complete_tool_call(raw_text: str, allow_untagged: bool = True) -> bool:
     text = str(raw_text or "")
     if validate_tool_call_structure(text):
         return False
@@ -480,11 +495,11 @@ def has_complete_tool_call(raw_text: str) -> bool:
             parsed = _parse_tagged_tool_call(payload)
         if _normalize_tool_call_dict(parsed) is not None:
             return True
-    inline_tool_call, _inline_span = _extract_inline_tool_call(text)
-    if inline_tool_call is None:
-        _thinking_text, answer_text = qwen35_text._split_generated_text(text)
-        inline_tool_call, _inline_span = _extract_inline_tool_call(answer_text)
-    return inline_tool_call is not None
+    if not allow_untagged:
+        return False
+    # Untagged calls count only in the answer, never inside reasoning.
+    _thinking_text, answer_text = qwen35_text._split_generated_text(text)
+    return _extract_inline_tool_call(answer_text)[0] is not None
 
 
 class Qwen35AssistantRuntime:
@@ -906,17 +921,28 @@ class Qwen35AssistantRuntime:
         engine.reserve_runtime(prompt_len=max_context_tokens, max_tokens=max_new_tokens, cfg_scale=1.0, min_model_len=min_model_len)
         engine._ensure_llm()
         if engine._llm is None:
-            raise RuntimeError("Assistant NanoVLLM runtime is not available.")
+            raise RuntimeError("Assistant LM engine runtime is not available.")
         self._log(f"Assistant engine ready after reserve: {self._describe_engine_state(engine)}")
         return engine
 
     def _get_linear_state_modules(self):
-        llm = self._get_live_llm()
-        modules = []
-        for module in llm.model_runner.model.modules():
-            if getattr(module, "layer_type", None) == "linear_attention" and hasattr(module, "conv_state_buffer") and hasattr(module, "recurrent_state_buffer"):
-                modules.append(module)
-        return modules
+        return [module for module in self._get_live_llm().model_runner.model.blk if module.layer_type == "linear_attention"]
+
+    def _snapshot_linear_states(self):
+        sources = [tensor.detach().as_subclass(torch.Tensor) for module in self._get_linear_state_modules() for tensor in (module.conv_state_buffer, module.recurrent_state_buffer)]
+        if not sources:
+            return []
+        stream = torch.cuda.current_stream(sources[0].device) if sources[0].is_cuda else None
+        saved = [torch.empty_like(source, device="cpu", pin_memory=stream is not None) for source in sources]
+        try:
+            for target, source in zip(saved, sources):
+                target.copy_(source, non_blocking=stream is not None)
+        finally:
+            # Pinned destinations plus same-stream ordering: finish every transfer before
+            # a caller can read the snapshot, mutate the source, or release the runtime.
+            if stream is not None:
+                stream.synchronize()
+        return [{"conv": saved[index], "recurrent": saved[index + 1]} for index in range(0, len(saved), 2)]
 
     def _get_live_llm(self):
         engine = getattr(self.model, "_prompt_enhancer_vllm_engine", None)
@@ -971,14 +997,14 @@ class Qwen35AssistantRuntime:
         llm.reset()
         llm.model_runner.ensure_runtime_ready()
         if llm.config.num_kvcache_blocks > 0 and len(llm.scheduler.block_manager.blocks) != llm.config.num_kvcache_blocks:
-            llm.scheduler.block_manager = BlockManager(llm.config.num_kvcache_blocks, llm.config.kvcache_block_size)
+            llm.scheduler.block_manager = BlockManager(llm.config.num_kvcache_blocks, llm.config.kvcache_block_size, _kv_overlay_slots(llm.config))
         llm.model_runner.reset_generation_state()
         llm.model_runner.call("set_sampling_seed", None if seed is None else int(seed))
         llm.scheduler.waiting.clear()
         llm.scheduler.running.clear()
         return engine, llm
 
-    def _build_sampling_params(self, max_new_tokens: int, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, available_tokens: int | None = None, suppress_token_ids: tuple[int, ...] = (), apply_repetition_penalty: bool = True):
+    def _build_sampling_params(self, max_new_tokens: int, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, available_tokens: int | None = None, suppress_token_ids: tuple[int, ...] = (), apply_repetition_penalty: bool = True, max_thinking_tokens: int | None = None):
         requested_new_tokens = max(1, int(max_new_tokens))
         resolved_available_tokens = None if available_tokens is None else max(0, int(available_tokens))
         effective_new_tokens = requested_new_tokens if resolved_available_tokens is None else min(requested_new_tokens, resolved_available_tokens)
@@ -991,7 +1017,7 @@ class Qwen35AssistantRuntime:
         logits_processor, logits_processor_update_state = qwen35_text._build_prompt_logits_processor(
             self.model,
             thinking_enabled=thinking_enabled,
-            max_thinking_tokens_override=effective_runtime_extra if thinking_enabled else None,
+            max_thinking_tokens_override=(effective_runtime_extra if max_thinking_tokens is None else max_thinking_tokens) if thinking_enabled else None,
             suppress_token_ids=suppress_token_ids,
         )
         temp, normalized_top_p, normalized_top_k = qwen35_text._normalize_vllm_sampling(
@@ -1045,28 +1071,38 @@ class Qwen35AssistantRuntime:
         if len(normalized_token_ids) == 0:
             raise ValueError("Cannot prefill assistant context with an empty token sequence.")
         _engine, llm = self._ensure_clean_runtime(max_context_tokens=len(normalized_token_ids), max_new_tokens=1, seed=seed)
-        initial_token_ids = normalized_token_ids[:_ASSISTANT_PREFILL_CHUNK_TOKENS]
+        speculative = bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False))
+        # Without MTP, the first decode step processes the final context token,
+        # so the scheduled prefill leaves it for the suffix path below.
+        initial_token_ids = normalized_token_ids[:_ASSISTANT_PREFILL_CHUNK_TOKENS if speculative else min(_ASSISTANT_PREFILL_CHUNK_TOKENS, len(normalized_token_ids) - 1)]
         seq = Sequence(initial_token_ids, SamplingParams(max_tokens=1, ignore_eos=True))
+        seq._assistant_context_id = uuid4().hex
         llm.scheduler.add(seq)
         scheduled, is_prefill = llm.scheduler.schedule()
         if not scheduled or not is_prefill:
             raise RuntimeError("Assistant context prefill did not schedule a prefill batch.")
-        if bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False)):
+        if speculative:
             llm.model_runner.call("prefill_mtp_only", scheduled)
         else:
             llm.model_runner.call("run", scheduled, is_prefill)
         seq = scheduled[0]
-        seq = self._chunk_prefill_suffix(seq, normalized_token_ids[len(initial_token_ids):])
+        seq = self._chunk_prefill_suffix(seq, normalized_token_ids[len(initial_token_ids):], processed_tokens=len(initial_token_ids))
         self._seal_sequence(seq)
         self._log_speculative_alignment(seq, "after context prefill")
         self._log(f"Primed assistant context with {len(normalized_token_ids)} tokens.")
         return seq
 
-    def _chunk_prefill_suffix(self, seq: Sequence, token_ids: list[int], chunk_tokens: int = _ASSISTANT_PREFILL_CHUNK_TOKENS) -> Sequence:
+    def _chunk_prefill_suffix(self, seq: Sequence, token_ids: list[int], chunk_tokens: int = _ASSISTANT_PREFILL_CHUNK_TOKENS, processed_tokens: int | None = None) -> Sequence:
         suffix = [int(token_id) for token_id in list(token_ids or [])]
+        if suffix and seq.token_ids and suffix[0] == int(seq.token_ids[-1]) == self._single_token_id("<|im_end|>"):
+            suffix = suffix[1:]  # a response that sampled its own end of turn (after parallel tool calls) keeps it once, as the chat format writes it
         if len(suffix) == 0:
             return seq
         llm = self._get_live_llm()
+        speculative = bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False))
+        # Without MTP, decode processes the last token (a sampled token or the
+        # final context token): prefill resumes at it and stops before the new one.
+        processed = int(seq.num_tokens) - 1 if processed_tokens is None else processed_tokens
         original_processor = seq.logits_processor
         original_update = seq.logits_processor_update_state
         original_max_tokens = seq.max_tokens
@@ -1091,13 +1127,19 @@ class Qwen35AssistantRuntime:
                     seq.num_cached_tokens = min(int(getattr(seq, "num_cached_tokens", old_num_tokens) or 0), old_num_tokens)
                     raise RuntimeError("Assistant chunk prefill exceeded the available KV cache blocks.")
                 llm.scheduler.block_manager.begin_prompt_append(seq, old_num_tokens)
-                seq.num_cached_tokens = old_num_tokens
-                if bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False)):
+                if speculative:
+                    seq.num_cached_tokens = old_num_tokens
                     llm.model_runner.call("prefill_mtp_suffix", [seq], old_num_tokens)
-                else:
-                    llm.model_runner.call("prefill_only", [seq])
+                elif seq.num_tokens - 1 > processed:
+                    full_token_ids = seq.token_ids
+                    seq.num_cached_tokens, seq.num_tokens, seq.token_ids = processed, len(full_token_ids) - 1, full_token_ids[:-1]
+                    try:
+                        llm.model_runner.call("prefill_only", [seq])
+                    finally:
+                        seq.num_tokens, seq.token_ids = len(full_token_ids), full_token_ids
                 llm.scheduler.block_manager.finalize_prompt_append(seq, old_num_tokens)
-                seq.num_cached_tokens = seq.num_tokens
+                processed = seq.num_tokens - 1
+                seq.num_cached_tokens = seq.num_tokens if speculative else processed
                 self._log(
                     f"Chunk-prefilled assistant suffix chunk {chunk_index}/{total_chunks} "
                     f"with {len(chunk)} tokens in {time.perf_counter() - chunk_started_at:.3f}s (context={int(seq.num_tokens)})."
@@ -1113,16 +1155,19 @@ class Qwen35AssistantRuntime:
         return self._prefill_context(token_ids, seed=seed)
 
     def restore_or_replay(self, snapshot: dict[str, Any] | None, fallback_tokens: list[int], seed: int | None = None) -> tuple[str, str]:
+        replay_reason = "no exact runtime snapshot was available"
         if snapshot:
             try:
                 self.restore_snapshot(snapshot)
                 return "restored", "exact KV snapshot restored"
+            except torch.OutOfMemoryError:
+                raise
             except Exception as exc:
                 self._log(f"Exact restore failed, falling back to prefill: {exc}")
-                self.prime_context(fallback_tokens, seed=seed)
-                return "prefilled", f"exact KV restore failed: {exc}"
+                replay_reason = f"exact KV restore failed: {exc}"
+        # Leave the exception handler before replay so its traceback releases GPU temporaries.
         self.prime_context(fallback_tokens, seed=seed)
-        return "prefilled", "no exact runtime snapshot was available"
+        return "prefilled", replay_reason
 
     def extend_context(self, target_token_ids: list[int]) -> str:
         seq = self._get_active_sequence()
@@ -1221,12 +1266,14 @@ class Qwen35AssistantRuntime:
                 self._log("Embedded decode finished without an active assistant snapshot; releasing multimodal runtime allocations.")
                 engine.release_runtime_allocations()
 
-    def start_generation_segment(self, max_new_tokens: int, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, continue_existing_completion: bool = False, suppress_token_ids: tuple[int, ...] = (), apply_repetition_penalty: bool = True, resume_segment: bool = False) -> tuple[Sequence, int]:
+    def start_generation_segment(self, max_new_tokens: int, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, continue_existing_completion: bool = False, suppress_token_ids: tuple[int, ...] = (), apply_repetition_penalty: bool = True, resume_segment: bool = False, max_total_tokens: int | None = None, max_thinking_tokens: int | None = None) -> tuple[Sequence, int]:
         seq = self._get_active_sequence()
         if seq is None:
             raise RuntimeError("Assistant context is not initialized.")
         llm = self._get_live_llm()
         available_tokens = max(0, int(llm.config.max_model_len) - int(seq.num_tokens))
+        if max_total_tokens is not None:
+            available_tokens = min(available_tokens, max_total_tokens)
         sampling_params, budget_info = self._build_sampling_params(
             max_new_tokens=max_new_tokens,
             seed=seed,
@@ -1238,6 +1285,7 @@ class Qwen35AssistantRuntime:
             available_tokens=available_tokens,
             suppress_token_ids=suppress_token_ids,
             apply_repetition_penalty=apply_repetition_penalty,
+            max_thinking_tokens=max_thinking_tokens,
         )
         if budget_info["effective_new_tokens"] != budget_info["requested_new_tokens"] or budget_info["effective_runtime_extra"] != budget_info["requested_runtime_extra"]:
             self._log(
@@ -1307,8 +1355,18 @@ class Qwen35AssistantRuntime:
         logits_processor._requires_input_ids = False
         logits_processor._supports_partial_vocab = lambda: thinking_state is None or not thinking_state.in_thinking or thinking_state.generated_thinking_tokens < thinking_state.max_thinking_tokens
         if logits_processor_without_penalty is not None:
+            logits_processor_without_penalty._is_token_mask = True
             logits_processor_without_penalty._requires_input_ids = False
             logits_processor_without_penalty._supports_partial_vocab = logits_processor._supports_partial_vocab
+
+        if not presence_state.enabled():
+            # Only the thinking budget remains: the GPU verifier evaluates it
+            # for every hypothetical accepted prefix, as for prompt generation.
+            logits_processor._speculative_batch_rules = lambda: {
+                "suppressed": (),
+                "thinking_stops": thinking_state.stop_token_ids,
+                "thinking": (thinking_state.close_think_token_id, thinking_state.max_thinking_tokens - thinking_state.generated_thinking_tokens, int(thinking_state.in_thinking)),
+            }
 
         def update_state(token_id: int):
             presence_state.update(token_id)
@@ -1318,7 +1376,7 @@ class Qwen35AssistantRuntime:
         seq.logits_processor = logits_processor
         seq.logits_processor_update_state = update_state
 
-    def start_generation_action(self, phase: str, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, continuing_response: bool = False, apply_repetition_penalty: bool = True, remaining_action_tokens: int | None = None, resume_action: bool = False) -> tuple[Sequence, AssistantActionState]:
+    def start_generation_action(self, phase: str, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, continuing_response: bool = False, apply_repetition_penalty: bool = True, remaining_action_tokens: int | None = None, resume_action: bool = False, allowed_token_ids: tuple[int, ...] | None = None) -> tuple[Sequence, AssistantActionState]:
         phase = str(phase or "").strip().lower()
         phase_limit = self.action_budget(phase)
         generation_limit = phase_limit if remaining_action_tokens is None else min(phase_limit, max(0, int(remaining_action_tokens)))
@@ -1329,7 +1387,7 @@ class Qwen35AssistantRuntime:
         available_tokens = max(0, int(llm.config.max_model_len) - int(seq.num_tokens))
         if available_tokens < generation_limit:
             raise RuntimeError(f"Assistant {phase} action requires {generation_limit} reserved tokens but only {available_tokens} remain.")
-        temp, normalized_top_p, normalized_top_k = qwen35_text._normalize_vllm_sampling(do_sample=bool(do_sample), temperature=temperature, top_p=top_p, top_k=top_k)
+        temp, normalized_top_p, normalized_top_k = qwen35_text._normalize_vllm_sampling(do_sample=bool(do_sample), temperature=temperature, top_p=top_p, top_k=qwen35_text._resolve_prompt_top_k(self.model, top_k))
         existing_completion_tokens = int(seq.num_completion_tokens) if continuing_response else 0
         if not continuing_response:
             seq.num_prompt_tokens = seq.num_tokens
@@ -1344,7 +1402,7 @@ class Qwen35AssistantRuntime:
         seq.predictive_penalty = qwen35_text._resolve_predictive_penalty_enabled(self.model)
         if not resume_action:
             seq.repetition_penalty_start = seq.num_tokens
-        seq.logits_bias = qwen35_text._build_suppressed_token_logits_bias(self.model, thinking_enabled=thinking_enabled)
+        seq.logits_bias = qwen35_text._build_suppressed_token_logits_bias(self.model, thinking_enabled=thinking_enabled) if allowed_token_ids is None else self._allowed_tokens_bias(tuple(allowed_token_ids))
         self._install_action_processors(seq, phase, generation_limit, continuing_response=continuing_response)
         if not continuing_response:
             llm.model_runner.call("set_sampling_seed", None if seed is None else int(seed))
@@ -1357,11 +1415,43 @@ class Qwen35AssistantRuntime:
         if token_ids:
             self.append_completion_suffix([int(token_id) for token_id in token_ids])
 
+    def tool_call_follows(self, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, stop_requested=None, apply_repetition_penalty: bool = True) -> bool:
+        """After a complete tool call, whether the model opens another one in the same response (the chat format of parallel calls).
+        One or two decode steps restricted to the format's choices - a newline then <tool_call>, or the end of the turn - so nothing
+        is rewound and no state is snapshotted. A sampled end of turn stays where the format writes it; the tool results' suffix
+        does not repeat it (_chunk_prefill_suffix)."""
+        tool_open, turn_end, newline = (self._single_token_id(text) for text in ("<tool_call>", "<|im_end|>", "\n"))
+        for allowed in ((newline, tool_open, turn_end), (tool_open, turn_end)):
+            result = self.generate_action(phase="statement", seed=seed, do_sample=do_sample, temperature=temperature, top_p=top_p, top_k=top_k, thinking_enabled=thinking_enabled,
+                                          stop_requested=stop_requested, continuing_response=True, apply_repetition_penalty=apply_repetition_penalty, remaining_action_tokens=1, allowed_token_ids=allowed)
+            if result.stop_reason != "statement_budget_exhausted":  # a newline uses up the one-token step: the second step decides
+                return result.stop_reason == "tool_start"
+        return False
+
+    def _single_token_id(self, text: str) -> int:
+        cache = self.__dict__.setdefault("_single_token_ids", {})
+        if text not in cache:
+            token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+            token_ids = token_ids.tolist() if torch.is_tensor(token_ids) else list(token_ids)
+            if len(token_ids) != 1:
+                raise RuntimeError(f"{text!r} is not a single token for this tokenizer.")
+            cache[text] = int(token_ids[0])
+        return cache[text]
+
+    def _allowed_tokens_bias(self, token_ids: tuple[int, ...]):
+        """A full-vocabulary bias that leaves only token_ids possible; cached, so that its device copy is made once."""
+        cache = self.__dict__.setdefault("_allowed_tokens_biases", {})
+        if token_ids not in cache:
+            bias = torch.full((int(self.model.config.vocab_size),), float(qwen35_text.QWEN35_PROMPT_SUPPRESS_LOGITS_BIAS), dtype=torch.float32)
+            bias[list(token_ids)] = 0
+            cache[token_ids] = bias
+        return cache[token_ids]
+
     def _close_exhausted_thought(self, budget_tokens: int) -> None:
         self._append_action_suffix(f"\n{assistant_thought_budget_update(budget_tokens)}\n</think>")
 
-    def generate_action(self, phase: str, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, stop_requested=None, stream_callback=None, stream_interval_seconds: float = 1.0, continuing_response: bool = False, apply_repetition_penalty: bool = True, remaining_action_tokens: int | None = None, resume_action: bool = False, pause_requested=None) -> AssistantDecodeResult:
-        seq, action = self.start_generation_action(phase=phase, seed=seed, do_sample=do_sample, temperature=temperature, top_p=top_p, top_k=top_k, thinking_enabled=thinking_enabled, continuing_response=continuing_response, apply_repetition_penalty=apply_repetition_penalty, remaining_action_tokens=remaining_action_tokens, resume_action=resume_action)
+    def generate_action(self, phase: str, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, stop_requested=None, stream_callback=None, stream_interval_seconds: float = 1.0, continuing_response: bool = False, apply_repetition_penalty: bool = True, remaining_action_tokens: int | None = None, resume_action: bool = False, pause_requested=None, allowed_token_ids: tuple[int, ...] | None = None) -> AssistantDecodeResult:
+        seq, action = self.start_generation_action(phase=phase, seed=seed, do_sample=do_sample, temperature=temperature, top_p=top_p, top_k=top_k, thinking_enabled=thinking_enabled, continuing_response=continuing_response, apply_repetition_penalty=apply_repetition_penalty, remaining_action_tokens=remaining_action_tokens, resume_action=resume_action, allowed_token_ids=allowed_token_ids)
         stop_token_ids = {int(token_id) for token_id in getattr(self.model, "_prompt_enhancer_stop_token_ids", []) or [] if int(token_id) >= 0}
         speculative = bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False))
         boundary_markers = ["</think>"] if action.phase == "thought" else ["<tool_call>", *(["<think>"] if thinking_enabled else [])] if action.phase == "statement" else ["</tool_call>"]
@@ -1474,8 +1564,8 @@ class Qwen35AssistantRuntime:
             return finish("tool_budget_exhausted", current_text=raw_text)
         return finish(f"{action.phase}_budget_exhausted")
 
-    def generate_segment(self, max_new_tokens: int, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, stop_requested=None, stream_callback=None, stream_interval_seconds: float = 1.0, continue_existing_completion: bool = False, suppress_token_ids: tuple[int, ...] = (), apply_repetition_penalty: bool = True, resume_segment: bool = False, pause_requested=None) -> AssistantDecodeResult:
-        seq, requested_segment_tokens = self.start_generation_segment(max_new_tokens=max_new_tokens, seed=seed, do_sample=do_sample, temperature=temperature, top_p=top_p, top_k=top_k, thinking_enabled=thinking_enabled, continue_existing_completion=continue_existing_completion, suppress_token_ids=suppress_token_ids, apply_repetition_penalty=apply_repetition_penalty, resume_segment=resume_segment)
+    def generate_segment(self, max_new_tokens: int, seed: int | None, do_sample: bool, temperature: float | None, top_p: float | None, top_k: int | None, thinking_enabled: bool, stop_requested=None, stream_callback=None, stream_interval_seconds: float = 1.0, continue_existing_completion: bool = False, suppress_token_ids: tuple[int, ...] = (), apply_repetition_penalty: bool = True, resume_segment: bool = False, pause_requested=None, max_total_tokens: int | None = None, max_thinking_tokens: int | None = None) -> AssistantDecodeResult:
+        seq, requested_segment_tokens = self.start_generation_segment(max_new_tokens=max_new_tokens, seed=seed, do_sample=do_sample, temperature=temperature, top_p=top_p, top_k=top_k, thinking_enabled=thinking_enabled, continue_existing_completion=continue_existing_completion, suppress_token_ids=suppress_token_ids, apply_repetition_penalty=apply_repetition_penalty, resume_segment=resume_segment, max_total_tokens=max_total_tokens, max_thinking_tokens=max_thinking_tokens)
         existing_completion_tokens = int(seq.num_completion_tokens)
         requested_segment_tokens = max(0, int(requested_segment_tokens))
         seq.max_tokens = max(int(seq.max_tokens or 0), existing_completion_tokens + requested_segment_tokens + 1)
@@ -1557,7 +1647,9 @@ class Qwen35AssistantRuntime:
                 stream_callback_called = stream_emitter.emit(stream_callback, raw_text=raw_text, token_count=generated_tokens, stop_reason=None, is_final=False)
             stream_seconds = time.perf_counter() - stream_started if stream_started else 0.0
             parse_started = time.perf_counter() if decode_telemetry is not None else 0.0
-            stop_reason = "tool_call" if boundary_candidate and has_complete_tool_call(raw_text) else "stop_token" if last_token_id in stop_token_ids else None
+            # Segments (compaction summaries) may quote earlier calls or settings
+            # objects: only a tagged call ends them early.
+            stop_reason = "tool_call" if boundary_candidate and has_complete_tool_call(raw_text, allow_untagged=False) else "stop_token" if last_token_id in stop_token_ids else None
             parse_seconds = time.perf_counter() - parse_started if decode_telemetry is not None else 0.0
             self._update_decode_telemetry(decode_telemetry, seq, emitted_tokens, runner_seconds, scheduler_seconds, postprocess_seconds, decode_seconds, parse_seconds, stream_seconds, stream_emitter is not None, stream_callback_called)
             if stop_reason is not None:
@@ -1566,16 +1658,32 @@ class Qwen35AssistantRuntime:
         raw_text = self.tokenizer.decode(seq.completion_token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
         return finish("max_tokens", token_count=requested_segment_tokens, current_text=raw_text)
 
-    def snapshot_context(self) -> dict[str, Any] | None:
+    def snapshot_context(self, previous: dict[str, Any] | None = None) -> dict[str, Any] | None:
         seq = self._get_active_sequence()
         if seq is None:
             self._log("Snapshot requested but no active assistant sequence is available.")
             return None
         llm = self._get_live_llm()
         runner = llm.model_runner
-        torch.cuda.synchronize()
-        linear_modules = self._get_linear_state_modules()
+        from shared.llm_engines.snapshot_cache import snapshot_cache
+
+        # The final token may still be uncached. Only complete preceding pages are immutable.
+        reuse_tokens = 0
+        if previous is not None and previous["context_id"] == seq._assistant_context_id:
+            saved_tokens = previous["sequence"]["token_ids"]
+            if seq.token_ids[:len(saved_tokens)] == saved_tokens:
+                reuse_tokens = max(0, len(saved_tokens) - 1)
+        reuse_blocks = reuse_tokens // llm.config.kvcache_block_size
+        if reuse_blocks and previous["sequence"]["block_table"][:reuse_blocks] != seq.block_table[:reuse_blocks]:
+            reuse_tokens = reuse_blocks = 0
+        ranges = []
+        for block_id in seq.block_table:
+            if ranges and ranges[-1][1] == block_id:
+                ranges[-1] = (ranges[-1][0], block_id + 1)
+            else:
+                ranges.append((block_id, block_id + 1))
         snapshot = {
+            "context_id": seq._assistant_context_id,
             "max_model_len_hint": getattr(getattr(self.model, "_prompt_enhancer_vllm_engine", None), "_max_model_len_hint", None),
             "max_num_seqs_hint": getattr(getattr(self.model, "_prompt_enhancer_vllm_engine", None), "_max_num_seqs_hint", None),
             "max_num_batched_tokens_hint": getattr(getattr(self.model, "_prompt_enhancer_vllm_engine", None), "_max_num_batched_tokens_hint", None),
@@ -1595,6 +1703,8 @@ class Qwen35AssistantRuntime:
                 "repetition_penalty": None if seq.repetition_penalty is None else float(seq.repetition_penalty),
                 "predictive_penalty": bool(seq.predictive_penalty),
                 "repetition_penalty_start": int(seq.repetition_penalty_start),
+                "overlay_slot": int(seq.overlay_slot),
+                "ring_high": int(seq.ring_high),
             },
             "block_manager": {
                 "block_size": int(llm.scheduler.block_manager.block_size),
@@ -1609,17 +1719,13 @@ class Qwen35AssistantRuntime:
                 "hash_to_block_id": {int(hash_key): int(block_id) for hash_key, block_id in llm.scheduler.block_manager.hash_to_block_id.items()},
                 "free_block_ids": [int(block_id) for block_id in llm.scheduler.block_manager.free_block_ids],
                 "used_block_ids": [int(block_id) for block_id in llm.scheduler.block_manager.used_block_ids],
+                "free_overlay_slots": [int(slot) for slot in llm.scheduler.block_manager.free_overlay_slots],
             },
-            "kv_cache": None if not hasattr(runner, "kv_cache") else runner.kv_cache.detach().to("cpu").as_subclass(torch.Tensor).clone(),
-            "kv_cache_scales": None if not hasattr(runner, "kv_cache_scales") else runner.kv_cache_scales.detach().to("cpu").as_subclass(torch.Tensor).clone(),
-            "linear_states": [
-                {
-                    "conv": module.conv_state_buffer.detach().to("cpu").as_subclass(torch.Tensor).clone(),
-                    "recurrent": module.recurrent_state_buffer.detach().to("cpu").as_subclass(torch.Tensor).clone(),
-                }
-                for module in linear_modules
-            ],
-            "speculative_state": runner.snapshot_speculative_state(seq.seq_id) if bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False)) else None,
+            "kv_tensors": {name: snapshot_cache(tensor, ranges, axis=axis, previous=None if previous is None else previous["kv_tensors"][name], reuse=reuse_blocks)
+                           for name, (tensor, axis) in runner.kv_snapshot_items().items()},
+            "kv_overlay": runner.snapshot_overlay(seq),
+            "linear_states": self._snapshot_linear_states(),
+            "speculative_state": runner.snapshot_speculative_state(seq.seq_id, previous=None if previous is None else previous["speculative_state"], reuse_tokens=reuse_tokens) if bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False)) else None,
             "generation_state": {
                 "sampling": self.snapshot_sampling_state(),
                 "presence": None if self._assistant_presence_state is None else {
@@ -1635,36 +1741,37 @@ class Qwen35AssistantRuntime:
         )
         return snapshot
 
-    def snapshot_rewind_state(self) -> dict[str, Any] | None:
+    def snapshot_rewind_state(self, context_snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
         seq = self._get_active_sequence()
         if seq is None:
             return None
         llm = self._get_live_llm()
         runner = llm.model_runner
-        torch.cuda.synchronize()
+        speculative_state = None
+        if bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False)):
+            if context_snapshot is None:
+                speculative_state = runner.snapshot_speculative_rewind_state(seq.seq_id)
+            else:
+                saved = context_snapshot["speculative_state"]
+                speculative_state = {"mtp_cache_length": saved["mtp_cache"]["seq_length"], "draft": saved["draft"], "pending": saved["pending"]}
         return {
-            "runtime_signature": runner._get_graph_capture_signature(),
-            "kv_cache_ptr": int(runner.kv_cache.data_ptr()),
+            "context_id": seq._assistant_context_id,
             "token_ids": [int(token_id) for token_id in seq.token_ids],
             "num_prompt_tokens": int(seq.num_prompt_tokens),
             "num_cached_tokens": int(seq.num_cached_tokens),
             "block_table": [int(block_id) for block_id in seq.block_table],
-            "linear_states": [
-                {
-                    "conv": module.conv_state_buffer.detach().to("cpu").as_subclass(torch.Tensor).clone(),
-                    "recurrent": module.recurrent_state_buffer.detach().to("cpu").as_subclass(torch.Tensor).clone(),
-                }
-                for module in self._get_linear_state_modules()
-            ],
-            "speculative_state": runner.snapshot_speculative_rewind_state(seq.seq_id) if bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False)) else None,
+            "linear_states": context_snapshot["linear_states"] if context_snapshot is not None else self._snapshot_linear_states(),
+            "speculative_state": speculative_state,
         }
 
     def restore_rewind_state(self, snapshot: dict[str, Any]) -> None:
         llm = self._get_live_llm()
         runner = llm.model_runner
         seq = self._get_active_sequence()
-        if seq is None or runner._get_graph_capture_signature() != snapshot["runtime_signature"] or int(runner.kv_cache.data_ptr()) != int(snapshot["kv_cache_ptr"]):
-            raise RuntimeError("Assistant semantic-boundary checkpoint no longer belongs to the live runtime.")
+        # Full snapshots restore the same context into a potentially different GPU
+        # allocation. A new prefill gets a different identity, even for equal tokens.
+        if seq is None or seq._assistant_context_id != snapshot["context_id"]:
+            raise RuntimeError("Assistant semantic-boundary checkpoint does not belong to the active context.")
         token_ids = [int(token_id) for token_id in snapshot["token_ids"]]
         if list(seq.token_ids[:len(token_ids)]) != token_ids:
             raise RuntimeError("Assistant live context no longer contains the semantic-boundary prefix.")
@@ -1733,19 +1840,18 @@ class Qwen35AssistantRuntime:
         runner = llm.model_runner
         if not hasattr(runner, "kv_cache"):
             raise RuntimeError("Assistant runtime has no KV cache to restore into.")
-        kv_cache = snapshot.get("kv_cache")
-        if kv_cache is None or tuple(kv_cache.shape) != tuple(runner.kv_cache.shape):
-            saved_shape = None if kv_cache is None else tuple(int(x) for x in kv_cache.shape)
-            live_shape = tuple(int(x) for x in runner.kv_cache.shape)
-            self._log(f"Assistant KV cache snapshot mismatch saved_shape={saved_shape} live_shape={live_shape}")
+        saved_tensors = snapshot.get("kv_tensors") or {}
+        live_tensors = runner.kv_snapshot_items()
+        if set(saved_tensors) != set(live_tensors) or any(tuple(saved_tensors[name]["shape"]) != tuple(tensor.shape) for name, (tensor, _axis) in live_tensors.items()):
+            saved_shapes = {name: saved["shape"] for name, saved in saved_tensors.items()}
+            live_shapes = {name: tuple(int(x) for x in tensor.shape) for name, (tensor, _axis) in live_tensors.items()}
+            self._log(f"Assistant KV cache snapshot mismatch saved_shape={saved_shapes} live_shape={live_shapes}")
             raise RuntimeError("Assistant KV cache snapshot shape does not match current runtime.")
         with torch.inference_mode():
-            runner.kv_cache.copy_(kv_cache)
-            if hasattr(runner, "kv_cache_scales"):
-                kv_cache_scales = snapshot.get("kv_cache_scales")
-                if kv_cache_scales is None or tuple(kv_cache_scales.shape) != tuple(runner.kv_cache_scales.shape):
-                    raise RuntimeError("Assistant KV cache scale snapshot does not match current runtime.")
-                runner.kv_cache_scales.copy_(kv_cache_scales)
+            from shared.llm_engines.snapshot_cache import restore_cache
+
+            for name, (tensor, _axis) in live_tensors.items():
+                restore_cache(tensor, saved_tensors[name])
         linear_modules = self._get_linear_state_modules()
         linear_states = snapshot.get("linear_states", [])
         if len(linear_modules) != len(linear_states):
@@ -1759,7 +1865,7 @@ class Qwen35AssistantRuntime:
                 module.conv_state_buffer.copy_(saved_conv)
                 module.recurrent_state_buffer.copy_(saved_recurrent)
         saved_block_manager = snapshot["block_manager"]
-        llm.scheduler.block_manager = BlockManager(len(saved_block_manager["blocks"]), int(saved_block_manager["block_size"]))
+        llm.scheduler.block_manager = BlockManager(len(saved_block_manager["blocks"]), int(saved_block_manager["block_size"]), _kv_overlay_slots(llm.config))
         for block, saved_block in zip(llm.scheduler.block_manager.blocks, saved_block_manager["blocks"]):
             block.ref_count = int(saved_block["ref_count"])
             block.hash = int(saved_block["hash"])
@@ -1767,8 +1873,10 @@ class Qwen35AssistantRuntime:
         llm.scheduler.block_manager.hash_to_block_id = {int(hash_key): int(block_id) for hash_key, block_id in saved_block_manager["hash_to_block_id"].items()}
         llm.scheduler.block_manager.free_block_ids = deque(int(block_id) for block_id in saved_block_manager["free_block_ids"])
         llm.scheduler.block_manager.used_block_ids = set(int(block_id) for block_id in saved_block_manager["used_block_ids"])
+        llm.scheduler.block_manager.free_overlay_slots = deque(int(slot) for slot in saved_block_manager.get("free_overlay_slots", []))
         saved_seq = snapshot["sequence"]
         restored_seq = Sequence([int(token_id) for token_id in saved_seq["token_ids"]], SamplingParams(max_tokens=int(saved_seq["max_tokens"]), ignore_eos=bool(saved_seq["ignore_eos"])))
+        restored_seq._assistant_context_id = snapshot["context_id"]
         restored_seq.num_prompt_tokens = int(saved_seq["num_prompt_tokens"])
         restored_seq.num_cached_tokens = int(saved_seq["num_cached_tokens"])
         restored_seq.block_table = [int(block_id) for block_id in saved_seq["block_table"]]
@@ -1782,6 +1890,10 @@ class Qwen35AssistantRuntime:
         restored_seq.repetition_penalty = None if saved_seq["repetition_penalty"] is None else float(saved_seq["repetition_penalty"])
         restored_seq.predictive_penalty = bool(saved_seq["predictive_penalty"])
         restored_seq.repetition_penalty_start = int(saved_seq["repetition_penalty_start"])
+        restored_seq.overlay_slot = int(saved_seq.get("overlay_slot", -1))
+        restored_seq.ring_high = int(saved_seq.get("ring_high", 0))
+        with torch.inference_mode():
+            runner.restore_overlay(restored_seq, snapshot.get("kv_overlay"))
         restored_seq.logits_processor = None
         restored_seq.logits_processor_update_state = None
         llm.scheduler.waiting.clear()

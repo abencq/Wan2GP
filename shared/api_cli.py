@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 import contextlib
 import inspect
 import sys
@@ -5,7 +6,7 @@ import threading
 import time
 from typing import Any
 
-from shared.api import GenerationError, GenerationResult, SessionJob, _GENERATION_LOCK, _OutputCapture, _pushd
+from shared.api import GenerationError, GenerationResult, ProgressUpdate, SessionJob, _GENERATION_LOCK, _OutputCapture, _pushd
 from shared.utils.thread_utils import AsyncStream
 
 
@@ -13,8 +14,7 @@ def run_cli_job(session, job: SessionJob, tasks: list[dict[str, Any]]) -> None:
     stream = AsyncStream()
     gen = session._state["gen"]
     worker_done = threading.Event()
-    base_file_count = len(gen["file_list"])
-    base_audio_count = len(gen["audio_file_list"])
+    base_counts = session._gallery_counts()
     total_tasks = len(tasks)
     runtime = None
     task_summary: dict[str, Any] = {
@@ -23,6 +23,8 @@ def run_cli_job(session, job: SessionJob, tasks: list[dict[str, Any]]) -> None:
         "failed_tasks": 0,
         "total_tasks": total_tasks,
     }
+    if any(task.get('workspace_id') for task in tasks):
+        task_summary['workspace_outputs'] = []
 
     try:
         runtime = session._ensure_runtime()
@@ -75,7 +77,7 @@ def run_cli_job(session, job: SessionJob, tasks: list[dict[str, Any]]) -> None:
                 _handle_command(session, job, runtime.module, tasks, command, data)
 
             worker_thread.join(timeout=0.1)
-            outputs = session._collect_outputs(base_file_count, base_audio_count)
+            outputs = task_summary['workspace_outputs'] if 'workspace_outputs' in task_summary else session._collect_outputs(base_counts)
             artifacts = session._consume_output_artifacts(tasks)
             if job.cancel_requested and not task_summary["errors"]:
                 task_summary["errors"].append(GenerationError(message="Generation was cancelled", stage="cancelled"))
@@ -91,7 +93,6 @@ def run_cli_job(session, job: SessionJob, tasks: list[dict[str, Any]]) -> None:
             )
             job.events.put("completed", result)
             session._emit_callback("on_complete", result, job=job)
-            job._set_result(result)
     except BaseException as exc:
         failure = session._make_generation_error(exc, task_index=None, task_id=None, stage="runtime")
         result = GenerationResult(
@@ -107,30 +108,36 @@ def run_cli_job(session, job: SessionJob, tasks: list[dict[str, Any]]) -> None:
         session._emit_callback("on_error", failure, job=job)
         job.events.put("completed", result)
         session._emit_callback("on_complete", result, job=job)
-        job._set_result(result)
     finally:
-        job.events.close()
         if runtime is not None:
             session._reset_state_after_run()
         with session._job_lock:
+            gen["queue"] = []
             if session._active_job is job:
                 session._active_job = None
+            job._set_result(result)
+        job.events.close()
 
 
 def _run_tasks_worker(session, wgp, tasks: list[dict[str, Any]], stream: AsyncStream, job: SessionJob, task_summary: dict[str, Any]) -> None:
     expected_args = set(inspect.signature(wgp.generate_media).parameters.keys())
-    total_tasks = len(tasks)
-
+    gen = session._state["gen"]
     for task_index, task in enumerate(tasks, start=1):
         if job.cancel_requested:
             break
-        session._state["gen"]["prompt_no"] = task_index
-        session._state["gen"]["prompts_max"] = total_tasks
-        session._state["gen"]["queue"] = tasks
+        with session._job_lock:
+            cancelled = task.get("_api_queue_cancel_requested", False)
+            if not cancelled:
+                gen["api_active_queue_task"] = task
+        gen["prompt_no"] = task_index
+        gen["prompts_max"] = len(tasks)
         task_id = task.get("id")
         task_errors: list[GenerationError] = []
+        success = False
 
         def send_cmd(command: str, data: Any = None) -> None:
+            if command == "progress":
+                data = session._build_progress_update(data, task_id=session._get_task_settings(task)["client_id"], task_index=task_index, task_count=len(tasks))
             if command == "error":
                 failure = session._make_generation_error(data, task_index=task_index, task_id=task_id, stage="generation")
                 task_errors.append(failure)
@@ -138,61 +145,60 @@ def _run_tasks_worker(session, wgp, tasks: list[dict[str, Any]], stream: AsyncSt
                 return
             stream.output_queue.push(command, data)
 
-        validated_settings, validation_error = wgp.validate_task(task, session._state)
-        if validated_settings is None:
-            failure = GenerationError(
-                message=validation_error or f"Task {task_index} failed validation",
-                task_index=task_index,
-                task_id=task_id,
-                stage="validation",
-            )
-            task_summary["errors"].append(failure)
-            task_summary["failed_tasks"] += 1
+        if not cancelled:
+            validated_settings, validation_error = wgp.validate_task(task, session._state)
+            if validated_settings is None:
+                failure = GenerationError(message=validation_error or f"Task {task_index} failed validation", task_index=task_index, task_id=task_id, stage="validation")
+                task_errors.append(failure)
+                stream.output_queue.push("error", failure)
+            else:
+                task_settings = validated_settings.copy()
+                task_settings["state"] = session._state
+                filtered_params = {key: value for key, value in task_settings.items() if key in expected_args}
+                if wgp._is_edit_task_params(task_settings):
+                    filtered_params.setdefault("model_type", "")
+                plugin_data = task.get("plugin_data", {})
+                workspace_counts = None
+                try:
+                    if 'workspace_outputs' in task_summary:
+                        wgp.generate_media.prepare_workspace(task, session._state)
+                        workspace_counts = session._gallery_counts()
+                    success = wgp.generate_media(task, send_cmd, plugin_data=plugin_data, **filtered_params)
+                except BaseException as exc:
+                    if not task_errors:
+                        task_errors.append(session._make_generation_error(exc, task_index=task_index, task_id=task_id, stage="generation"))
+                        stream.output_queue.push("error", task_errors[-1])
+                finally:
+                    if workspace_counts is not None:
+                        task_summary['workspace_outputs'].extend(session._collect_outputs(workspace_counts))
+
+        # Complete the selected task under the same lock used by queue cancellation.
+        # A late request must never set the abort flag for the next task.
+        with session._job_lock:
+            task_cancelled = task.get("_api_queue_cancel_requested", False)
+            aborted = gen.get("abort", False) or job.cancel_requested
+            gen["queue"][:] = [entry for entry in gen["queue"] if entry is not task]
+            gen.pop("api_active_queue_task", None)
+            if task_cancelled and not job.cancel_requested:
+                gen["abort"] = False
+
+        if task_cancelled or aborted:
+            failure = GenerationError(message="Generation was cancelled", task_index=task_index, task_id=task_id, stage="cancelled")
+            task_errors.append(failure)
             stream.output_queue.push("error", failure)
-            continue
-
-        task_settings = validated_settings.copy()
-        task_settings["state"] = session._state
-        filtered_params = {key: value for key, value in task_settings.items() if key in expected_args}
-        if wgp._is_edit_task_params(task_settings):
-            filtered_params.setdefault("model_type", "")
-        plugin_data = task.get("plugin_data", {})
-        try:
-            success = wgp.generate_media(task, send_cmd, plugin_data=plugin_data, **filtered_params)
-        except BaseException as exc:
-            if not task_errors:
-                task_errors.append(session._make_generation_error(exc, task_index=task_index, task_id=task_id, stage="generation"))
-                stream.output_queue.push("error", task_errors[-1])
-            success = False
-
-        if session._state["gen"].get("abort", False) or job.cancel_requested:
-            task_errors.append(GenerationError(message="Generation was cancelled", task_index=task_index, task_id=task_id, stage="cancelled"))
-            stream.output_queue.push("error", task_errors[-1])
-            task_summary["errors"].extend(task_errors)
-            task_summary["failed_tasks"] += 1
+        elif not success and not task_errors:
+            failure = GenerationError(message=f"Task {task_index} did not complete successfully", task_index=task_index, task_id=task_id, stage="generation")
+            task_errors.append(failure)
+            stream.output_queue.push("error", failure)
+        task_summary["errors"].extend(task_errors)
+        task_summary["failed_tasks" if task_errors else "successful_tasks"] += 1
+        if job.cancel_requested or (aborted and not task_cancelled):
             break
-
-        if task_errors:
-            task_summary["errors"].extend(task_errors)
-            task_summary["failed_tasks"] += 1
-            continue
-        if not success:
-            failure = GenerationError(
-                message=f"Task {task_index} did not complete successfully",
-                task_index=task_index,
-                task_id=task_id,
-                stage="generation",
-            )
-            task_summary["errors"].append(failure)
-            task_summary["failed_tasks"] += 1
-            stream.output_queue.push("error", failure)
-            continue
-        task_summary["successful_tasks"] += 1
 
 
 def _handle_command(session, job: SessionJob, wgp, tasks: list[dict[str, Any]], command: str, data: Any) -> None:
     if command == "progress":
-        progress = session._build_progress_update(data)
+        progress = data if isinstance(data, ProgressUpdate) else session._build_progress_update(data)
         job.events.put("progress", progress)
         session._emit_callback("on_progress", progress, job=job)
         return

@@ -1,6 +1,6 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
-import fnmatch
 import json
 import logging
 import os
@@ -22,11 +22,11 @@ from shared.api import WanGPSession
 from shared.deepy import media_registry
 from shared.deepy.config import DEEPY_CONTEXT_TOKENS_DEFAULT, DEEPY_CONTEXT_TOKENS_KEY, DEEPY_MCP_AUTO_DISCOVER_PATHS_DEFAULT, DEEPY_MCP_AUTO_DISCOVER_PATHS_KEY, DEEPY_PRIME_MCP_SERVERS_KEY, get_deepy_config_value, get_deepy_runtime_config, normalize_deepy_context_tokens, normalize_deepy_mcp_auto_discover_paths, normalize_deepy_prime_mcp_servers
 from shared.gradio import assistant_chat
-from shared.mcp_server import build_inprocess_server, resolve_gallery_media_path
+from shared.mcp.server import _compact_job_snapshot, build_inprocess_server, resolve_gallery_media_path
+from shared.mcp.resources import RESOURCE_ALIASES, RESOURCE_DESCRIPTION, query_resources, resource_record, _extract_markdown_sections, _select_markdown_sections, _search_markdown_sections, _resource_read_blocks
 
 
-_MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-REMOTE_LLM_GENERATION_JOB_POLLING = False
+PRIME_ASYNC_ENABLED = False
 
 
 def _resolve_external_stdio_command(value: str, allow_changed_path_search: bool = False) -> str:
@@ -75,73 +75,6 @@ def _mcp_connection_error_message(error: BaseException) -> str:
     return "; ".join(dict.fromkeys(leaves)) or type(error).__name__
 
 
-def _extract_markdown_sections(markdown: str) -> list[dict[str, Any]]:
-    content = str(markdown or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    lines = content.split("\n") if content else []
-    headings = []
-    in_code_block = False
-    for line_no, line in enumerate(lines):
-        if line.strip().startswith("```"):
-            in_code_block = not in_code_block
-            continue
-        if in_code_block:
-            continue
-        match = _MARKDOWN_HEADING_RE.match(line)
-        if match is not None:
-            headings.append((line_no, len(match.group(1)), match.group(2).strip()))
-    include_top_level = not any(level > 1 for _line_no, level, _heading in headings)
-    stack = []
-    sections = []
-    for heading_no, (start_line, level, heading) in enumerate(headings):
-        while stack and stack[-1][0] >= level:
-            stack.pop()
-        stack.append((level, heading))
-        if not include_top_level and level == 1:
-            continue
-        end_line = len(lines)
-        for next_line, next_level, _next_heading in headings[heading_no + 1:]:
-            if next_level <= level:
-                end_line = next_line
-                break
-        section_path = " > ".join(title for heading_level, title in stack if include_top_level or heading_level > 1)
-        sections.append({"section": section_path or heading, "heading": heading, "heading_level": level, "content": "\n".join(lines[start_line:end_line]).strip(), "body": "\n".join(lines[start_line + 1:end_line]).strip()})
-    if not sections and content:
-        sections.append({"section": "Document", "heading": "Document", "heading_level": 1, "content": content, "body": content})
-    return sections
-
-
-def _select_markdown_sections(markdown: str, section_filter: str) -> tuple[str, list[str]]:
-    sections = _extract_markdown_sections(markdown)
-    pattern = str(section_filter or "").strip().casefold()
-    wildcard = "*" in pattern or "?" in pattern
-    if wildcard:
-        matches = [section for section in sections if any(fnmatch.fnmatchcase(str(section[key]).casefold(), pattern) for key in ("section", "heading"))]
-    else:
-        matches = [section for section in sections if any(pattern == str(section[key]).casefold() for key in ("section", "heading"))]
-        if not matches:
-            matches = [section for section in sections if any(pattern in str(section[key]).casefold() for key in ("section", "heading"))]
-    if not matches:
-        raise ValueError(f"Markdown section not found: {section_filter}")
-    return "\n\n".join(str(section["content"]) for section in matches), [str(section["section"]) for section in matches]
-
-
-def _search_markdown_sections(markdown: str, query: str, title: str = "") -> list[dict[str, Any]]:
-    from shared.deepy.engine import _build_doc_excerpt, _score_doc_section, _tokenize_doc_query
-
-    query = str(query or "").strip()
-    if not query:
-        raise ValueError("query is empty.")
-    query_tokens = _tokenize_doc_query(query)
-    matches = []
-    for section in _extract_markdown_sections(markdown):
-        score = _score_doc_section(query, query_tokens, str(title or ""), section)
-        if score <= 0:
-            continue
-        matches.append({"section": section["section"], "heading": section["heading"], "heading_level": section["heading_level"], "excerpt": _build_doc_excerpt(section, query, query_tokens), "score": int(score)})
-    matches.sort(key=lambda item: (-int(item["score"]), len(str(item["section"]))))
-    return matches[:5]
-
-
 class DeepyPrimeTools:
     _POLL_INTERVAL_SECONDS = 0.2
     _plugin_tools_by_name = {}
@@ -152,20 +85,49 @@ class DeepyPrimeTools:
         self.assistant_session = assistant_session
         self._zero_tools = zero_tools
         from shared.deepy.filesystem import build_file_access_policy
+        from shared.deepy.prime_filesystem import build_prime_policy
+        from shared.deepy import session_store
 
-        self.file_access_policy = zero_tools._file_access_policy() if zero_tools is not None else build_file_access_policy(get_deepy_runtime_config())
+        base_policy = build_file_access_policy(zero_tools._server_config() if zero_tools is not None else get_deepy_runtime_config())
+        self._api_session = WanGPSession(webui_state=state, console_output=False, console_isatty=False)
+        from shared.utils.workspace_storage import host_for_gen
+        host = host_for_gen(state['gen'])
+        if host is not None:
+            self._api_session._workspace_id = host.deepy_workspace_id()
+        self._api_session._gradio_webui_context = {"defer_load_queue_trigger": True}
+
+        workspace = session_store.session_workspace(assistant_session)
+        if workspace is None:
+            workspace = session_store.ensure_mono_session_workspace(assistant_session.chat_session_id)
+        self.file_access_policy = build_prime_policy(base_policy, workspace)
+        if zero_tools is not None:
+            zero_tools.file_access_policy_override = self.file_access_policy
         self.assistant_session.file_access_policy = self.file_access_policy
-        if getattr(self.assistant_session, "artifact_workspace", None) is None:
-            from shared.deepy.artifacts import ArtifactWorkspace
-            self.assistant_session.artifact_workspace = ArtifactWorkspace()
         self.allow_read_file_system = self.file_access_policy.read_enabled
         from shared.utils.plugins import get_deepy_prime_plugin_tools
 
-        self._plugin_tools_by_name = {definition.name: definition for definition in get_deepy_prime_plugin_tools() if not definition.requires_file_system or self.allow_read_file_system}
+        self._plugin_tools_by_name = {definition.name: definition for definition in get_deepy_prime_plugin_tools() if not definition.requires_file_system or base_policy.read_enabled}
         self._tool_progress_callback: Callable[..., None] | None = None
-        self._api_session = WanGPSession(webui_state=state, console_output=False, console_isatty=False)
-        self._api_session._gradio_webui_context = {"defer_load_queue_trigger": True}
-        self._server = build_inprocess_server(self._api_session, toolbox=zero_tools, default_job_event_limit=0, file_access_policy=self.file_access_policy, artifact_workspace=self.assistant_session.artifact_workspace)
+        self._server = build_inprocess_server(self._api_session, toolbox=zero_tools, default_job_event_limit=0, file_access_policy=self.file_access_policy, api_version="2.1", allow_async=PRIME_ASYNC_ENABLED)
+        if self._server._wangp_python_sandbox is not None:
+            sandbox = self._server._wangp_python_sandbox
+            sandbox.interrupted = self._is_interrupted  # the chat Stop button kills a running script
+            sandbox.call_tool = lambda name, arguments: self.call(name, arguments, inline=True)  # scripts call WanGP's tools with Prime's own bookkeeping
+            sandbox.progress = self._report_script_progress
+        if getattr(self._server, "_wangp_web_search", None) is not None:
+            self._server._wangp_web_search.progress = self._report_script_progress  # downloads and LoRA installs show a progress bar like scripts
+        plugins = getattr(self._server, "_wangp_plugins", None)
+        if plugins is not None:  # plugin actions stop with the chat Stop button, report on their card, call WanGP's tools re-entrantly and start the browser queue
+            plugins.interrupted = self._is_interrupted
+            plugins.progress = self._report_plugin_progress
+            plugins.call_tool = lambda name, arguments: self.call(name, arguments, inline=True, cascade=True)
+            plugins.trigger_queue = lambda job: self.send_cmd("load_queue_trigger", {"job_id": "", "token": job.webui_load_queue_token})
+        self._script_progress_target: Callable[..., None] | None = None  # the transcript entry of the running script, while one of its tool calls reports elsewhere
+        self._plugin_progress: tuple[str, dict[str, Any]] | None = None  # the last progress a running plugin action reported on its card
+        self._inline_calls = 0  # tool calls of a running script or plugin action: their generations report their steps
+        self.pause_runtime: Callable[..., None] | None = None  # set by the engine running this toolbox: releases Deepy's GPU before a script's GPU tool
+        self.run_script_tool: Callable[..., dict[str, Any]] | None = None  # set by the engine too: gives a script's tool call its own transcript card
+        self._background_jobs = {}
         self._external_servers = normalize_deepy_prime_mcp_servers(get_deepy_config_value(DEEPY_PRIME_MCP_SERVERS_KEY, {}))
         self._auto_discover_mcp_paths = normalize_deepy_mcp_auto_discover_paths(get_deepy_config_value(DEEPY_MCP_AUTO_DISCOVER_PATHS_KEY, DEEPY_MCP_AUTO_DISCOVER_PATHS_DEFAULT))
         self._external_server_errors: dict[str, str] = {}
@@ -201,11 +163,16 @@ class DeepyPrimeTools:
                 if self._active_session_job is not None:
                     self._active_session_job.cancel()
                 else:
-                    self._call_mcp_tool("wangp_cancel_job", {"job_id": self._active_job_id})
+                    self._server._wangp_jobs.get(self._active_job_id).job.cancel()
             except Exception:
                 pass
             self._active_job_id = ""
             self._active_session_job = None
+        for job in list(self._background_jobs.values()):
+            job.cancel()
+        if self._server._wangp_python_sandbox is not None:
+            self._server._wangp_python_sandbox.close()
+        self._server._wangp_pages.close()
         self._request_queue.put(None)
         self._worker_future.result(timeout=30)
         self._portal_context.__exit__(None, None, None)
@@ -220,7 +187,7 @@ class DeepyPrimeTools:
             if self._active_session_job is not None:
                 self._active_session_job.cancel()
             else:
-                self._call_mcp_tool("wangp_cancel_job", {"job_id": job_id})
+                self._server._wangp_jobs.get(job_id).job.cancel()
         except Exception:
             self._active_job_cancel_requested = False
             raise
@@ -298,14 +265,7 @@ class DeepyPrimeTools:
                         while True:
                             listed_resources = await client.list_resources(cursor=cursor)
                             for resource in listed_resources.resources:
-                                self._resource_defs.append({
-                                    "server": server_name,
-                                    "uri": str(resource.uri),
-                                    "name": str(getattr(resource, "name", "") or ""),
-                                    "title": str(getattr(resource, "title", "") or ""),
-                                    "description": str(getattr(resource, "description", "") or ""),
-                                    "mime_type": str(getattr(resource, "mimeType", "") or ""),
-                                })
+                                self._resource_defs.append(resource_record(resource, server_name))
                             cursor = getattr(listed_resources, "nextCursor", None)
                             if not cursor:
                                 break
@@ -321,6 +281,8 @@ class DeepyPrimeTools:
                         print(f"[DeepyPrimeTools] Ignoring tools from unavailable external MCP server '{server_name}': {message}")
                         continue
                     for tool in listed_tools.tools:
+                        if server_name == "wangp" and tool.name == "mcp_resource":
+                            continue  # Prime federates the same resource browser across all connected servers.
                         exposed_name = str(tool.name) if server_name == "wangp" else f"mcp_{self._safe_tool_name(server_name)}_{self._safe_tool_name(tool.name)}"
                         if exposed_name in self._tool_routes:
                             raise RuntimeError(f"Duplicate Deepy Prime MCP tool name: {exposed_name}")
@@ -329,7 +291,7 @@ class DeepyPrimeTools:
                         if server_name != "wangp":
                             description = f"External MCP server '{server_name}'. {description}".strip()
                         self._tool_defs.append({"type": "function", "function": {"name": exposed_name, "description": description, "parameters": dict(tool.inputSchema or {"type": "object", "properties": {}})}})
-                self._tool_defs.append({"type": "function", "function": {"name": "mcp_resource", "description": "List resources when uri is omitted. With a uri, provide query to search Markdown, or omit query to read it; optional section limits a read to matching headings. Server is optional when the uri uniquely identifies a resource.", "parameters": {"type": "object", "properties": {"server": {"type": "string", "description": "Optional MCP server name such as wangp."}, "uri": {"type": "string", "description": "Exact resource URI; omit to list resources."}, "query": {"type": "string", "description": "Keywords or a short natural-language question for Markdown search."}, "section": {"type": "string", "description": "Exact or partial Markdown heading path, or a case-insensitive * and ? glob, for a filtered read."}}}}})
+                self._tool_defs.append({"type": "function", "function": {"name": "mcp_resource", "description": RESOURCE_DESCRIPTION, "parameters": {"type": "object", "properties": {"server": {"type": "string"}, "uri": {"type": "string"}, "query": {"type": "string"}, "section": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "cursor": {"type": "string"}}, "additionalProperties": False}}})
                 self._ready_event.set()
 
                 while True:
@@ -339,55 +301,14 @@ class DeepyPrimeTools:
                     tool_name, arguments, future = request
                     try:
                         if tool_name == "mcp_resource":
-                            server_name = str(arguments.get("server", "") or "").strip()
-                            uri = str(arguments.get("uri", "") or "").strip()
-                            query = str(arguments.get("query", "") or "").strip()
-                            section_filter = str(arguments.get("section", "") or "").strip()
-                            if not uri:
-                                if query or section_filter:
-                                    raise ValueError("uri is required when query or section is provided")
-                                resources = [resource for resource in self._resource_defs if not server_name or resource["server"] == server_name]
-                                future.set_result({"status": "done", "resources": resources, "count": len(resources), "unavailable_servers": dict(self._external_server_errors)})
-                                continue
-                            if query and section_filter:
-                                raise ValueError("query and section are mutually exclusive")
-                            if server_name and server_name not in clients:
-                                raise ValueError(f"Unknown MCP server: {server_name}")
-                            resource_matches = [resource for resource in self._resource_defs if resource["uri"] == uri and (not server_name or resource["server"] == server_name)]
-                            if not resource_matches:
-                                raise ValueError(f"Unknown MCP resource{f' for server {server_name!r}' if server_name else ''}: {uri}")
-                            matching_servers = sorted({resource["server"] for resource in resource_matches})
-                            if not server_name:
-                                if len(matching_servers) != 1:
-                                    raise ValueError(f"Resource URI is exposed by multiple MCP servers; specify one of: {', '.join(matching_servers)}")
-                                server_name = matching_servers[0]
-                            resource_result = await clients[server_name].read_resource(uri)
-                            if query:
-                                matches = []
-                                resource_def = resource_matches[0]
-                                for content in resource_result.contents:
-                                    if not hasattr(content, "text"):
-                                        raise ValueError("Markdown resource search is only available for text resources.")
-                                    matches.extend(_search_markdown_sections(str(content.text), query, title=resource_def["title"] or resource_def["name"]))
-                                matches.sort(key=lambda item: (-int(item["score"]), len(str(item["section"]))))
-                                future.set_result({"status": "done", "server": server_name, "uri": uri, "query": query, "matches": matches[:5]})
-                                continue
-                            contents = []
-                            matched_sections = []
-                            for content in resource_result.contents:
-                                item = {"uri": str(content.uri), "mime_type": str(content.mimeType or "")}
-                                if hasattr(content, "text"):
-                                    text = str(content.text)
-                                    if section_filter:
-                                        text, current_matches = _select_markdown_sections(text, section_filter)
-                                        matched_sections.extend(current_matches)
-                                    item["text"] = text
-                                elif hasattr(content, "blob"):
-                                    if section_filter:
-                                        raise ValueError("Markdown section filtering is only available for text resources.")
-                                    item["blob"] = str(content.blob)
-                                contents.append(item)
-                            future.set_result({"status": "done", "server": server_name, "uri": uri, "section": section_filter, "matched_sections": matched_sections, "contents": contents})
+                            local_resources = (await clients["wangp"].list_resources()).resources
+                            self._resource_defs = [item for item in self._resource_defs if item["server"] != "wangp"] + [resource_record(item) for item in local_resources]
+                            async def read_resource(server_name, uri):
+                                response = await clients[server_name].read_resource(uri)
+                                return [{"uri": str(item.uri), "mime_type": str(item.mimeType or ""), **({"text": item.text} if hasattr(item, "text") else {"blob": item.blob})} for item in response.contents]
+
+                            budget = min(16000, normalize_deepy_context_tokens(get_deepy_config_value(DEEPY_CONTEXT_TOKENS_KEY, DEEPY_CONTEXT_TOKENS_DEFAULT)) // 2)
+                            future.set_result(await query_resources(self._server._wangp_pages, self._resource_defs, read_resource, arguments, servers=clients, unavailable_servers=self._external_server_errors, read_page_chars=budget))
                             continue
                         server_name, original_name = self._tool_routes[tool_name]
                         future.set_result(await clients[server_name].call_tool(original_name, arguments))
@@ -465,7 +386,7 @@ class DeepyPrimeTools:
             elif key in {"output_file", "generated_files"} and isinstance(value, str):
                 output_paths.append(value.strip())
 
-        collect(result)
+        collect(self.file_access_policy.virtualize_result(result))
         for output_path in dict.fromkeys(path for path in output_paths if path):
             try:
                 path = self.file_access_policy.resolve_path(output_path)
@@ -521,23 +442,6 @@ class DeepyPrimeTools:
                 page["next_offset"] = None
             if entries and len(json.dumps(page, ensure_ascii=False, separators=(",", ":"), default=str)) <= max_chars:
                 return page
-        if tool_name == "wangp_artifact" and isinstance(result.get("items"), list) and result["items"]:
-            page = dict(result)
-            source_items = page["items"]
-            items = page["items"] = []
-            offset = int(page.get("offset", 0) or 0)
-            for item in source_items:
-                items.append(item)
-                page.update(count=len(items), has_more=True, next_offset=offset + len(items))
-                if len(json.dumps(page, ensure_ascii=False, separators=(",", ":"), default=str)) > max_chars:
-                    items.pop()
-                    page.update(count=len(items), next_offset=offset + len(items))
-                    break
-            page["has_more"] = bool(result.get("has_more")) or len(items) < len(source_items)
-            if not page["has_more"]:
-                page["next_offset"] = None
-            if items and len(json.dumps(page, ensure_ascii=False, separators=(",", ":"), default=str)) <= max_chars:
-                return page
         return {
             "status": "error",
             "tool": tool_name,
@@ -552,6 +456,29 @@ class DeepyPrimeTools:
         if callable(self._tool_progress_callback):
             self._tool_progress_callback(status=status, status_text=status_text, result=self.file_access_policy.virtualize_result(result))
 
+    def _report_script_progress(self, status_text: str, summary: dict[str, Any]) -> None:
+        """Live status of a running Python script on its own transcript entry (its tool calls report to the script, not to that entry)."""
+        target = self._script_progress_target or self._tool_progress_callback
+        if callable(target):
+            target(status="running", status_text=status_text, result=self.file_access_policy.virtualize_result(summary))
+
+    def _report_plugin_progress(self, status_text: str, summary: dict[str, Any]) -> None:
+        self._plugin_progress = (status_text, summary)
+        self._update_tool_progress("running", status_text, summary)
+
+    def _cascade_plugin_progress(self, result: dict[str, Any] | None) -> None:
+        """A generation run by a plugin action moves the action's own bar: done of total items plus the running item's fraction."""
+        inner = (result or {}).get("progress") if isinstance(result, dict) else None
+        if not isinstance(inner, dict) or not inner.get("total"):
+            return
+        status_text, summary = self._plugin_progress or ("Running", {"status": "running", "live": True})
+        outer = dict(summary.get("progress") or {"done": 0, "total": 1, "text": ""})
+        total = float(outer.get("total") or 1)
+        fraction = max(0.0, min(1.0, float(inner.get("done") or 0) / float(inner["total"])))
+        outer["done"] = round(min(total, float(outer.get("done") or 0) + fraction), 3)
+        outer["total"] = total
+        self._report_script_progress(status_text, {**summary, "progress": outer})
+
     @staticmethod
     def _finalize_generation_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         result = snapshot.get("result")
@@ -560,9 +487,9 @@ class DeepyPrimeTools:
             generated_files = list(result.get("generated_files", []) or [])
             if generated_files:
                 snapshot["output_file"] = str(generated_files[-1])
-        return snapshot
+        return _compact_job_snapshot(snapshot, keep_paths=True)  # the chat attaches generated_files / output_file
 
-    def _wait_for_generation(self, initial: dict[str, Any]) -> dict[str, Any]:
+    def _wait_for_generation(self, initial: dict[str, Any], timeout_s: float | None = None, event_limit: int = 0) -> dict[str, Any]:
         job_id = str(initial.get("job_id", "") or "").strip()
         if not job_id:
             return initial
@@ -571,52 +498,41 @@ class DeepyPrimeTools:
         queue_triggered = False
         cancel_requested = False
         snapshot = initial
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        from shared.deepy.media_pause import MediaToolPause
+        job = self._server._wangp_jobs.get(job_id).job
+        reported = 0.0
         try:
-            while True:
-                if snapshot.get("webui_submission_ready") and not queue_triggered:
-                    self.send_cmd("load_queue_trigger", {"job_id": job_id, "token": snapshot.get("webui_load_queue_token", "")})
-                    queue_triggered = True
-                    self._update_tool_progress("running", "Running", {"status": "running", "job_id": job_id})
-                if snapshot.get("done"):
-                    return self._finalize_generation_snapshot(snapshot)
-                if self._is_interrupted() and not cancel_requested:
-                    if not self._active_job_cancel_requested:
-                        snapshot = self._call_mcp_tool("wangp_cancel_job", {"job_id": job_id})
-                        self._active_job_cancel_requested = True
-                    cancel_requested = True
-                    self._update_tool_progress("running", "Stopping generation", {"status": "running", "job_id": job_id})
-                    continue
-                time.sleep(self._POLL_INTERVAL_SECONDS)
-                snapshot = self._call_mcp_tool("wangp_get_job", {"job_id": job_id})
+            with MediaToolPause(self.assistant_session, self.state["gen"], job.webui_client_ids, self.send_cmd) as media_pause:
+                while True:
+                    media_pause.poll()
+                    live = snapshot.get("progress") if self._inline_calls else None
+                    if isinstance(live, dict) and live.get("progress") is not None and time.monotonic() - reported >= 0.34 and not snapshot.get("done"):
+                        # A script's or plugin action's generation shows its steps (the status bar's second line, and the action's bar).
+                        reported = time.monotonic()
+                        text = str(live.get("status") or live.get("phase") or "Running")[:120]
+                        self._update_tool_progress("running", text, {"status": "running", "job_id": job_id, "progress": {"done": round(float(live["progress"]), 1), "total": 100, "text": text}})
+                    if snapshot.get("webui_submission_ready") and not queue_triggered:
+                        self.send_cmd("load_queue_trigger", {"job_id": job_id, "token": snapshot.get("webui_load_queue_token", "")})
+                        queue_triggered = True
+                        self._update_tool_progress("running", "Running", {"status": "running", "job_id": job_id})
+                    if snapshot.get("done"):
+                        return self._finalize_generation_snapshot(snapshot)
+                    if self._is_interrupted() and not cancel_requested:
+                        if not self._active_job_cancel_requested:
+                            self._server._wangp_jobs.get(job_id).job.cancel()
+                            self._active_job_cancel_requested = True
+                        cancel_requested = True
+                        self._update_tool_progress("running", "Stopping generation", {"status": "running", "job_id": job_id})
+                        continue
+                    if deadline is not None and not self.assistant_session.pause_requested and time.monotonic() >= deadline:
+                        self._watch_background_job(job_id, trigger_queue=not queue_triggered)
+                        return _compact_job_snapshot({**snapshot, "status": "timeout", "waiting_timed_out": True})
+                    time.sleep(self._POLL_INTERVAL_SECONDS)
+                    snapshot = self._server._wangp_jobs.get(job_id).snapshot(event_limit=event_limit)
         finally:
             self._active_job_id = ""
             self._active_job_cancel_requested = False
-
-    def _wait_for_generation_blocking(self, initial: dict[str, Any]) -> dict[str, Any]:
-        job_id = str(initial.get("job_id", "") or "").strip()
-        if not job_id:
-            return initial
-        job = self._api_session.active_job
-        if job is None:
-            raise RuntimeError(f"WanGP generation job {job_id} is unavailable.")
-        self._active_job_id = job_id
-        self._active_job_cancel_requested = False
-        self._active_session_job = job
-        try:
-            if self._is_interrupted():
-                self._active_job_cancel_requested = True
-                job.cancel()
-                self._update_tool_progress("running", "Stopping generation", {"status": "running", "job_id": job_id})
-            submission_ready = job.wait_for_webui_submission_or_completion()
-            if submission_ready and not job.done and not job.cancel_requested:
-                self.send_cmd("load_queue_trigger", {"job_id": job_id, "token": job.webui_load_queue_token})
-                self._update_tool_progress("running", "Running", {"status": "running", "job_id": job_id})
-            job.result()
-            return self._finalize_generation_snapshot(self._call_mcp_tool("wangp_get_job", {"job_id": job_id}))
-        finally:
-            self._active_job_id = ""
-            self._active_job_cancel_requested = False
-            self._active_session_job = None
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return list(self._tool_defs)
@@ -625,9 +541,19 @@ class DeepyPrimeTools:
         return str(self._server_instructions or "").strip()
 
     def get_remote_execution_instructions(self) -> str:
-        if REMOTE_LLM_GENERATION_JOB_POLLING:
+        if PRIME_ASYNC_ENABLED:
             return ""
-        return "Call wangp_generate and active wangp_postprocess directly, never through programmatic/exec. Each blocks until its final result; do not poll job status."
+        return "WanGP waits for generation and post-processing internally and returns their results; do not poll jobs."
+
+    def get_runtime_context(self) -> str:
+        from shared.deepy.ui_settings import normalize_assistant_tool_ui_settings
+
+        settings = normalize_assistant_tool_ui_settings(**self.assistant_session.tool_ui_settings)
+        signature = f"{settings['model_speed']}:{settings['model_size']}"
+        if signature == self.assistant_session.model_selection_runtime_signature:
+            return ""
+        self.assistant_session.model_selection_runtime_signature = signature
+        return f"Current model selection preferences: speed={settings['model_speed']}, size={settings['model_size']}. These replace earlier standing preferences. Model search applies them automatically; explicit user choices still win and configured templates remain the normal choice."
 
     def get_system_context(self) -> str:
         from shared.deepy import ui_settings as deepy_ui_settings
@@ -638,17 +564,17 @@ class DeepyPrimeTools:
             "Deepy Settings / General Properties determine whether dimensions, frame count or audio duration, and seed come from templates or from standing defaults.",
             f"Use properties defined in template settings files: {bool(settings['use_template_properties'])}.",
         ]
-        if settings["use_template_properties"]:
-            lines.append("When using a Deepy template, retain its width, height, frame count, audio duration, and seed unless the user asks for an override.")
+        if settings["use_template_properties"]:  # named as settings: "width" and "height" are not setting names
+            lines.append("When using a Deepy template, retain its resolution, video_length, duration_seconds and seed unless the user asks for an override.")
         else:
             lines.extend([
-                f"Default width: {int(settings['width'])}.",
-                f"Default height: {int(settings['height'])}.",
-                f"Default video frame count: {int(settings['num_frames'])}.",
-                f"Default audio duration: {int(settings['audio_duration'])} seconds.",
+                f"Default resolution: \"{int(settings['width'])}x{int(settings['height'])}\".",
+                f"Default video_length: {int(settings['num_frames'])} frames.",
+                f"Default audio duration_seconds: {int(settings['audio_duration'])}.",
                 f"Default seed: {int(settings['seed'])}.",
             ])
-            lines.append("Override compatible template/model defaults with the width, height, frame count, audio duration, and seed above when the user does not specify them.")
+            lines.append("Override compatible template/model defaults with the resolution, video_length, duration_seconds and seed above when the user does not specify them.")
+        lines.append("The generate tool fills omitted dimensions, duration, and seed from Deepy's standing defaults before model factory defaults; pass the template values explicitly to preserve them.")
         return "\n".join(lines)
 
     def get_tool_display_name(self, tool_name: str) -> str:
@@ -665,10 +591,15 @@ class DeepyPrimeTools:
     @staticmethod
     def get_tool_stream_label_fields(tool_name: str) -> tuple[str, ...]:
         return {
-            "wangp_generate": ("source",),
-            "wangp_toolbox": ("action", "arguments"),
-            "wangp_io": ("action", "arguments"),
-            "wangp_artifact": ("action", "arguments"),
+            "wangp_generate": ("model_type",),
+            "wangp_postprocess": ("media",),
+            "wangp_model": ("model_type",),
+            "wangp_models": ("action",),
+            "wangp_deepy_templates": ("tool_id",),
+            "wangp_templates": ("task", "template"),
+            "wangp_session": ("action",),
+            "wangp_toolbox": ("action",),
+            "wangp_io": ("action",),
         }.get(str(tool_name or "").strip(), ())
 
     @staticmethod
@@ -697,11 +628,22 @@ class DeepyPrimeTools:
         metadata = self._api_session.get_model_metadata(model_type) or {}
         return str(metadata.get("name", "") or model_type.replace("_", " ").replace("-", " ").title()).strip(), metadata
 
+    def _template_label_settings(self, template: Any) -> dict[str, Any]:
+        from shared.mcp.server import _deepy_template_settings
+
+        task, _, name = str(template).partition("/")
+        try:
+            return _deepy_template_settings(self._api_session, task, name.strip() or "default")["settings"]
+        except (KeyError, ValueError):  # an unknown task or template: the call itself reports it, the label stays generic
+            return {}
+
     def _generation_label_context(self, source: Any) -> tuple[str, str]:
         tasks = self._generation_settings(source)
         model_names = []
         media_kinds = []
         for settings in tasks:
+            if settings.get("template") and not settings.get("model_type"):  # a template reference: name the model the template runs
+                settings = {**self._template_label_settings(settings["template"]), **settings}
             model_name, metadata = self._model_label_metadata(settings.get("model_type", ""))
             if model_name and model_name not in model_names:
                 model_names.append(model_name)
@@ -732,26 +674,68 @@ class DeepyPrimeTools:
             return f"Unknown Tool - {self.get_tool_display_name(tool_name)}"
         if self._zero_tools is not None:
             arguments = self._zero_tools.resolve_tool_label_arguments(arguments)
-        if tool_name in {"wangp_toolbox", "wangp_io", "wangp_artifact"}:
+        finish = assistant_chat._finish_tool_call_label
+        short = assistant_chat._short_tool_label_value
+        humanize = assistant_chat._humanize_tool_value
+        if tool_name == "wangp_python":
+            action = str(arguments.get("action", "") or "").strip()
+            action_arguments = arguments.get("arguments")
+            if not action and isinstance(action_arguments, dict) and isinstance(action_arguments.get("code"), str):
+                action = "run"  # code alone is a run
+            if not action:
+                return "Explore Python Sandbox"
+            action = {"execute": "run", "exec": "run", "run_code": "run", "run_python": "run", "python": "run", "code": "run", "reset": "restart", "reboot": "restart", "list_sandbox": "files"}.get(action, action)
+            label = {"run": "Python", "restart": "Restart Python Sandbox", "files": "List Sandbox Files"}.get(action, f"Python {humanize(action)}")
+            if action_arguments is None:
+                return f"Get {label} Schema"
+            if action == "run" and isinstance(action_arguments, dict):
+                first = next((line.strip() for line in str(action_arguments.get("code", "") or "").splitlines() if line.strip()), "")
+                title = " ".join(first.lstrip("# ").split())  # a title, not a path: keep "videos in @outputs/aaa" whole
+                if first.startswith("#") and title:
+                    return finish(f"Python: {title if len(title) <= 72 else title[:71].rstrip() + '…'}")
+            return label
+        if tool_name == "wangp_plugins":
+            from shared.mcp.plugin_toolbox import transcript_label
+
+            return transcript_label(arguments, humanize)
+        if tool_name == "wangp_web_search":
+            action = str(arguments.get("action", "") or "").strip()
+            action_arguments = arguments.get("arguments")
+            if not action:
+                return "Explore Web Search"
+            label = {"search": "Search the Web", "news": "Search the News", "images": "Search Images", "videos": "Search Videos", "open": "Open Web Page", "download": "Download from the Web", "screenshot": "Screenshot Web Page", "cookies": "Manage Web Cookies", "lora_search": "Search LoRAs", "lora_install": "Install LoRA"}.get(action, f"Web {humanize(action)}")
+            if action_arguments is None:
+                return f"Get {label} Schema"
+            if isinstance(action_arguments, dict):
+                if action in ("open", "download") and isinstance(action_arguments.get("url"), str):
+                    return finish(f"{label}: {short(action_arguments['url'].split('//', 1)[-1].split('/', 1)[0], 72)}")
+                if action == "lora_install" and isinstance(action_arguments.get("id"), str):
+                    return finish(f"{label}: {short(action_arguments['id'], 72)}")
+                if isinstance(action_arguments.get("query"), str):
+                    return finish(f"{label}: {short(action_arguments['query'], 72)}")
+            return label
+        if tool_name in {"wangp_toolbox", "wangp_io"}:
             action = str(arguments.get("action", "") or "").strip()
             action_arguments = arguments.get("arguments")
             if tool_name == "wangp_io":
+                if action == "info" and isinstance(action_arguments, dict):
+                    if isinstance(action_arguments.get("paths"), list):
+                        return f"Get File Information for {len(action_arguments['paths'])} Files"
+                    path = str(action_arguments.get("path", action_arguments.get("source", action_arguments.get("file_path", ""))))
+                    if path.startswith(("visual:", "audio:")):
+                        return finish(f"Get Media Information for {short(path)}")
+                if action in {"rg", "edit", "append_text"}:
+                    label = {"rg": "Search Files", "edit": "Edit Text", "append_text": "Append Text"}[action]
+                    if not isinstance(action_arguments, dict):
+                        return f"Get {label} Schema"
+                    if action == "rg":
+                        return finish(f"{label}: {action_arguments.get('command', action_arguments.get('arguments', ''))}")
+                    return finish(f"{label} in {short(action_arguments.get('path', action_arguments.get('file_path')))}")
                 return assistant_chat.build_io_tool_call_label(action, action_arguments if "arguments" in arguments else None)
-            if tool_name == "wangp_artifact":
-                if not action and isinstance(action_arguments, dict):
-                    nested_action = str(action_arguments.get("action", "") or "").strip()
-                    if nested_action and isinstance(action_arguments.get("arguments"), dict):
-                        action, action_arguments = nested_action, action_arguments["arguments"]
-                    elif not action_arguments:
-                        action = "list"
-                if action == "list" and isinstance(action_arguments, dict):
-                    return "List Artifacts"
-                if not action and "arguments" in arguments:
-                    return "Artifact Request"
-                action_label = {"prepare": "Load Next Workflow Item", "commit_item": "Commit Workflow Item", "query": "Query Exact Artifact Data", "update_ledger": "Update Ledger Artifact"}.get(action, action.replace("_", " ").title())
-                return "List Artifact Actions" if not action else f"Get {action_label} Schema" if "arguments" not in arguments else action_label
             if not action:
                 return "List Toolbox Content"
+            if action == "media_settings":
+                return "Get Media Settings Schema" if action_arguments is None else assistant_chat.build_tool_call_label("wangp_get_media_settings", action_arguments)
             if action_arguments is None:
                 action_label = self._zero_tools.get_tool_transcript_label(action, {}) if self._zero_tools is not None else action.replace("_", " ").title()
                 return f"Get {action_label} Schema"
@@ -760,7 +744,58 @@ class DeepyPrimeTools:
         model_label = ""
         media_label = ""
         if tool_name == "wangp_generate":
-            media_label, model_label = self._generation_label_context(arguments.get("source"))
+            settings = arguments.get("settings")
+            if settings is None and isinstance(arguments.get("arguments"), dict):
+                settings = arguments["arguments"].get("source")
+            if settings is None and (arguments.get("model_type") or arguments.get("template")):
+                settings = arguments  # members already streamed from an incomplete settings object
+            if settings is None:
+                return self.get_tool_display_name(tool_name)
+            media_label, model_label = self._generation_label_context(settings)
+        elif tool_name == "wangp_templates":
+            task = arguments.get("task")
+            template = arguments.get("template")
+            if template is not None:
+                return finish(f"Read {short(template)} Template for {humanize(task or '')}")
+            return finish(f"Browse Templates for {humanize(task)}" if task else "Browse Template Tasks")
+        elif tool_name in {"wangp_deepy_templates", "wangp_list_gallery"} and "action" not in arguments:
+            if tool_name == "wangp_deepy_templates":
+                tool_name = "wangp_list_deepy_templates" if arguments.get("cursor") else "wangp_get_deepy_template_settings"
+                arguments = {"template": "default", **arguments}
+        elif tool_name in {"wangp_model", "wangp_models", "wangp_deepy_templates", "wangp_list_gallery", "wangp_postprocess", "wangp_session"}:
+            if tool_name == "wangp_models" and arguments.get("query") is not None:
+                return finish(f"Find Models for {short(arguments['query'])}")
+            action = arguments.get("action")
+            nested = arguments.get("arguments")
+            describing = nested is None and tool_name not in {"wangp_model", "wangp_models"}
+            nested = dict(nested or {})
+            target = ""
+            if tool_name == "wangp_model":
+                model_label, _metadata = self._model_label_metadata(arguments.get("model_type", ""))
+                target = short(model_label)
+            elif tool_name == "wangp_postprocess":
+                target = short(arguments.get("media"))
+            if not action:
+                return finish(f"Explore {self.get_tool_display_name(tool_name)}{f' for {target}' if target else ''}")
+            if describing:
+                return finish(f"Get {humanize(action)} Schema{f' for {target}' if target else ''}")
+            if tool_name == "wangp_model":
+                if action in {"capabilities", "definition", "defaults"}:
+                    subject = short(nested.get("property")) if action == "definition" else ""
+                    return finish(f"Read {subject or humanize(action)} for {target}")
+                if action == "profiles" and "setting_id" not in nested:
+                    return finish(f"Read Accelerator Profiles for {target}")
+                tool_name = {"saved_settings": "wangp_model_settings", "user_settings": "wangp_model_settings", "presets": "wangp_model_settings", "profiles": "wangp_model_settings", "loras": "wangp_list_loras"}.get(action, tool_name)
+                nested["model_type"] = arguments["model_type"]
+            elif tool_name == "wangp_deepy_templates":
+                tool_name = {"deepy_templates": "wangp_list_deepy_templates", "deepy_template_settings": "wangp_get_deepy_template_settings"}.get(action, tool_name)
+            elif tool_name == "wangp_session":
+                tool_name = f"wangp_{action}"
+            elif tool_name == "wangp_postprocess":
+                return finish(f"Run {humanize(action)} on {target}")
+            arguments = nested
+        elif tool_name == "mcp_resource" and not arguments.get("uri") and arguments.get("query"):
+            return finish(f"Find Documentation for {short(arguments['query'], 72)}")
         elif arguments.get("model_type"):
             model_label, _metadata = self._model_label_metadata(arguments["model_type"])
         return assistant_chat.build_tool_call_label(tool_name, arguments, base_label=self.get_tool_display_name(tool_name), model_label=model_label, media_label=media_label)
@@ -776,17 +811,19 @@ class DeepyPrimeTools:
         plugin_tool = self._plugin_tools_by_name.get(tool_name)
         if plugin_tool is not None:
             return {"pause_runtime": plugin_tool.pause_runtime, "pause_reason": plugin_tool.pause_reason}
+        if tool_name == "wangp_plugins":
+            from shared.mcp.plugin_toolbox import call_policy
+
+            return call_policy(call_arguments)
         if tool_name == "wangp_generate":
-            return {"pause_runtime": True, "pause_reason": "tool"}
+            return {"pause_runtime": isinstance(call_arguments.get("settings"), (dict, list, str)), "pause_reason": "tool"}
         if tool_name == "wangp_postprocess":
-            return {"pause_runtime": bool(str(call_arguments.get("process", "") or "").strip()), "pause_reason": "tool"}
+            return {"pause_runtime": bool(call_arguments.get("action")) and isinstance(call_arguments.get("arguments"), dict), "pause_reason": "tool"}
         if tool_name == "wangp_toolbox":
             action = str(call_arguments.get("action", "") or "").strip()
             if not action or call_arguments.get("arguments") is None:
                 return {"pause_runtime": False, "pause_reason": "tool"}
-            return self._zero_tools.get_tool_policy(action, call_arguments["arguments"])
-        if tool_name in {"wangp_io", "wangp_artifact"}:
-            return {"pause_runtime": False, "pause_reason": "tool"}
+            return {"pause_runtime": False, "pause_reason": "tool"} if action == "media_settings" else self._zero_tools.get_tool_policy(action, call_arguments["arguments"])
         return {"pause_runtime": False, "pause_reason": "tool"}
 
     def validate_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -794,45 +831,180 @@ class DeepyPrimeTools:
         if schema is None:
             return f"Unknown MCP tool: {tool_name}"
         parameters = schema["function"].get("parameters", {})
+        properties = parameters.get("properties", {})
+        toolbox = "action" in properties and "arguments" in properties
+        inner = arguments.get("arguments")
+        if toolbox and arguments.get("action") is None and isinstance(inner, dict) and isinstance(inner.get("action"), str) and set(inner) <= {"action", "arguments"}:
+            arguments.update(action=inner["action"], arguments=inner.get("arguments", {}))  # the whole call nested in arguments: unwrap it
+        unknown = set(arguments) - set(properties)
+        if not PRIME_ASYNC_ENABLED and tool_name in {"wangp_generate", "wangp_postprocess"}:
+            unknown -= {"wait", "timeout_s", "event_limit"}
+        unknown = sorted(unknown)
+        if unknown and (toolbox or parameters.get("additionalProperties") is False):
+            hint = ' Put action at the top level and action parameters inside arguments: {"action":"<action>","arguments":{...}}.' if toolbox else " Pass the declared parameters directly, without action or arguments." if {"action", "arguments"} & set(unknown) else " Use only the declared parameters."
+            if tool_name == "wangp_generate" and "settings" not in unknown:
+                hint = ' Put every generation setting inside settings: {"settings": {"model_type": "...", "prompt": "...", ...}}.'
+            if tool_name == "wangp_toolbox" and arguments.get("action") == "inspect_media" and "media" in unknown:
+                hint = ' Put media_id (one visual) or media_ids (a list) inside arguments alongside question. Read the contract with {"action":"inspect_media","arguments":null}.'
+            return f"Unexpected top-level parameters: {', '.join(unknown)}. Nothing was executed." + hint
         for name, parameter in parameters.get("properties", {}).items():
             value = arguments.get(name)
-            if parameter.get("type") != "object" or not isinstance(value, str):
+            kinds = {kind for option in (parameter, *parameter.get("anyOf", [])) for kind in (option.get("type") if isinstance(option.get("type"), list) else [option.get("type")])}
+            if not isinstance(value, str) or not kinds & {"object", "array"}:
                 continue
             try:
                 decoded = json.loads(value)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as error:
+                if value.lstrip()[:1] in ("{", "["):  # malformed JSON object/array: point at the fault instead of a generic type error
+                    return f"{name} is not valid JSON: {error.msg} at character {error.pos}, near {value[max(0, error.pos - 40):error.pos + 20]!r}. Nothing was executed; fix that spot and repeat the call with {name} as an object."
                 continue
-            if isinstance(decoded, dict):
+            if isinstance(decoded, dict) and "object" in kinds or isinstance(decoded, list) and "array" in kinds:
                 arguments[name] = decoded
-        if tool_name == "wangp_artifact" and "arguments" in arguments and not isinstance(arguments["arguments"], dict):
-            raw_arguments = arguments["arguments"]
-            if isinstance(raw_arguments, str) and "\\'" in raw_arguments:
-                return "Artifact arguments are malformed JSON: \\' is not a valid JSON escape. Write apostrophes directly inside double-quoted JSON strings, then repeat the call with arguments as an object. This is not a payload-size limit."
-            return "Artifact arguments must be a JSON object, not a JSON string. This is malformed call syntax, not a payload-size limit; repeat action and arguments as separate top-level tool parameters."
+        if tool_name == "wangp_python" and not arguments.get("action") and isinstance(arguments.get("arguments"), dict) and isinstance(arguments["arguments"].get("code"), str):
+            arguments["action"] = "run"  # code alone can only mean a run
+        if tool_name == "wangp_web_search" and not arguments.get("action") and isinstance(arguments.get("arguments"), dict):
+            if isinstance(arguments["arguments"].get("url"), str):
+                arguments["action"] = "open"
+            elif isinstance(arguments["arguments"].get("query"), str):
+                arguments["action"] = "search"
+        if toolbox and arguments.get("arguments") is not None:
+            nested = arguments["arguments"]
+            if not isinstance(nested, dict):
+                hint = ' For rg, use {"action":"rg","arguments":{"command":"-n pattern -- @documents/file.txt"}}.' if tool_name == "wangp_io" and arguments.get("action") == "rg" else ""
+                return 'arguments must be an object: {"action":"<action>","arguments":{...}}.' + hint
+            if not arguments.get("action") and nested:
+                return 'action belongs at the top level, beside arguments: {"action":"<action>","arguments":{...}}. Nothing was executed.'
         for parameter_name in parameters.get("required", []) or []:
             if parameter_name not in arguments or arguments[parameter_name] is None:
                 return f"{parameter_name} is required."
         return ""
+
+    def extract_tool_calls(self, raw_text: str) -> list[dict[str, Any]]:
+        from shared.prompt_enhancer.qwen35_assistant_runtime import extract_tool_calls
+
+        parameters = {name: set(schema["function"]["parameters"].get("properties", {})) for name, schema in self._tool_defs_by_name.items()}
+        return extract_tool_calls(raw_text, tool_parameters=parameters, preserve_unknown_parameters=True)
 
     def infer_tool_calls(self, raw_text: str) -> list[dict[str, Any]]:
         from shared.deepy.engine import DeepyZeroTools
 
         return DeepyZeroTools.infer_tool_calls(self, raw_text)
 
-    def call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if tool_name in {"wangp_generate", "wangp_postprocess"}:
-            call_arguments = dict(arguments or {})
-            if tool_name == "wangp_generate":
-                call_arguments["wait"] = False
-            initial = self._call_mcp_tool(tool_name, call_arguments)
-            if initial.get("job_id") and self._remote_llm and not REMOTE_LLM_GENERATION_JOB_POLLING:
-                result = self._wait_for_generation_blocking(initial)
-            else:
-                result = self._wait_for_generation(initial) if initial.get("job_id") else initial
+    def _watch_background_job(self, job_id, *, trigger_queue=True):
+        if job_id in self._background_jobs:
+            return
+        record = self._server._wangp_jobs.get(job_id)
+        self._background_jobs[job_id] = record.job
+
+        def finish():
+            try:
+                if record.job.wait_for_webui_submission_or_completion() and trigger_queue and not record.job.done and not record.job.cancel_requested:
+                    self.send_cmd("load_queue_trigger", {"job_id": job_id, "token": record.job.webui_load_queue_token})
+                record.wait()
+                self._remember_generated_media(record.snapshot(event_limit=0))
+            finally:
+                self._background_jobs.pop(job_id, None)
+
+        threading.Thread(target=finish, name=f"deepy-job-{job_id}", daemon=True).start()
+
+    def call(self, tool_name: str, arguments: dict[str, Any], *, inline: bool = False, cascade: bool = False) -> dict[str, Any]:
+        """Execute a tool as the model would. inline=True serves a sandbox script: the call is validated here and the WanGP tool runs on this thread,
+        because the MCP request loop is busy running the script that asks; it gets its own transcript card below the script's (run_script_tool,
+        set by the engine), its progress also feeds the script's live summary, and everything after execution (generation waits, media bookkeeping) is shared."""
+        if not inline:
+            if tool_name == "wangp_plugins":
+                self._plugin_progress = None  # a new action starts its card's progress afresh
+            result = self._call(tool_name, arguments)
+            self._hint_script_loop(tool_name, arguments, result)
+            return result
+        arguments = dict(arguments)
+        if tool_name == "wangp_web_search" and tool_name not in self._tool_defs_by_name:  # say why, or the model searches the docs for another way online
+            return {"status": "error", "tool": tool_name, "error": "Web search is turned off, so scripts cannot reach the web: tell the user it can be enabled in Configuration > Deepy (Enable Web Search). There is no other way online."}
+        problem = self.validate_tool_call(tool_name, arguments)
+        route = self._tool_routes.get(tool_name)
+        if problem or route is None or route[0] != "wangp":
+            return {"status": "error", "tool": tool_name, "error": problem or f"{tool_name} is not one of WanGP's own tools."}
+        policy = self.get_tool_policy(tool_name, arguments)
+        if policy["pause_runtime"] and self.pause_runtime is not None:  # Deepy still holds the GPU while its script runs: a generation would wait for it forever
+            self.pause_runtime(pause_reason=policy["pause_reason"])  # saves Deepy's state and unloads it; "vision" keeps the text model when it fits
+        sandbox = self._server._wangp_python_sandbox
+
+        def run(progress: Callable[..., None]) -> dict[str, Any]:
+            def inner(status=None, status_text=None, result=None):
+                sandbox.inner_status(str(status_text or ""))
+                progress(status, status_text, result)
+                if cascade:  # cascade=True: a plugin action's tool call, whose generation steps also move the action's bar
+                    self._cascade_plugin_progress(result)
+
+            saved = self._tool_progress_callback, getattr(self._zero_tools, "_tool_progress_callback", None)
+            self._script_progress_target, self._tool_progress_callback = saved[0], inner
+            self._inline_calls += 1
+            web = getattr(self._server, "_wangp_web_search", None)
+            if web is not None:  # a download's progress goes to its own card, not to the script's
+                web.progress = lambda status_text, summary: inner("running", status_text, self.file_access_policy.virtualize_result(summary))
+            if self._zero_tools is not None:
+                self._zero_tools._tool_progress_callback = inner
+                self._zero_tools._set_status = lambda text=None, kind="working": progress(None, text, None)  # the status bar keeps the script on its first line, the tool on its second
+            try:
+                return self._call(tool_name, arguments, route=route)
+            finally:
+                self._inline_calls -= 1
+                self._tool_progress_callback, self._script_progress_target = saved[0], None
+                if web is not None:
+                    web.progress = self._report_script_progress
+                if self._zero_tools is not None:
+                    self._zero_tools._tool_progress_callback = saved[1]
+                    self._zero_tools.__dict__.pop("_set_status", None)
+
+        return run(lambda *_args: None) if self.run_script_tool is None else self.run_script_tool(tool_name, arguments, run)
+
+    def _call(self, tool_name: str, arguments: dict[str, Any], route: tuple[str, str] | None = None) -> dict[str, Any]:
+        ignored = []
+        if not PRIME_ASYNC_ENABLED and tool_name in {"wangp_generate", "wangp_postprocess"}:
+            arguments = dict(arguments)
+            if isinstance(arguments.get("arguments"), dict):
+                arguments["arguments"] = dict(arguments["arguments"])
+            for values in (arguments, arguments.get("arguments")):
+                if isinstance(values, dict):
+                    for name in ("wait", "timeout_s", "event_limit"):
+                        if name in values:
+                            values.pop(name)
+                            if name not in ignored:
+                                ignored.append(name)
+        if route is not None:  # inline: run the WanGP tool on this thread
+            from shared.mcp.server import call_tool_inline
+
+            self._remember_gallery_input_references(tool_name, arguments)
+            result = self.file_access_policy.virtualize_result(call_tool_inline(self._server, route[1], arguments))
+            self._remember_gallery_download_references(tool_name, result)
         else:
             result = self._call_mcp_tool(tool_name, arguments)
+        if tool_name in {"wangp_generate", "wangp_postprocess"} and result.get("job_id") and not result.get("recovered"):
+            from shared.mcp.v2 import JOB_CONTROLS
+
+            # job controls sit at the top level; post-processing calls may still carry them inside arguments
+            action_arguments = arguments if tool_name == "wangp_generate" else {**{key: value for key, value in arguments["arguments"].items() if key in JOB_CONTROLS}, **{key: arguments[key] for key in JOB_CONTROLS if key in arguments}}
+            if action_arguments.get("wait", True):
+                result = self._wait_for_generation(result, action_arguments.get("timeout_s"), action_arguments.get("event_limit", 0))
+            else:
+                self._watch_background_job(result["job_id"])
+        if ignored:
+            result["info"] = f"Ignored {', '.join(ignored)}: WanGP manages waiting for generation and post-processing."
         self._remember_generated_media(result)
-        return result
+        if tool_name in {"wangp_generate", "wangp_postprocess"}:
+            from shared.mcp.v2 import public_media_result
+            result = public_media_result(result)
+        return self.file_access_policy.virtualize_result(result)
+
+    def _hint_script_loop(self, tool_name: str, arguments: dict[str, Any], result: dict[str, Any]) -> None:
+        """The model's fourth call in a row of one toolbox or file action says once that a Python script loops over the remaining items in one call."""
+        action = arguments.get("action") if isinstance(arguments.get("arguments"), dict) else None
+        key = (tool_name, action)
+        count = self._action_streak[1] + 1 if getattr(self, "_action_streak", (None, 0))[0] == key else 1
+        self._action_streak = (key, count)
+        if count == 4 and action and tool_name in {"wangp_toolbox", "wangp_io"} and "wangp_python" in self._tool_defs_by_name and isinstance(result, dict):
+            helper = "wangp.io" if tool_name == "wangp_io" else "wangp.toolbox"
+            result["hint"] = (str(result.get("hint") or "") + f" Fourth {action} call in a row: for the remaining items, one wangp_python script can loop over them ({helper}({action!r}, ...) per item, wangp.progress) and return only the summary, instead of one call each.").strip()
 
     def _get_selected_media_record_from_source(self, source: str, requested_media_type: str = "all"):
         return None, None

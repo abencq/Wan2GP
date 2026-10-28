@@ -1,3 +1,4 @@
+# Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 import subprocess
 import tempfile, os
 import ffmpeg
@@ -8,6 +9,7 @@ import torch.nn.functional as F
 import cv2
 import tempfile
 import imageio
+from shared import imageio_ffmpeg_patch  # Configure all imageio FFmpeg readers/writers before use.
 import binascii
 import torchvision
 import torch
@@ -46,6 +48,9 @@ def _prepare_audio_array(audio_data):
         audio_data = audio_data.detach().cpu().float().numpy()
     else:
         audio_data = np.asarray(audio_data, dtype=np.float32)
+    if audio_data.ndim == 2 and audio_data.size == 0:
+        # Empty tracks have zero frames; the other axis retains the channel count.
+        return audio_data.reshape(0, max(audio_data.shape))
     if audio_data.ndim == 2 and audio_data.shape[0] <= 8 and audio_data.shape[1] > audio_data.shape[0]:
         audio_data = audio_data.T
     return audio_data
@@ -69,7 +74,8 @@ def resample_audio_array(audio_data, source_sample_rate, target_sample_rate):
     return (resampled.T if audio_array.ndim == 2 else resampled[0]).astype(np.float32, copy=False)
 
 
-def append_sliding_window_audio(existing_audio_data, existing_audio_path, generated_audio, audio_sampling_rate, committed_audio_samples, existing_audio_sample_rate=None):
+def append_sliding_window_audio(existing_audio_data, existing_audio_path, generated_audio, audio_sampling_rate, committed_audio_samples, existing_audio_sample_rate=None, prefix_start_samples=0, keep_existing=False, trim_ranges=(), video_fps=None, align_to_video=False, repair_samples=0):
+    # keep_existing: a kept soundtrack also replaces the generated audio of the current window for as long as it lasts
     generated_audio = np.asarray(generated_audio, dtype=np.float32)
     if generated_audio.size == 0:
         return generated_audio
@@ -82,7 +88,16 @@ def append_sliding_window_audio(existing_audio_data, existing_audio_path, genera
         return generated_audio
     if prefix_sample_rate != int(audio_sampling_rate):
         prefix_audio = resample_audio_array(prefix_audio, prefix_sample_rate, audio_sampling_rate)
-    prefix_audio = prefix_audio[:max(0, int(committed_audio_samples))]
+    prefix_start_samples, committed_audio_samples = max(0, int(prefix_start_samples)), max(0, int(committed_audio_samples))
+    prefix_audio = prefix_audio[prefix_start_samples:]
+    prefix_audio = trim_audio_ranges(prefix_audio, trim_ranges, video_fps, audio_sampling_rate)
+    join_sample = committed_audio_samples - repair_samples
+    prefix_audio = prefix_audio[:join_sample + (generated_audio.shape[0] if keep_existing else 0)]
+    if align_to_video and not keep_existing and prefix_audio.shape[0] < join_sample:
+        if repair_samples:
+            raise ValueError("Audio overlap is too short to repair the previous window; increase the video overlap.")
+        # A deliberate cut has no overlap to regenerate: retain its timestamp with silence.
+        prefix_audio = np.pad(prefix_audio, [(0, join_sample - prefix_audio.shape[0])] + [(0, 0)] * (prefix_audio.ndim - 1))
     if prefix_audio.size == 0:
         return generated_audio
     if prefix_audio.ndim != generated_audio.ndim:
@@ -90,7 +105,25 @@ def append_sliding_window_audio(existing_audio_data, existing_audio_path, genera
         generated_audio = generated_audio[:, None] if generated_audio.ndim == 1 else generated_audio
     if prefix_audio.ndim == 2 and prefix_audio.shape[1] != generated_audio.shape[1]:
         prefix_audio = np.repeat(prefix_audio[:, :1], generated_audio.shape[1], axis=1) if prefix_audio.shape[1] == 1 else prefix_audio[:, :generated_audio.shape[1]]
-    return np.concatenate([prefix_audio, generated_audio], axis=0)
+    return np.concatenate([prefix_audio, generated_audio[max(0, prefix_audio.shape[0] - join_sample):]], axis=0)
+
+
+def source_audio_repair_ms(repair_ms, audio_path, codec, video_seconds):
+    """Repair margin for continuing a source video: the model margin, unless the source audio runs past the continued frames (an audio
+    tail saved with the video, or frames kept before its end) by at least that margin and two codec frames, a lossy encoder dropping a
+    partial frame and coding the ~40 ms before the end of a stream less faithfully."""
+    codec, info = str(codec or "").lower(), sf.info(audio_path)
+    clear_ms = max(repair_ms, 0.0 if codec.startswith("pcm") or codec in ("flac", "alac") else 2000 * (1152 if codec == "mp3" else 1024) / info.samplerate)
+    return 0 if info.frames / info.samplerate - video_seconds >= clear_ms / 1000 else repair_ms
+
+
+def audio_overlap_repair_seconds(overlap_frames, video_fps, repair_ms, overlap_audio=None, sample_rate=0):
+    overlap_seconds = overlap_frames / video_fps
+    shortfall = max(0.0, overlap_seconds - len(overlap_audio) / sample_rate) if overlap_audio is not None else 0.0
+    repair_seconds = repair_ms / 1000 + shortfall
+    if repair_seconds > overlap_seconds + 1e-9:
+        raise ValueError(f"Audio continuation needs more than {overlap_frames} overlap frames at {video_fps:g} FPS; increase the video overlap (repair requires {repair_seconds * 1000:.1f} ms).")
+    return min(repair_seconds, overlap_seconds)
 
 
 def create_silent_wav_file(output_dir=None, duration_seconds=0.0, sample_rate=16000, prefix="null_audio_"):
@@ -198,6 +231,27 @@ def get_audio_file_channels(audio_path):
     return int(audio_stream["channels"])
 
 
+def get_media_duration_and_audio_layouts(media_path):
+    """Read file duration and each audio track's channel layout, without decoding."""
+    probe = ffmpeg.probe(os.fspath(media_path), cmd=_ffprobe_binary())
+    duration = probe.get("format", {}).get("duration")
+    duration = float(duration) if duration not in (None, "", "N/A") else None
+    layouts = []
+    for stream in probe.get("streams", []):
+        if stream.get("codec_type") != "audio":
+            continue
+        channels = int(stream.get("channels", 0))
+        layout = stream.get("channel_layout", "")
+        if channels in (1, 2):
+            label = "Mono" if channels == 1 else "Stereo"
+        elif channels:
+            label = f"{layout} ({channels} channels)" if layout and layout != "unknown" else f"{channels} channels"
+        else:
+            label = "Unknown channel layout"
+        layouts.append(label)
+    return duration, layouts
+
+
 def resolve_mux_audio_sampling_rate(default_rate, source_audio_metadata=None, audio_paths=None):
     sample_rates = [int(default_rate)]
     for meta in source_audio_metadata or []:
@@ -232,44 +286,25 @@ def _compute_active_abs_amplitude(audio_data, active_mask=None):
     return avg_abs, active_avg_abs
 
 
-def normalize_audio_pair_volumes(audio1, audio2, active_mask1=None, active_mask2=None):
-    audio1 = np.asarray(audio1, dtype=np.float32)
-    audio2 = np.asarray(audio2, dtype=np.float32)
-    avg1, active1 = _compute_active_abs_amplitude(audio1, active_mask1)
-    avg2, active2 = _compute_active_abs_amplitude(audio2, active_mask2)
-    midpoint = 0.5 * (active1 + active2)
-    eps = 1e-8
-    gain1 = midpoint / active1 if active1 > eps else 1.0
-    gain2 = midpoint / active2 if active2 > eps else 1.0
-    stats = {
-        "audio1_avg_abs": float(avg1),
-        "audio2_avg_abs": float(avg2),
-        "audio1_active_avg_abs": float(active1),
-        "audio2_active_avg_abs": float(active2),
-        "target_active_avg_abs": float(midpoint),
-        "audio1_gain": float(gain1),
-        "audio2_gain": float(gain2),
-    }
-    return np.clip(audio1 * float(gain1), -1.0, 1.0), np.clip(audio2 * float(gain2), -1.0, 1.0), stats
+def normalize_audio_volumes(audios):
+    """Scale each audio so its active loudness matches the average active loudness of all of them."""
+    audios = [np.asarray(audio, dtype=np.float32) for audio in audios]
+    levels = [_compute_active_abs_amplitude(audio)[1] for audio in audios]
+    target = sum(levels) / len(levels)
+    return [np.clip(audio * float(target / level if level > 1e-8 else 1.0), -1.0, 1.0) for audio, level in zip(audios, levels)]
 
 
-def normalize_audio_pair_volumes_to_temp_files(audio_path1, audio_path2, output_dir=None, prefix="audio_norm_", active_mask1=None, active_mask2=None, max_duration_seconds=None):
-    frames1 = -1 if max_duration_seconds is None else round(float(max_duration_seconds) * sf.info(os.fspath(audio_path1)).samplerate)
-    frames2 = -1 if max_duration_seconds is None else round(float(max_duration_seconds) * sf.info(os.fspath(audio_path2)).samplerate)
-    audio1, sr1 = sf.read(os.fspath(audio_path1), frames=frames1, dtype="float32", always_2d=False)
-    audio2, sr2 = sf.read(os.fspath(audio_path2), frames=frames2, dtype="float32", always_2d=False)
-    norm1, norm2, stats = normalize_audio_pair_volumes(audio1, audio2, active_mask1=active_mask1, active_mask2=active_mask2)
-
+def normalize_audio_volumes_to_temp_files(audio_paths, output_dir=None, prefix="audio_norm_", max_duration_seconds=None):
+    audios = [sf.read(os.fspath(path), frames=-1 if max_duration_seconds is None else round(float(max_duration_seconds) * sf.info(os.fspath(path)).samplerate), dtype="float32", always_2d=False) for path in audio_paths]
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
-
-    fd1, out1 = tempfile.mkstemp(prefix=prefix + "1_", suffix=".wav", dir=output_dir)
-    os.close(fd1)
-    fd2, out2 = tempfile.mkstemp(prefix=prefix + "2_", suffix=".wav", dir=output_dir)
-    os.close(fd2)
-    sf.write(out1, norm1, int(sr1))
-    sf.write(out2, norm2, int(sr2))
-    return out1, out2, stats
+    outputs = []
+    for index, (normalized, (_, sample_rate)) in enumerate(zip(normalize_audio_volumes([audio for audio, _ in audios]), audios), 1):
+        fd, output = tempfile.mkstemp(prefix=f"{prefix}{index}_", suffix=".wav", dir=output_dir)
+        os.close(fd)
+        sf.write(output, normalized, int(sample_rate))
+        outputs.append(output)
+    return outputs
 
 
 def _get_audio_codec_settings(codec_key):
@@ -280,6 +315,7 @@ def _get_audio_codec_settings(codec_key):
         codec_key = "mp3_192"
     settings = {
         "wav": {"ext": "wav", "format": "wav"},
+        "flac": {"ext": "flac", "format": "flac"},
         "mp3_128": {"ext": "mp3", "format": "mp3", "bitrate": "128k"},
         "mp3_192": {"ext": "mp3", "format": "mp3", "bitrate": "192k"},
         "mp3_320": {"ext": "mp3", "format": "mp3", "bitrate": "320k"},
@@ -295,8 +331,17 @@ def get_mp4_audio_codec_settings(codec_key):
         "aac_256": {"codec": "aac", "bitrate": "256k", "ext": ".aac"},
         "aac_320": {"codec": "aac", "bitrate": "320k", "ext": ".aac"},
         "alac": {"codec": "alac", "bitrate": None, "ext": ".m4a"},
+        "flac": {"codec": "flac", "bitrate": None, "ext": ".flac", "sample_fmt": "s16"},
     }
     return settings.get(codec_key, settings["aac_128"])
+
+
+def get_video_audio_extra_args(codec_key, output_path=None):
+    if str(codec_key or "").lower() != "flac":
+        return []
+    if output_path is not None and osp.splitext(os.fspath(output_path))[1].lower() == ".mov":
+        raise ValueError("FLAC soundtracks require MP4 or MKV; choose AAC or ALAC for MOV.")
+    return ["-sample_fmt", "s16", "-strict", "-2"]
 
 
 def _infer_video_dimensions(tensor):
@@ -373,7 +418,7 @@ def _run_ffmpeg_encode(input_path, output_path, codec, bitrate=None, sample_rate
     if sample_rate:
         cmd += ["-ar", str(int(sample_rate))]
     cmd.append(output_path)
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def save_audio_file(path, audio_data, sample_rate, codec_key="wav"):
@@ -383,6 +428,9 @@ def save_audio_file(path, audio_data, sample_rate, codec_key="wav"):
         path = osp.splitext(path)[0] + f".{ext}"
     if settings["format"] == "wav":
         return write_wav_file(path, audio_data, sample_rate)
+    if settings["format"] == "flac":
+        sf.write(path, _prepare_audio_array(audio_data), int(sample_rate), format="FLAC", subtype="PCM_16")
+        return path
     fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="audio_")
     os.close(fd)
     try:
@@ -514,6 +562,8 @@ def extract_audio_tracks(source_video, verbose=False, query_only=False, codec_ke
         output_kwargs = {f'map': f'0:a:{stream_index}', 'acodec': audio_settings["codec"]}
         if audio_settings["bitrate"]:
             output_kwargs['b:a'] = audio_settings["bitrate"]
+        if audio_settings.get("sample_fmt"):
+            output_kwargs["sample_fmt"] = audio_settings["sample_fmt"]
         ffmpeg.input(source_path, **time_args).output(temp_path, **output_kwargs).overwrite_output().run(cmd=_ffmpeg_binary(), quiet=not verbose)
 
     return file_paths, metadata
@@ -527,8 +577,13 @@ def combine_and_concatenate_video_with_audio_tracks(
     new_audio_from_start=False,
     source_audio_metadata=None,
     audio_codec_key="aac_128",
-    verbose = False
+    verbose = False,
+    pad_audio_to_video=False,
+    audio_tail_seconds=0.0,
 ):
+    """audio_tail_seconds keeps that much audio past the last video frame (instead of cutting at the video end), so the end of the
+    video's own audio stays clear of the encoder's end effects."""
+    extra_audio_args = get_video_audio_extra_args(audio_codec_key, save_path_tmp)
     audio_settings = get_mp4_audio_codec_settings(audio_codec_key)
     audio_codec = audio_settings["codec"]
     audio_bitrate = audio_settings["bitrate"]
@@ -587,34 +642,46 @@ def combine_and_concatenate_video_with_audio_tracks(
                 filters.append(
                     f'[{idx}:a]aresample={audio_sampling_rate},aformat=channel_layouts={channel_layout},'
                     f'atrim=start={start},asetpts=PTS-STARTPTS[n{i}]')
-                filters.append(f'[s{i}][n{i}]concat=n=2:v=0:a=1[aout{i}]')
+                padding = ',apad=pad_dur=100' if pad_audio_to_video else ''
+                filters.append(f'[s{i}][n{i}]concat=n=2:v=0:a=1{padding}[aout{i}]')
                 idx += 1
             else:
                 filters.append(f'[s{i}]apad=pad_dur=100[aout{i}]')
 
         maps += ['-map', f'[aout{i}]']
 
+    duration_args = ['-shortest']
+    if audio_tail_seconds > 0:
+        video_duration = float(next(s for s in ffmpeg.probe(video_path, cmd=_ffprobe_binary())['streams'] if s['codec_type'] == 'video')['duration'])
+        duration_args = ['-t', str(video_duration + audio_tail_seconds)]
     cmd = [_ffmpeg_binary(), '-y', *inputs,
            '-filter_complex', ';'.join(filters),  # ✅ Only change made
            *maps, *metadata_args,
            '-c:v', 'copy',
-           '-c:a', audio_codec,
+           '-c:a', audio_codec, *extra_audio_args,
+           *(['-b:a', audio_bitrate] if audio_bitrate else []),
            '-ar', str(audio_sampling_rate),
-           '-shortest', save_path_tmp]
-    if audio_bitrate:
-        cmd[-4:-4] = ['-b:a', audio_bitrate]
+           *duration_args, save_path_tmp]
 
     if verbose:
         print(f"ffmpeg command: {cmd}")
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
     except subprocess.CalledProcessError as e:
         raise Exception(f"FFmpeg error: {e.stderr}")
 
 
+def subtitle_stream_count(path):
+    if get_virtual_media_entry(path) is not None:
+        return 0
+    return sum(stream['codec_type'] == 'subtitle' for stream in ffmpeg.probe(strip_virtual_media_suffix(path), cmd=_ffprobe_binary())['streams'])
+
+
 def combine_video_with_audio_tracks(target_video, audio_tracks, output_video,
-                                     audio_metadata=None, audio_codec_key="aac_128", verbose=False, video_duration=None):
-    if not audio_tracks:
+                                     audio_metadata=None, audio_codec_key="aac_128", verbose=False, video_duration=None, subtitle_source=None):
+    """Mux audio tracks, and the subtitle tracks of subtitle_source when given, with the video stream of target_video."""
+    extra_audio_args = get_video_audio_extra_args(audio_codec_key, output_video)
+    if not audio_tracks and subtitle_source is None:
         if verbose: print("No audio tracks to combine."); return False
 
     if video_duration is None:
@@ -626,22 +693,36 @@ def combine_video_with_audio_tracks(target_video, audio_tracks, output_video,
     cmd = [_ffmpeg_binary(), '-y', '-i', target_video]
     for path in audio_tracks:
         cmd += ['-i', path]
+    if subtitle_source is not None:
+        source_path, time_args, _ = _resolve_virtual_audio_segment(subtitle_source)
+        for key, value in time_args.items():
+            cmd += [f'-{key}', str(value)]
+        cmd += ['-i', source_path]
+        if time_args:
+            # Seeking leaves subtitle packets before zero and across the chunk boundaries.
+            # Drop packets outside the chunk and clip overlapping cues before muxing.
+            subtitle_duration = min(float(dur), time_args['to'] - time_args['ss'])
+            cmd += ['-bsf:s', f"noise=amount=0:drop='lte(pts+duration,0)+gte(pts*tb,{subtitle_duration})',"
+                    f"setts=ts='max(TS,0)':duration='min(PTS+DURATION,{subtitle_duration}/TB)-max(PTS,0)'"]
 
     cmd += ['-map', '0:v']
     for i in range(len(audio_tracks)):
         cmd += ['-map', f'{i+1}:a']
+    if subtitle_source is not None:
+        # Text subtitles keep their language and title; MP4/MOV store them as mov_text, Matroska as SRT.
+        cmd += ['-map', f'{len(audio_tracks) + 1}:s', '-c:s', 'mov_text' if os.path.splitext(output_video)[1].lower() in ('.mp4', '.mov', '.m4v') else 'srt']
 
     for i, meta in enumerate(audio_metadata or []):
         if (lang := meta.get('language')):
             cmd += ['-metadata:s:a:' + str(i), f'language={lang}']
 
     audio_settings = get_mp4_audio_codec_settings(audio_codec_key)
-    cmd += ['-c:v', 'copy', '-c:a', audio_settings["codec"]]
+    cmd += ['-c:v', 'copy', '-c:a', audio_settings["codec"], *extra_audio_args]
     if audio_settings["bitrate"]:
         cmd += ['-b:a', audio_settings["bitrate"]]
     cmd += ['-t', str(dur), output_video]
 
-    result = subprocess.run(cmd, capture_output=not verbose, text=True)
+    result = subprocess.run(cmd, capture_output=not verbose, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise Exception(f"FFmpeg error:\n{result.stderr}")
     if verbose:
@@ -837,11 +918,9 @@ def save_image(tensor,
     """Save tensor as image with configurable format and quality."""
 
     RGBA = tensor.shape[0] == 4
-    if RGBA:
-        quality = "png"
 
     # Get format and quality settings
-    format_info = _get_format_info(quality)
+    format_info = get_image_format(quality, rgba=RGBA)
     
     # Rename file extension to match requested format
     save_file = osp.splitext(save_file)[0] + format_info['ext']
@@ -872,13 +951,15 @@ def save_image(tensor,
             error = e
             continue
     else:
-        print(f'cache_image failed, error: {error}', flush=True)
+        raise OSError(f"Failed to save image '{save_file}' after {retry} attempts: {error}") from error
     
     return save_file
 
 
-def _get_format_info(quality):
-    """Get format extension and parameters."""
+def get_image_format(quality, rgba=False):
+    """Get the saved format and parameters; transparent images require PNG."""
+    if rgba:
+        quality = "png"
     formats = {
         # JPEG with PIL (so 'quality' works)
         'jpeg_95': {'ext': '.jpg', 'params': {'quality': 95}, 'use_pil': True},
@@ -998,10 +1079,27 @@ def save_image_metadata(image_path, metadata_dict, **save_kwargs):
 def read_image_metadata(image_path):
     try:
         ext = os.path.splitext(image_path)[1].lower()
+        if ext == ".png":
+            # Read text chunks without inflating IDAT (including text after IDAT).
+            with open(image_path, "rb") as fp:
+                if fp.read(8) != _PNG_SIGNATURE:
+                    raise ValueError("Invalid PNG signature")
+                png = PngImagePlugin.PngStream(fp)
+                try:
+                    while True:
+                        cid, pos, length = png.read()
+                        if cid == b"IEND":
+                            break
+                        if cid in (b"tEXt", b"zTXt", b"iTXt"):
+                            data = png.call(cid, pos, length)
+                            png.crc(cid, data)
+                        else:
+                            fp.seek(length + 4, 1)
+                    val = png.im_text.get("comment")
+                    return json.loads(val) if val else None
+                finally:
+                    png.close()
         with Image.open(image_path) as im:
-            if ext == ".png":
-                val = (getattr(im, "text", {}) or {}).get("comment") or im.info.get("comment")
-                return json.loads(val) if val else None
             if ext in (".jpg", ".jpeg"):
                 import piexif
                 try:
