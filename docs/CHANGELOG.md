@@ -2,6 +2,8 @@
 
 ### Unreleased
 
+- **Continue Video (MiniMax H3):** continuing a video no longer stops when its soundtrack ends a little before the last frame: WanGP asks the model for no more of that closing audio than the frames it can regenerate, and keeps the source audio up to where it ends, so the joins between sliding windows keep their timing.
+
 - **Save Latents:** the new config option makes Wan, LongCat, LTX2 and MiniMax H3 save the latent right before the final decode, as a `*_latent.pt` companion file next to each video. Sliding-window videos save one latent per window, and LTX2 and MiniMax H3 also save their audio latent, so the file holds the video the way the model saw it. A *Save Latents* choice in the *Misc.* tab of the generate form overrides the option for a single generation: *On* writes the companion file, *Off* skips it, and the default *Configuration* option follows the *Configuration* tab, which is also what Deepy and API jobs use. The choice is stored with the generation's settings, so it keeps its value across form refreshes.
 
 - **Latent Decode:** the new process in *Media Flow* takes a video, finds its `*_latent.pt` companion file, and turns the file back into video without loading the diffusion model. For LTX2 and MiniMax H3 it also rebuilds the soundtrack and puts it back into the video.
