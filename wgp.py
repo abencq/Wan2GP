@@ -7650,7 +7650,11 @@ def resolve_latent_branch(image_prompt_type, video_source, state, model_type, ke
         return None, "requires Continue Video / Continue Last Video to be selected"
     video_source = str(video_source or "").strip()
     if len(video_source) == 0 and "L" in str(image_prompt_type or ""):
-        file_list, _, _, _ = get_processed_queue(get_gen_info(state) if state is not None else {})
+        # *Continue Last Video* with an empty picker: take the gallery's last
+        # video (the same list the form's picker fills from — see
+        # generate_media's resolve_continue_video). get_processed_queue returns
+        # one (files, settings) pair per gallery source, keyed by source id.
+        file_list, _ = get_processed_queue(get_gen_info(state) if state is not None else {})[VIDEO.id]
         if len(file_list) > 0:
             video_source = str(file_list[-1])
         else:
@@ -8703,7 +8707,8 @@ def _ltx2_i2v_prefix_to_frames_space(entry, block, is_hdr, device):
         prefix = convert_image_to_tensor(image).unsqueeze(1)
         if torch.is_floating_point(prefix):
             prefix = convert_video_tensor_to_uint8_chunked(prefix)
-        return _prefix_to_frames_space(entry, prefix, "linear" if is_hdr else "uint8", LTX2_HDR_TRANSFORM, device)
+        return _prefix_to_frames_space(entry, prefix, "linear" if is_hdr else "uint8",
+                                       str(entry.get("hdr_transform") or LTX2_HDR_TRANSFORM), device)
     except Exception as exc:
         print(f"Latent decode: the embedded i2v start image could not be read: {exc}")
         return None
@@ -8741,7 +8746,7 @@ def _ltx2_latent_decode_windows(send_cmd, gen, model_def, entry, window_specs, a
                 decode_models.video_decoder,
                 tiling_config,
                 interrupt_check=interrupt_check,
-                hdr_transform=LTX2_HDR_TRANSFORM if is_hdr else None,
+                hdr_transform=str(entry.get("hdr_transform") or LTX2_HDR_TRANSFORM) if is_hdr else None,
                 output_dtype=torch.float16 if is_hdr else None,
             )
             latent = None
@@ -9012,6 +9017,33 @@ def _save_ltx2_decoded_video(send_cmd, state, video_source, client_id, plugin_da
     clear_status(state)
 
 
+def _h3_sidecar_vae_file(recorded, default):
+    """Resolve the VAE name a MiniMax H3 sidecar records back to the loader's
+    checkpoint path.
+
+    The sidecar keeps the checkpoint's bare file name (the identity the model
+    list shows), while the H3 loaders compare the name they are handed against
+    their own constants — several of which carry the family's ``minimax_h3/``
+    folder prefix — to decide the model's shape: the light VAE's shallow
+    decoder, the X2 VAE's upsampling path. Matching on the basename keeps the
+    recorded identity and the loader's expectations in step; an unrecognised
+    name is handed through untouched for ``fl.locate_file`` to search.
+    """
+    from models.minimax_h3.minimax_h3_main import (AUDIO_VAE_FILE, VIDEO_VAE_FILE, VIDEO_VAE_FP8MIX_FILE,
+                                                   VIDEO_VAE_INT8_FILE, VIDEO_VAE_LIGHT_FILE,
+                                                   VIDEO_VAE_LIGHT_INT8_FILE, X2_VAE_FILE, X2_VAE_INT8_FILE)
+    recorded = str(recorded or "").strip()
+    if not recorded:
+        return str(default or "")
+    if os.path.sep in recorded:
+        return recorded
+    for candidate in (VIDEO_VAE_FILE, VIDEO_VAE_FP8MIX_FILE, VIDEO_VAE_INT8_FILE, VIDEO_VAE_LIGHT_FILE,
+                      VIDEO_VAE_LIGHT_INT8_FILE, X2_VAE_FILE, X2_VAE_INT8_FILE, AUDIO_VAE_FILE):
+        if os.path.basename(str(candidate)) == recorded:
+            return str(candidate)
+    return recorded
+
+
 def _h3_fit_audio_samples(audio, sample_count):
     """Pad or truncate a waveform to exactly ``sample_count`` samples on its
     last dimension (the H3 pipeline's ``_fit_audio_samples``, kept local so
@@ -9058,7 +9090,8 @@ def _edit_latent_job_h3(send_cmd, state, video_source, client_id, plugin_data, s
     fps = float(entry.get("fps") or 0) or float(model_def.get("fps") or 24)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    from models.minimax_h3.minimax_h3_main import AUDIO_VAE_FILE, VIDEO_VAE_FILE, _load_audio_vae, _load_video_vae
+    from models.minimax_h3.minimax_h3_main import (AUDIO_VAE_FILE, VIDEO_VAE_FILE, X2_VAE_FILE, X2_VAE_INT8_FILE,
+                                                   _load_audio_vae, _load_video_vae)
     from models.minimax_h3.pipeline import _video_to_uint8_cpu
 
     audio_entry = latent_io.audio_latent_payload(sidecar_obj)
@@ -9068,8 +9101,9 @@ def _edit_latent_job_h3(send_cmd, state, video_source, client_id, plugin_data, s
 
     # The VAE names recorded in the sidecar take precedence (they produced
     # this latent); the model definition and the family defaults fall back.
-    video_vae_file = os.path.basename(str(entry.get("vae_file") or "")) or str(model_def.get("video_vae_file") or "") or VIDEO_VAE_FILE
-    audio_vae_file = os.path.basename(str((audio_entry or {}).get("audio_vae_file") or "")) or str(model_def.get("audio_vae_file") or "") or AUDIO_VAE_FILE
+    video_vae_file = _h3_sidecar_vae_file(entry.get("vae_file"), model_def.get("video_vae_file") or VIDEO_VAE_FILE)
+    audio_vae_file = _h3_sidecar_vae_file((audio_entry or {}).get("audio_vae_file"),
+                                          model_def.get("audio_vae_file") or AUDIO_VAE_FILE)
     # The sidecar records the dtype each VAE ran with (the default video
     # checkpoint is fp16, the audio VAE is locked to fp32); loading with the
     # same dtype reproduces the generation decode.
@@ -9082,14 +9116,29 @@ def _edit_latent_job_h3(send_cmd, state, video_source, client_id, plugin_data, s
     # a decode-only job (no prior generation in this process) must set it.
     offload.shared_state["_attention"] = get_default_attention_mode()
     try:
-        # qkv_splitting only re-partitions the official VAE's linear layers
-        # for offloading; the decode runs one un-offloaded forward pass, so
-        # it loads the plain layout either way.
-        video_vae = _load_video_vae(video_vae_file, vae_dtype, qkv_splitting=False)
+        # The loader takes the checkpoint name and the offload layout flags —
+        # its compute dtype comes from the checkpoint itself (fp16 / bf16
+        # native, an fp32 checkpoint lowered to fp16), which is the dtype the
+        # generation recorded in the sidecar. qkv_splitting only re-partitions
+        # the official VAE's linear layers for offloading; the decode runs one
+        # un-offloaded forward pass, so the plain layout is loaded either way.
+        # The X2 VAEs decode through their upsampling path, the flag that
+        # builds that model shape.
+        video_vae = _load_video_vae(
+            video_vae_file, qkv_splitting=False,
+            upsampling=os.path.basename(video_vae_file) in (os.path.basename(X2_VAE_FILE), os.path.basename(X2_VAE_INT8_FILE)))
         audio_vae = _load_audio_vae(audio_vae_file) if needs_audio else None
     except Exception as exc:
         send_cmd("error", gr.Error(f"The VAE checkpoint(s) required to decode this latent could not be loaded ({exc})."))
         return
+    # The latents are cast to the dtype the loaded video VAE computes in (the
+    # sidecar's recorded dtype is the same one, the checkpoint being the
+    # identity that produced them); the audio VAE is always fp32.
+    loaded_vae_dtype = getattr(video_vae, "_model_dtype", None)
+    if loaded_vae_dtype is not None and loaded_vae_dtype != vae_dtype:
+        print(f"Latent decode identity warning: the video VAE computes in {loaded_vae_dtype}, "
+              f"the sidecar recorded {vae_dtype}; the latents follow the loaded VAE.")
+        vae_dtype = loaded_vae_dtype
     if len(stored_vae_hash) > 0:
         video_vae_pth = fl.locate_file(video_vae_file, error_if_none=False)
         if os.path.isfile(video_vae_pth) and latent_io.sha256_file(video_vae_pth) != stored_vae_hash:
@@ -12246,6 +12295,20 @@ def generate_media(
                                 _branch_carried_image = None
                             else:
                                 _branch_carried_image = {"kind": "image_png", "data": bytes(_branch_carried_image["data"])}
+                        # The sidecar's canvas: the generation's out_width/out_height
+                        # are not in scope in this block (the post-processing paths
+                        # rewrite them), so derive the canvas from the latent grid the
+                        # entry carries and the family's spatial factor (8 for the
+                        # Wan-VAE families, 16 for the 5B Wan 2.2 VAE and MiniMax H3,
+                        # 32 for LTX2 — the _BRANCH_PREFIX_LAYOUTS table).
+                        _latent_layout = _BRANCH_PREFIX_LAYOUTS.get(str(base_model_type or ""))
+                        _latent_canvas_factor = int(_latent_layout[2] if _latent_layout else 0)
+                        _latent_shape = [int(u) for u in (latent_entry.get("shape") or [])]
+                        if len(_latent_shape) < 4:
+                            _latent_shape = list(latent_io.payload_latents(latent_entry).shape)
+                        _latent_grid_ok = len(_latent_shape) >= 4 and _latent_canvas_factor > 0
+                        _latent_width = int(_latent_shape[-1] * _latent_canvas_factor) if _latent_grid_ok else 0
+                        _latent_height = int(_latent_shape[-2] * _latent_canvas_factor) if _latent_grid_ok else 0
                         latent_side_bytes = _all_latent_sidecar(
                             latent_entry, latent_audio_entry, window_no, latent_windows, latent_audio_windows,
                             branch_prefix=branch_prefix,
@@ -12265,8 +12328,8 @@ def generate_media(
                             model_def=model_def,
                             model_type=str(model_type or ""),
                             base_model_type=str(base_model_type or ""),
-                            width=int(out_width or 0),
-                            height=int(out_height or 0),
+                            width=_latent_width,
+                            height=_latent_height,
                             splices_exact_image=_all_latent_splices,
                             branch_cut_video_block=_h3_cut_video_block,
                             branch_cut_audio_block=_h3_cut_audio_block)

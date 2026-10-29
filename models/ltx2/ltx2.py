@@ -85,6 +85,13 @@ LTX2_OUTPAINT_GAMMA = 2.0
 LTX2_DISABLE_STAGE2_WITH_CONTROL_VIDEO = True
 LTX2_ENABLE_EMBEDDING_LORAS = False
 LTX2_VAE_TEMPORAL_TILING_FPS = 24.0
+# The HDR transform the LTX-2 video VAE decodes to (scene-linear Rec.709
+# through it): the model spec may state its own one ("hdr_transform", e.g.
+# "acescct" for the SDR-to-HDR IC-LoRA flow). An all-latent sidecar records
+# the transform its job wrote (the entry's "hdr_transform"), and the Latent
+# Decode / From latent jobs read it back; this constant is the fallback for
+# a sidecar that carries only the HDR flag.
+LTX2_HDR_TRANSFORM = "logc3"
 LTX2_UPSCALE_SIGMAS = tuple(DISTILLED_SIGMA_VALUES)
 LTX2_UPSCALE_MAX_FRAMES = 481
 LTX2_EMBEDDING_LORA_PREFIXES = (
