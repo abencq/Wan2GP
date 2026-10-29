@@ -16147,7 +16147,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                     model_mode_value = ui_defaults["model_mode"] = get_default_value(model_mode_choices["choices"], ui_get("model_mode", None), model_mode_choices["default"] )
                     model_mode = gr.Dropdown(choices=model_mode_choices["choices"], value=model_mode_value, label=model_mode_choices["label"],  visible=image_mode_value in model_modes_visibility)                        
                 keep_frames_video_source = gr.Text(value=ui_get("keep_frames_video_source") , visible= len(filter_letters(image_prompt_type_value, "VL"))>0 , scale = 2, label= BRANCH_FRAMES_VIDEO_SOURCE_LABEL if (branch_from_latent_value and branch_family_ok) else KEEP_FRAMES_VIDEO_SOURCE_LABEL )
-                branch_fit_latent = gr.Checkbox(value= bool(ui_get("branch_fit_latent", False)) , visible= len(filter_letters(image_prompt_type_value, "VL"))>0 and branch_from_latent_value and branch_family_ok , scale = 2, label= BRANCH_FIT_LATENT_LABEL ) 
+                branch_fit_latent = gr.Checkbox(value= bool(ui_get("branch_fit_latent", False)) , visible= len(filter_letters(image_prompt_type_value, "VL"))>0 and branch_from_latent_value and branch_family_ok , scale = 2, label= BRANCH_FIT_LATENT_LABEL )
 
             any_control_video = any_control_image = False
             if image_mode_value ==2:
@@ -17521,7 +17521,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
             prompt_enhancer_mode_dropdown.input(fn=build_prompt_enhancer_value, inputs=[prompt_enhancer_mode_dropdown, prompt_enhancer_think], outputs=[prompt_enhancer], show_progress="hidden")
             prompt_enhancer_think.input(fn=build_prompt_enhancer_value, inputs=[prompt_enhancer_mode_dropdown, prompt_enhancer_think], outputs=[prompt_enhancer], show_progress="hidden")
             image_prompt_type_radio.change(fn=refresh_image_prompt_type_radio, inputs=[state, image_prompt_type, image_prompt_type_radio, video_prompt_type, video_source, branch_from_latent, branch_fit_latent, branch_latent_file], outputs=[image_prompt_type, image_start_row, image_end_row, video_source, input_video_strength, keep_frames_video_source, branch_from_latent, branch_fit_latent, branch_latent_file, image_prompt_type_endcheckbox], show_progress="hidden").then(fn=None, inputs=None, outputs=None, js="() => window.wangpRefreshInputModes()")
-            branch_from_latent.change(fn=refresh_branch_from_latent, inputs=[state, image_prompt_type, image_prompt_type_radio, video_source, branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file], outputs=[branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file, video_source], show_progress="hidden") 
+            branch_from_latent.change(fn=refresh_branch_from_latent, inputs=[state, image_prompt_type, image_prompt_type_radio, video_source, branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file], outputs=[branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file, video_source], show_progress="hidden")
             # The branch is validated as soon as the source video is picked,
             # long before the job (and its model load) runs: the latent file
             # is resolved from the uploaded name and its path reported here.
