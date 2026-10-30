@@ -203,7 +203,7 @@ from shared.loras_migration import migrate_loras_layout
 from shared.lora_paths import resolve_lora_dir
 from shared.utils.wgp_config_migration import migrate_extension_defaults
 from shared.utils import files_locator as fl
-from shared.utils import latent_io 
+from shared.utils import latent_io
 from shared.gradio.strip_gallery import StripGallery, STRIP_GALLERY_CLASSES
 from shared.utils.gallery_sources import GALLERY_SOURCES, STRIP_SOURCES, VIDEO, MESH, WORLD, APP, gallery_source, source_index, source_for_path, gallery_state_defaults
 from shared.utils.self_refiner import normalize_self_refiner_plan, ensure_refiner_list, add_refiner_rule, remove_refiner_rule
@@ -7577,6 +7577,9 @@ def record_file_metadata(video_path, configs, is_image, audio_only, gen, embedde
         notifications.record_generation(server_config, gen, video_path, configs, replace_last=replace_last_file, notify=notify_generation)
 
 
+
+
+
 def _prefix_to_frames_space(entry, prefix, frames_space, transform="logc3", device="cpu"):
     """Convert prefix frames into the pixel space of the decoded window so
     the two can be concatenated directly.
@@ -7870,7 +7873,11 @@ def resolve_latent_branch(image_prompt_type, video_source, state, model_type, ke
         return None, "requires Continue Video / Continue Last Video to be selected"
     video_source = str(video_source or "").strip()
     if len(video_source) == 0 and "L" in str(image_prompt_type or ""):
-        file_list, _, _, _ = get_processed_queue(get_gen_info(state) if state is not None else {})
+        # *Continue Last Video* with an empty picker: take the gallery's last
+        # video (the same list the form's picker fills from — see
+        # generate_media's resolve_continue_video). get_processed_queue returns
+        # one (files, settings) pair per gallery source, keyed by source id.
+        file_list, _ = get_processed_queue(get_gen_info(state) if state is not None else {})[VIDEO.id]
         if len(file_list) > 0:
             video_source = str(file_list[-1])
         else:
@@ -8923,7 +8930,8 @@ def _ltx2_i2v_prefix_to_frames_space(entry, block, is_hdr, device):
         prefix = convert_image_to_tensor(image).unsqueeze(1)
         if torch.is_floating_point(prefix):
             prefix = convert_video_tensor_to_uint8_chunked(prefix)
-        return _prefix_to_frames_space(entry, prefix, "linear" if is_hdr else "uint8", LTX2_HDR_TRANSFORM, device)
+        return _prefix_to_frames_space(entry, prefix, "linear" if is_hdr else "uint8",
+                                       str(entry.get("hdr_transform") or LTX2_HDR_TRANSFORM), device)
     except Exception as exc:
         print(f"Latent decode: the embedded i2v start image could not be read: {exc}")
         return None
@@ -8961,7 +8969,7 @@ def _ltx2_latent_decode_windows(send_cmd, gen, model_def, entry, window_specs, a
                 decode_models.video_decoder,
                 tiling_config,
                 interrupt_check=interrupt_check,
-                hdr_transform=LTX2_HDR_TRANSFORM if is_hdr else None,
+                hdr_transform=str(entry.get("hdr_transform") or LTX2_HDR_TRANSFORM) if is_hdr else None,
                 output_dtype=torch.float16 if is_hdr else None,
             )
             latent = None
@@ -9232,6 +9240,33 @@ def _save_ltx2_decoded_video(send_cmd, state, video_source, client_id, plugin_da
     clear_status(state)
 
 
+def _h3_sidecar_vae_file(recorded, default):
+    """Resolve the VAE name a MiniMax H3 sidecar records back to the loader's
+    checkpoint path.
+
+    The sidecar keeps the checkpoint's bare file name (the identity the model
+    list shows), while the H3 loaders compare the name they are handed against
+    their own constants — several of which carry the family's ``minimax_h3/``
+    folder prefix — to decide the model's shape: the light VAE's shallow
+    decoder, the X2 VAE's upsampling path. Matching on the basename keeps the
+    recorded identity and the loader's expectations in step; an unrecognised
+    name is handed through untouched for ``fl.locate_file`` to search.
+    """
+    from models.minimax_h3.minimax_h3_main import (AUDIO_VAE_FILE, VIDEO_VAE_FILE, VIDEO_VAE_FP8MIX_FILE,
+                                                   VIDEO_VAE_INT8_FILE, VIDEO_VAE_LIGHT_FILE,
+                                                   VIDEO_VAE_LIGHT_INT8_FILE, X2_VAE_FILE, X2_VAE_INT8_FILE)
+    recorded = str(recorded or "").strip()
+    if not recorded:
+        return str(default or "")
+    if os.path.sep in recorded:
+        return recorded
+    for candidate in (VIDEO_VAE_FILE, VIDEO_VAE_FP8MIX_FILE, VIDEO_VAE_INT8_FILE, VIDEO_VAE_LIGHT_FILE,
+                      VIDEO_VAE_LIGHT_INT8_FILE, X2_VAE_FILE, X2_VAE_INT8_FILE, AUDIO_VAE_FILE):
+        if os.path.basename(str(candidate)) == recorded:
+            return str(candidate)
+    return recorded
+
+
 def _h3_fit_audio_samples(audio, sample_count):
     """Pad or truncate a waveform to exactly ``sample_count`` samples on its
     last dimension (the H3 pipeline's ``_fit_audio_samples``, kept local so
@@ -9278,7 +9313,8 @@ def _edit_latent_job_h3(send_cmd, state, video_source, client_id, plugin_data, s
     fps = float(entry.get("fps") or 0) or float(model_def.get("fps") or 24)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    from models.minimax_h3.minimax_h3_main import AUDIO_VAE_FILE, VIDEO_VAE_FILE, _load_audio_vae, _load_video_vae
+    from models.minimax_h3.minimax_h3_main import (AUDIO_VAE_FILE, VIDEO_VAE_FILE, X2_VAE_FILE, X2_VAE_INT8_FILE,
+                                                   _load_audio_vae, _load_video_vae)
     from models.minimax_h3.pipeline import _video_to_uint8_cpu
 
     audio_entry = latent_io.audio_latent_payload(sidecar_obj)
@@ -9288,8 +9324,9 @@ def _edit_latent_job_h3(send_cmd, state, video_source, client_id, plugin_data, s
 
     # The VAE names recorded in the sidecar take precedence (they produced
     # this latent); the model definition and the family defaults fall back.
-    video_vae_file = os.path.basename(str(entry.get("vae_file") or "")) or str(model_def.get("video_vae_file") or "") or VIDEO_VAE_FILE
-    audio_vae_file = os.path.basename(str((audio_entry or {}).get("audio_vae_file") or "")) or str(model_def.get("audio_vae_file") or "") or AUDIO_VAE_FILE
+    video_vae_file = _h3_sidecar_vae_file(entry.get("vae_file"), model_def.get("video_vae_file") or VIDEO_VAE_FILE)
+    audio_vae_file = _h3_sidecar_vae_file((audio_entry or {}).get("audio_vae_file"),
+                                          model_def.get("audio_vae_file") or AUDIO_VAE_FILE)
     # The sidecar records the dtype each VAE ran with (the default video
     # checkpoint is fp16, the audio VAE is locked to fp32); loading with the
     # same dtype reproduces the generation decode.
@@ -9302,14 +9339,29 @@ def _edit_latent_job_h3(send_cmd, state, video_source, client_id, plugin_data, s
     # a decode-only job (no prior generation in this process) must set it.
     offload.shared_state["_attention"] = get_default_attention_mode()
     try:
-        # qkv_splitting only re-partitions the official VAE's linear layers
-        # for offloading; the decode runs one un-offloaded forward pass, so
-        # it loads the plain layout either way.
-        video_vae = _load_video_vae(video_vae_file, vae_dtype, qkv_splitting=False)
+        # The loader takes the checkpoint name and the offload layout flags —
+        # its compute dtype comes from the checkpoint itself (fp16 / bf16
+        # native, an fp32 checkpoint lowered to fp16), which is the dtype the
+        # generation recorded in the sidecar. qkv_splitting only re-partitions
+        # the official VAE's linear layers for offloading; the decode runs one
+        # un-offloaded forward pass, so the plain layout is loaded either way.
+        # The X2 VAEs decode through their upsampling path, the flag that
+        # builds that model shape.
+        video_vae = _load_video_vae(
+            video_vae_file, qkv_splitting=False,
+            upsampling=os.path.basename(video_vae_file) in (os.path.basename(X2_VAE_FILE), os.path.basename(X2_VAE_INT8_FILE)))
         audio_vae = _load_audio_vae(audio_vae_file) if needs_audio else None
     except Exception as exc:
         send_cmd("error", gr.Error(f"The VAE checkpoint(s) required to decode this latent could not be loaded ({exc})."))
         return
+    # The latents are cast to the dtype the loaded video VAE computes in (the
+    # sidecar's recorded dtype is the same one, the checkpoint being the
+    # identity that produced them); the audio VAE is always fp32.
+    loaded_vae_dtype = getattr(video_vae, "_model_dtype", None)
+    if loaded_vae_dtype is not None and loaded_vae_dtype != vae_dtype:
+        print(f"Latent decode identity warning: the video VAE computes in {loaded_vae_dtype}, "
+              f"the sidecar recorded {vae_dtype}; the latents follow the loaded VAE.")
+        vae_dtype = loaded_vae_dtype
     if len(stored_vae_hash) > 0:
         video_vae_pth = fl.locate_file(video_vae_file, error_if_none=False)
         if os.path.isfile(video_vae_pth) and latent_io.sha256_file(video_vae_pth) != stored_vae_hash:
@@ -9863,9 +9915,10 @@ def generate_media(
     spatial_postprocessing_parameters=None,
     temporal_postprocessing_parameters=None,
     postprocessing_reference_images=None,
+    # VAE upsampler runtime parameters (the latent branch's head window).
+    spatial_upsampler_parameters=None,
     branch_latent_file=None,
     save_latents_choice=None,
-    override_compile="",
 ):
     filename_formatter = None
     if output_filename:
@@ -10275,7 +10328,7 @@ def generate_media(
     # Computed here (before the branch prefix is prepared below) because the
     # *From latent* prefix path reads fit_canvas; defining it later in the
     # function would leave it unbound at that point.
-    fit_canvas = 2 if model_def.get("lock_resolutions", False) else server_config.get("fit_canvas", 0)  # a locked resolution is the output size: inputs are cropped to it
+    fit_canvas = 2 if model_def.get("lock_resolutions", False) else server_config.get("fit_canvas", 0)
     fit_crop = fit_canvas == 2
     if fit_crop and outpainting_dims is not None:
         fit_crop = False
@@ -10531,6 +10584,8 @@ def generate_media(
     custom_frames_injection = model_def.get("custom_frames_injection", False) and "F" in video_prompt_type and image_refs is not None and len(image_refs) > 0
     if "K" in video_prompt_type: 
         any_background_ref = 2 if model_def.get("all_image_refs_are_background_ref", False) or custom_frames_injection else 1
+    # fit_canvas and fit_crop were resolved before the latent-branch prefix
+    # preparation above; the crop rule is the same one applied there.
 
     joint_pass = boost ==1 #and profile != 1 and profile != 3  
     
@@ -11747,6 +11802,7 @@ def generate_media(
                                 "cuda" if torch.cuda.is_available() else "cpu")
                             if _img_frames is not None:
                                 latent_gen_kwargs["prefix_i2v_image_frames"] = _img_frames
+
                 samples = call_with_default_device(model_def, model_type, wan_model.generate,
                     input_prompt = prompt,
                     alt_prompt = current_alt_prompt,
@@ -11969,6 +12025,12 @@ def generate_media(
                     branch_decoded_prefix = samples.get("decoded_prefix", None)
                     meshes = samples.get("meshes", None)
                     splats = samples.get("splats", None)
+                    # Step 2: the branch job's kept region (a fresh decode of
+                    # the source sidecar's kept windows — the same
+                    # reconstruction the Latent Decode job performs) is
+                    # returned by the pipeline so the job uses it as the
+                    # output video's prefix (source independence).
+                    branch_decoded_prefix = samples.get("decoded_prefix", None)
                     samples = samples.get("x", None)
 
                 if samples is not None and (audio_only or is_image or sample_is_hdr):
@@ -12369,7 +12431,12 @@ def generate_media(
                         new_audio_from_start=new_audio_added_from_audio_start,
                         source_audio_metadata=source_audio_metadata,
                         audio_codec_key=server_config.get("audio_output_codec", "aac_128"),
-                        pad_audio_to_video=audio_window_alignment and full_generated_audio is not None,
+                        # A branch job's generated audio can end a frame or
+                        # two short of its video (the window-boundary audio
+                        # accounting rounds down); padding it instead lets
+                        # -shortest end on the video, so no written frame is
+                        # dropped (the file ends on the video's last frame).
+                        pad_audio_to_video=(audio_window_alignment and full_generated_audio is not None) or branch_prefix is not None,
                         verbose=verbose_level >= 2,
                         # A branch job's generated audio can end a frame or
                         # two short of its video (the window-boundary audio
@@ -12488,6 +12555,20 @@ def generate_media(
                                 _branch_carried_image = None
                             else:
                                 _branch_carried_image = {"kind": "image_png", "data": bytes(_branch_carried_image["data"])}
+                        # The sidecar's canvas: the generation's out_width/out_height
+                        # are not in scope in this block (the post-processing paths
+                        # rewrite them), so derive the canvas from the latent grid the
+                        # entry carries and the family's spatial factor (8 for the
+                        # Wan-VAE families, 16 for the 5B Wan 2.2 VAE and MiniMax H3,
+                        # 32 for LTX2 — the _BRANCH_PREFIX_LAYOUTS table).
+                        _latent_layout = _BRANCH_PREFIX_LAYOUTS.get(str(base_model_type or ""))
+                        _latent_canvas_factor = int(_latent_layout[2] if _latent_layout else 0)
+                        _latent_shape = [int(u) for u in (latent_entry.get("shape") or [])]
+                        if len(_latent_shape) < 4:
+                            _latent_shape = list(latent_io.payload_latents(latent_entry).shape)
+                        _latent_grid_ok = len(_latent_shape) >= 4 and _latent_canvas_factor > 0
+                        _latent_width = int(_latent_shape[-1] * _latent_canvas_factor) if _latent_grid_ok else 0
+                        _latent_height = int(_latent_shape[-2] * _latent_canvas_factor) if _latent_grid_ok else 0
                         latent_side_bytes = _all_latent_sidecar(
                             latent_entry, latent_audio_entry, window_no, latent_windows, latent_audio_windows,
                             branch_prefix=branch_prefix,
@@ -12507,8 +12588,8 @@ def generate_media(
                             model_def=model_def,
                             model_type=str(model_type or ""),
                             base_model_type=str(base_model_type or ""),
-                            width=int(out_width or 0),
-                            height=int(out_height or 0),
+                            width=_latent_width,
+                            height=_latent_height,
                             splices_exact_image=_all_latent_splices,
                             branch_cut_video_block=_h3_cut_video_block,
                             branch_cut_audio_block=_h3_cut_audio_block)
@@ -16389,7 +16470,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                     model_mode_value = ui_defaults["model_mode"] = get_default_value(model_mode_choices["choices"], ui_get("model_mode", None), model_mode_choices["default"] )
                     model_mode = gr.Dropdown(choices=model_mode_choices["choices"], value=model_mode_value, label=model_mode_choices["label"],  visible=image_mode_value in model_modes_visibility)                        
                 keep_frames_video_source = gr.Text(value=ui_get("keep_frames_video_source") , visible= len(filter_letters(image_prompt_type_value, "VL"))>0 , scale = 2, label= BRANCH_FRAMES_VIDEO_SOURCE_LABEL if (branch_from_latent_value and branch_family_ok) else KEEP_FRAMES_VIDEO_SOURCE_LABEL )
-                branch_fit_latent = gr.Checkbox(value= bool(ui_get("branch_fit_latent", False)) , visible= len(filter_letters(image_prompt_type_value, "VL"))>0 and branch_from_latent_value and branch_family_ok , scale = 2, label= BRANCH_FIT_LATENT_LABEL ) 
+                branch_fit_latent = gr.Checkbox(value= bool(ui_get("branch_fit_latent", False)) , visible= len(filter_letters(image_prompt_type_value, "VL"))>0 and branch_from_latent_value and branch_family_ok , scale = 2, label= BRANCH_FIT_LATENT_LABEL )
 
             any_control_video = any_control_image = False
             if image_mode_value ==2:
@@ -17770,7 +17851,7 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
             prompt_enhancer_mode_dropdown.input(fn=build_prompt_enhancer_value, inputs=[prompt_enhancer_mode_dropdown, prompt_enhancer_think], outputs=[prompt_enhancer], show_progress="hidden")
             prompt_enhancer_think.input(fn=build_prompt_enhancer_value, inputs=[prompt_enhancer_mode_dropdown, prompt_enhancer_think], outputs=[prompt_enhancer], show_progress="hidden")
             image_prompt_type_radio.change(fn=refresh_image_prompt_type_radio, inputs=[state, image_prompt_type, image_prompt_type_radio, video_prompt_type, video_source, branch_from_latent, branch_fit_latent, branch_latent_file], outputs=[image_prompt_type, image_start_row, image_end_row, video_source, input_video_strength, keep_frames_video_source, branch_from_latent, branch_fit_latent, branch_latent_file, image_prompt_type_endcheckbox], show_progress="hidden").then(fn=None, inputs=None, outputs=None, js="() => window.wangpRefreshInputModes()")
-            branch_from_latent.change(fn=refresh_branch_from_latent, inputs=[state, image_prompt_type, image_prompt_type_radio, video_source, branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file], outputs=[branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file, video_source], show_progress="hidden") 
+            branch_from_latent.change(fn=refresh_branch_from_latent, inputs=[state, image_prompt_type, image_prompt_type_radio, video_source, branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file], outputs=[branch_from_latent, keep_frames_video_source, branch_fit_latent, prompt, seed, branch_latent_file, video_source], show_progress="hidden")
             # The branch is validated as soon as the source video is picked,
             # long before the job (and its model load) runs: the latent file
             # is resolved from the uploaded name and its path reported here.

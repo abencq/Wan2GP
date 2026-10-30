@@ -88,6 +88,13 @@ LTX2_DISABLE_STAGE2_WITH_CONTROL_VIDEO = True
 LTX2_ENABLE_EMBEDDING_LORAS = False
 LTX2_HDR_TRANSFORM = "logc3"
 LTX2_VAE_TEMPORAL_TILING_FPS = 24.0
+# The HDR transform the LTX-2 video VAE decodes to (scene-linear Rec.709
+# through it): the model spec may state its own one ("hdr_transform", e.g.
+# "acescct" for the SDR-to-HDR IC-LoRA flow). An all-latent sidecar records
+# the transform its job wrote (the entry's "hdr_transform"), and the Latent
+# Decode / From latent jobs read it back; this constant is the fallback for
+# a sidecar that carries only the HDR flag.
+LTX2_HDR_TRANSFORM = "logc3"
 LTX2_UPSCALE_SIGMAS = tuple(DISTILLED_SIGMA_VALUES)
 LTX2_UPSCALE_MAX_FRAMES = 481
 LTX2_EMBEDDING_LORA_PREFIXES = (
@@ -1565,13 +1572,13 @@ class LTX2:
         input_ref_images=None,
         input_waveform=None,
         input_waveform_sample_rate=None,
+        audio_conditioning_end=None,
         prefix_latents=None,
         prefix_audio_latents=None,
         prefix_kept_windows=None,
         prefix_kept_frames=0,
         prefix_is_i2v=False,
         prefix_i2v_image_frames=None,
-        audio_conditioning_end=None,
         audio_scale: float | None = None,
         outpainting_dims: list[int] | None = None,
         frame_num: int = 121,
@@ -2340,7 +2347,7 @@ class LTX2:
                     latent_stride=int(latent_stride),
                     frame_offset=1,
                     is_hdr=hdr_enabled,
-                    hdr_transform=LTX2_HDR_TRANSFORM if hdr_enabled else "",
+                    hdr_transform=self.model_def["ltx2_hdr_transform"] if hdr_enabled else "",
                 )
                 latent_file_obj = payload
                 audio_latent = latent_capture.get("audio")
@@ -2414,7 +2421,7 @@ class LTX2:
                 _video = decode_video_to_tensor(
                     _lat, self.video_decoder, tiling_config,
                     interrupt_check=interrupt_check,
-                    hdr_transform=LTX2_HDR_TRANSFORM if hdr_enabled else None,
+                    hdr_transform=self.model_def["ltx2_hdr_transform"] if hdr_enabled else None,
                     output_dtype=torch.float16 if hdr_enabled else None)
                 if _video is None:
                     return None

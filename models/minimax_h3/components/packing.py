@@ -36,9 +36,9 @@ class MiniMaxH3PackedSequence:
     num_condition_audio_rows: int
     num_target_condition_audio_latents: int = 0
     num_target_condition_video_rows: int = 0
-    target_condition_video_anchor: str = "tail"
     dense_spans: tuple = ()  # (start, stop) of every non-video-region row range in sequence order: text, keyframes, image references, audio
     reference_video_spans: tuple = ()  # (start, stop, (t, h, w)) of every reference video's rows, in sequence order
+    target_condition_video_anchor: str = "tail"
 
 
 @dataclass
@@ -209,8 +209,8 @@ def build_packed_sequence(text_token_tags, num_latent_frames, latent_height, lat
     return MiniMaxH3PackedSequence(sequence_length, position_ids, token_tags, video_indices, audio_indices,
                                    text_indices, condition_video_rows, condition_audio_rows,
                                    target_condition_audio_latents, target_condition_video_frames * rows_per_frame,
-                                   target_condition_video_anchor,
-                                   tuple(span for span in ((0, text_len), (condition_video_start, condition_audio_start), (condition_audio_start, audio_start), (audio_start, video_start)) if span[1] > span[0]))
+                                   tuple(span for span in ((0, text_len), (condition_video_start, condition_audio_start), (condition_audio_start, audio_start), (audio_start, video_start)) if span[1] > span[0]),
+                                   (), target_condition_video_anchor)
 
 
 def build_ref2va_packed_sequence(text_token_tags, references, num_latent_frames, latent_height, latent_width,
@@ -322,8 +322,7 @@ def build_ref2va_packed_sequence(text_token_tags, references, num_latent_frames,
                                    text_indices, condition_video_rows, condition_audio_rows,
                                    target_condition_audio_latents,
                                    target_condition_video_frames * rows_per_target_frame,
-                                   target_condition_video_anchor,
-                                   tuple(dense_spans + [(audio_start, video_start)]), tuple(reference_video_spans))
+                                   tuple(dense_spans + [(audio_start, video_start)]), tuple(reference_video_spans), target_condition_video_anchor)
 
 
 def build_row_timesteps(layout, video_timestep, audio_timestep, condition_video_timestep,
