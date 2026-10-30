@@ -221,26 +221,34 @@ CUDA 13 (and recent nvcc builds in general) cannot compile the upstream git chec
 scripts/install-spargeattn.sh
 ```
 
-Activate your WanGP Python environment before running these commands; SpargeAttn's build also invokes `python` from `PATH` to generate its kernels.
+Activate your WanGP Python environment before running these commands; SpargeAttn's build also invokes `python` from `PATH` to generate its kernels. The 1 click installer does all of this for you: it prepends the environment's `bin` directory to `PATH`, so the build's kernel generators run with the same Python that builds the package, and it sets `NVCC_PREPEND_FLAGS='-DNDEBUG'` for the Linux CUDA 13 Sparge entry. `-DNDEBUG` is intentional: it turns off C assertions during the build, so the CUDA header assertion does not stop it, and it does not change the sparse attention kernels.
 
 Manual equivalent:
 ```
 python -m pip install ninja wheel packaging
-git clone https://github.com/woct0rdho/SpargeAttn
-cd SpargeAttn
-# patch setup.py in two places:
-#   1. add "-DNDEBUG", as a new line right after "-std=c++17", inside NVCC_FLAGS_COMMON
-#   2. in run_instantiations(), replace os.system(f"python {py_file}") with
-#      subprocess.check_call([sys.executable, str(py_file)])   (and add "import sys" at the top)
-python -m pip install --no-build-isolation .
+NVCC_PREPEND_FLAGS='-DNDEBUG' python -m pip install --no-build-isolation git+https://github.com/woct0rdho/SpargeAttn.git
 ```
 
-If you only need the kernels for one of your GPUs, limit the build (much faster):
+If you only need the kernels for one GPU family, limit the build:
+```
+TORCH_CUDA_ARCH_LIST="12.0" NVCC_PREPEND_FLAGS='-DNDEBUG' \
+  python -m pip install --no-build-isolation git+https://github.com/woct0rdho/SpargeAttn.git   # RTX 50xx only
+TORCH_CUDA_ARCH_LIST="8.9" NVCC_PREPEND_FLAGS='-DNDEBUG' \
+  python -m pip install --no-build-isolation git+https://github.com/woct0rdho/SpargeAttn.git    # RTX 40xx only
+TORCH_CUDA_ARCH_LIST="8.6" NVCC_PREPEND_FLAGS='-DNDEBUG' \
+  python -m pip install --no-build-isolation git+https://github.com/woct0rdho/SpargeAttn.git    # RTX 30xx only
+```
+The helper script takes the same prefix, so it can limit its build to one of your GPUs as well (much faster):
 ```
 TORCH_CUDA_ARCH_LIST="12.0" scripts/install-spargeattn.sh   # RTX 50xx only
 TORCH_CUDA_ARCH_LIST="8.9" scripts/install-spargeattn.sh    # RTX 40xx only
 TORCH_CUDA_ARCH_LIST="8.6" scripts/install-spargeattn.sh    # RTX 30xx only
 ```
+
+To build from a checkout you patch by hand: add `"-DNDEBUG"` as a new line right after `"-std=c++17"` inside `NVCC_FLAGS_COMMON`, and replace `os.system(f"python {py_file}")` in `run_instantiations()` with `subprocess.check_call([sys.executable, str(py_file)])` (adding `import sys` at the top). Then build the checkout with `python -m pip install --no-build-isolation .`.
+
+
+The 1 click installer selects Sparge Attention for the Linux CUDA 13 RTX 30XX-50XX profiles. Windows uses the prebuilt wheels above; macOS/MPS and AMD/ROCm do not install Sparge.
 
 
 ## Flash Attention
