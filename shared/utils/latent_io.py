@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 """Thin companion-file format for WanGP generated latents.
 
 A companion ``.pt`` file stores the final pre-decode latent(s) per generated
