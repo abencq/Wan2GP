@@ -577,7 +577,7 @@ class family_handler:
             "self_refiner_max_plans": 2,
             "custom_settings": [_PROMPT_RELAY_CUSTOM_SETTING.copy()],
             "custom_attention_modes": {
-                "sol": {"label": "Sol sparse attention, requires Triton and RTX 30xx or newer", "supports_sparsity": True},
+                "sol": {"label": "Sol sparse attention, requires Triton and an NVIDIA RTX 30/40/50-series GPU or newer", "supports_sparsity": True},
             },
             "attention_sparsity": {
                 "label": "Start Tau (higher = more sparse/faster; lower = more faithful; End Tau = 0.8)",
