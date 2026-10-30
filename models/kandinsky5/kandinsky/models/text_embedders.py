@@ -1,3 +1,4 @@
+from shared.utils.phase_progress import text_encoding_progress
 import os
 import torch
 from transformers import (
@@ -9,7 +10,7 @@ from transformers import (
 )
 
 from .utils import freeze
-from mmgp import offload
+from mmgp import offload, runtime
 import torchvision.transforms.functional as F
 from shared.utils.text_encoder_cache import TextEncoderCache
 
@@ -93,7 +94,7 @@ class Qwen2_5_VLTextEmbedder:
             config_path = os.path.join(os.path.dirname(checkpoint_path), "config.json")
             self.model = offload.fast_load_transformers_model(
                 checkpoint_path,
-                writable_tensors=True,
+                writable_tensors=False,
                 modelClass=Qwen2_5_VLForConditionalGeneration,
                 defaultConfigPath=config_path,
                 default_dtype=torch.bfloat16,
@@ -104,6 +105,10 @@ class Qwen2_5_VLTextEmbedder:
             self.max_length = conf.max_length
             self.text_token_padding = text_token_padding
             self.model = freeze(self.model)
+            # the 1 GB token table stays in RAM (mmgp looks up the prompt's rows on the CPU) with the 1 GB output head, which never runs:
+            # the hidden states come from the base model
+            runtime.lookup_on_cpu(self.model.get_input_embeddings())
+            runtime.unused(self.model.lm_head)
             return
 
         quantization_config = None
@@ -147,7 +152,7 @@ class Qwen2_5_VLTextEmbedder:
             ).to(self.model.device)
 
             with torch.no_grad():
-                embeds = self.model(**inputs, output_hidden_states=True)["hidden_states"][-1][:, crop_start:]
+                embeds = self.model.model(**inputs, output_hidden_states=True)["hidden_states"][-1][:, crop_start:]
         else:
             max_length = self.max_length + crop_start
             inputs = self.processor(
@@ -161,7 +166,7 @@ class Qwen2_5_VLTextEmbedder:
             ).to(self.model.device)
 
             with torch.no_grad():
-                embeds = self.model(
+                embeds = self.model.model(
                     input_ids=inputs["input_ids"],
                     return_dict=True,
                     output_hidden_states=True,
@@ -233,15 +238,17 @@ class Kandinsky5TextEmbedder:
         if isinstance(texts, str):
             texts = [texts]
         if images is not None:
-            text_embeds, cu_seqlens, attention_mask = self.embedder(texts, images=images, type_of_content=type_of_content)
-            pooled_embed = self.clip_embedder(texts)
+            with text_encoding_progress(list(self.embedder.model.model.language_model.layers) + list(self.clip_embedder.model.text_model.encoder.layers), prompt_count=len(texts)):
+                text_embeds, cu_seqlens, attention_mask = self.embedder(texts, images=images, type_of_content=type_of_content)
+                pooled_embed = self.clip_embedder(texts)
             if attention_mask is not None:
                 attention_mask = attention_mask.to(torch.bool)
             return {"text_embeds": text_embeds, "pooled_embed": pooled_embed}, cu_seqlens, attention_mask
 
         def encode_fn(prompts):
-            text_embeds, cu_seqlens, attention_mask = self.embedder(prompts, images=None, type_of_content=type_of_content)
-            pooled_embed = self.clip_embedder(prompts)
+            with text_encoding_progress(list(self.embedder.model.model.language_model.layers) + list(self.clip_embedder.model.text_model.encoder.layers), prompt_count=len(prompts)):
+                text_embeds, cu_seqlens, attention_mask = self.embedder(prompts, images=None, type_of_content=type_of_content)
+                pooled_embed = self.clip_embedder(prompts)
             if attention_mask is not None:
                 attention_mask = attention_mask.to(torch.bool)
                 return [

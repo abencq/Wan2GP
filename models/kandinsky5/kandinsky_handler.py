@@ -1,3 +1,6 @@
+# Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .infos import kandinsky_help
 import os
 import torch
 from omegaconf import OmegaConf
@@ -100,52 +103,8 @@ class family_handler:
         }
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-kandinsky5",
-            type=str,
-            default=None,
-            help=f"Base path for Kandinsky 5 loras (per-architecture subfolders are used). Default: {os.path.join(lora_root, 'kandinsky5')}.",
-        )
-        parser.add_argument(
-            "--lora-dir-k5-lite-t2v",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Kandinsky 5 Lite T2V loras (default: {os.path.join(lora_root, 'k5_lite_t2v')}).",
-        )
-        parser.add_argument(
-            "--lora-dir-k5-lite-i2v",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Kandinsky 5 Lite I2V loras (default: {os.path.join(lora_root, 'k5_lite_i2v')}).",
-        )
-        parser.add_argument(
-            "--lora-dir-k5-pro-t2v",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Kandinsky 5 Pro T2V loras (default: {os.path.join(lora_root, 'k5_pro_t2v')}).",
-        )
-        parser.add_argument(
-            "--lora-dir-k5-pro-i2v",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Kandinsky 5 Pro I2V loras (default: {os.path.join(lora_root, 'k5_pro_i2v')}).",
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
-        base_dir = getattr(args, "lora_dir_kandinsky5", None) or os.path.join(lora_root, "kandinsky5")
-        per_arch = {
-            "k5_lite_t2v": getattr(args, "lora_dir_k5_lite_t2v", None) or os.path.join(lora_root, "k5_lite_t2v"),
-            "k5_lite_i2v": getattr(args, "lora_dir_k5_lite_i2v", None) or os.path.join(lora_root, "k5_lite_i2v"),
-            "k5_pro_t2v": getattr(args, "lora_dir_k5_pro_t2v", None) or os.path.join(lora_root, "k5_pro_t2v"),
-            "k5_pro_i2v": getattr(args, "lora_dir_k5_pro_i2v", None) or os.path.join(lora_root, "k5_pro_i2v"),
-        }
-        if base_model_type in per_arch:
-            return per_arch[base_model_type]
-        if base_model_type and base_model_type != "kandinsky5":
-            return os.path.join(base_dir, base_model_type)
-        return base_dir
+    def get_lora_dir(base_model_type):
+        return base_model_type
 
     @staticmethod
     def set_cache_parameters(cache_type, base_model_type, model_def, inputs, skip_steps_cache):
@@ -180,6 +139,7 @@ class family_handler:
 
         profiles_dir = base_model_type or "kandinsky5"
         extra_model_def = {
+            "tiny_vae_architecture": "hunyuan",
             "i2v_class": task == "i2v",
             "t2v_class": task == "t2v",
             "image_outputs": is_image,
@@ -218,7 +178,7 @@ class family_handler:
         else:
             extra_model_def["image_prompt_types_allowed"] = ""
 
-        return extra_model_def
+        return merge_help(extra_model_def, kandinsky_help(base_model_type, {**extra_model_def, **model_def}))
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):

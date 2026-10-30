@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 from typing import Any
@@ -30,13 +31,18 @@ QWEN35_4B_TEXT_INT8_FILENAME = "Qwen3.5-4B-Abliterated_quanto_bf16_int8.safetens
 QWEN35_VARIANT_9B = "9b"
 QWEN35_VARIANT_4B = "4b"
 QWEN38_VARIANT_27B = "27b"
+QWEN38_VARIANT_9B = "qwen38_9b"
 QWEN38_27B_ASSETS_REPO = "Qwen/Qwen3.8-27B"
 QWEN38_27B_GGUF_REPO = QWEN35_ABLITERATED_REPO
 QWEN38_27B_GGUF_REPO_SUBFOLDER = "Qwen3_8_27B_Uncensored"
 QWEN38_27B_TEXT_GGUF_FILENAME = "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
 QWEN38_27B_TEXT_GGUF_Q3_FILENAME = "Qwen3.8-27B-Uncensored-noMTP-IQ3_S.gguf"
 QWEN38_27B_TEXT_GGUF_Q2_FILENAME = "Qwen3.8-27B-Uncensored-IQ2_M.gguf"
+QWEN38_27B_TEXT_GGUF_PTQ1_FILENAME = "Ternary-Bonsai-2-27B-Abliterated-PTQ1_0.gguf"
 QWEN38_27B_MTP_GGUF_FILENAME = "Qwen3.8-27B-Uncensored-MTP-Q4_K_M.gguf"
+QWEN38_9B_TEXT_GGUF_FILENAME = "Qwen3.8-9B-Uncensored-Heretic-Q4_K_M.gguf"
+QWEN38_9B_TEXT_GGUF_Q8_FILENAME = "Qwen3.8-9B-Uncensored-Heretic-Q8_0.gguf"
+BONSAI2_27B_MTP_GGUF_FILENAME = "Ternary-Bonsai-2-27B-MTP-Q8_0.gguf"
 QWEN38_27B_VISION_FILENAME = "Qwen3.8-27B-Uncensored-vision-f16.gguf"
 QWEN35_VARIANT_SPECS = {
     QWEN35_VARIANT_9B: {
@@ -64,6 +70,7 @@ QWEN35_VARIANT_SPECS = {
         "vision_filename": QWEN35_VISION_FILENAME,
         "tie_word_embeddings": False,
         "supports_mtp": True,
+        "mtp_draft_vocab_size": 98304,  # GGUF checkpoint: the MTP head drafts over the first 98304 tokens, as the 27B
         "mtp_speculative_tokens": 2,
         "mtp_speculative_sampling_tokens": 2,
         "mtp_speculative_confidence": 0.0,
@@ -91,6 +98,35 @@ QWEN35_VARIANT_SPECS = {
         "vision_filename": QWEN35_4B_VISION_FILENAME,
         "tie_word_embeddings": True,
     },
+    QWEN38_VARIANT_9B: {
+        # Heretic ablation of the Qwen3.8 9B distill (Qwen3.5-9B architecture). It shares the
+        # Qwen3.5-9B tokenizer, config and vision tower; its GGUF embeds the MTP layer.
+        "display_name": "Qwen3.8-9B Uncensored",
+        "assets_dir_name": "Qwen3_5_9B_Abliterated",
+        "root_repo": QWEN35_ABLITERATED_REPO,
+        "repo_subfolder": "Qwen3_5_9B_Abliterated",
+        "root_files": [
+            "chat_template.jinja",
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "video_preprocessor_config.json",
+            "vocab.json",
+        ],
+        "text_repo": None,
+        "text_required_files": [],
+        "gguf_repo": QWEN35_ABLITERATED_REPO,
+        "gguf_repo_subfolder": QWEN38_27B_GGUF_REPO_SUBFOLDER,
+        "text_gguf_filename": QWEN38_9B_TEXT_GGUF_FILENAME,
+        "text_gguf_q8_filename": QWEN38_9B_TEXT_GGUF_Q8_FILENAME,
+        "vision_filename": QWEN35_VISION_FILENAME,
+        "backend": "gguf",
+        "tie_word_embeddings": False,
+        "supports_mtp": True,
+        "mtp_speculative_tokens": 2,
+        "mtp_speculative_sampling_tokens": 2,
+        "mtp_speculative_confidence": 0.0,
+    },
     QWEN38_VARIANT_27B: {
         "display_name": "Qwen3.8-27B Uncensored",
         "assets_dir_name": "Qwen3_8_27B_Uncensored",
@@ -114,7 +150,9 @@ QWEN35_VARIANT_SPECS = {
         "text_gguf_filename": QWEN38_27B_TEXT_GGUF_FILENAME,
         "text_gguf_q3_filename": QWEN38_27B_TEXT_GGUF_Q3_FILENAME,
         "text_gguf_q2_filename": QWEN38_27B_TEXT_GGUF_Q2_FILENAME,
+        "text_gguf_ptq1_filename": QWEN38_27B_TEXT_GGUF_PTQ1_FILENAME,
         "text_gguf_q3_mtp_filename": QWEN38_27B_MTP_GGUF_FILENAME,
+        "text_gguf_ptq1_mtp_filename": BONSAI2_27B_MTP_GGUF_FILENAME,
         "vision_filename": QWEN38_27B_VISION_FILENAME,
         "backend": "gguf",
         "supports_mtp": True,
@@ -132,7 +170,7 @@ QWEN35_VARIANT_SPECS = {
 
 def _qwen35_variant_files(variant: str) -> list[str]:
     spec = QWEN35_VARIANT_SPECS[variant]
-    return list(spec["root_files"]) + [spec[key] for key in ("vision_filename", "text_int8_filename", "text_gguf_filename", "text_gguf_q3_filename", "text_gguf_q2_filename", "text_mtp_filename", "text_gguf_q3_mtp_filename") if key in spec]
+    return list(spec["root_files"]) + [spec[key] for key in ("vision_filename", "text_int8_filename", "text_gguf_filename", "text_gguf_q3_filename", "text_gguf_q2_filename", "text_gguf_ptq1_filename", "text_gguf_q8_filename", "text_mtp_filename", "text_gguf_q3_mtp_filename", "text_gguf_ptq1_mtp_filename") if key in spec]
 
 
 def query_prompt_enhancer_download_defs() -> list[dict[str, Any]]:
@@ -156,6 +194,12 @@ def query_prompt_enhancer_download_defs() -> list[dict[str, Any]]:
             "fileList": [_qwen35_variant_files(QWEN35_VARIANT_4B), _qwen35_variant_files(QWEN35_VARIANT_9B)],
         },
         {
+            "repoId": QWEN35_ABLITERATED_REPO,
+            "sourceFolderList": [QWEN35_VARIANT_SPECS[QWEN38_VARIANT_9B]["gguf_repo_subfolder"]],
+            "targetFolderList": [QWEN35_VARIANT_SPECS[QWEN38_VARIANT_9B]["assets_dir_name"]],
+            "fileList": [[QWEN38_9B_TEXT_GGUF_FILENAME, QWEN38_9B_TEXT_GGUF_Q8_FILENAME]],
+        },
+        {
             "repoId": QWEN38_27B_ASSETS_REPO,
             "sourceFolderList": [""],
             "targetFolderList": [QWEN35_VARIANT_SPECS[QWEN38_VARIANT_27B]["assets_dir_name"]],
@@ -164,6 +208,6 @@ def query_prompt_enhancer_download_defs() -> list[dict[str, Any]]:
         {
             "repoId": QWEN38_27B_GGUF_REPO,
             "sourceFolderList": [QWEN38_27B_GGUF_REPO_SUBFOLDER],
-            "fileList": [[QWEN38_27B_TEXT_GGUF_FILENAME, QWEN38_27B_TEXT_GGUF_Q3_FILENAME, QWEN38_27B_TEXT_GGUF_Q2_FILENAME, QWEN38_27B_MTP_GGUF_FILENAME, QWEN38_27B_VISION_FILENAME]],
+            "fileList": [[QWEN38_27B_TEXT_GGUF_FILENAME, QWEN38_27B_TEXT_GGUF_Q3_FILENAME, QWEN38_27B_TEXT_GGUF_Q2_FILENAME, QWEN38_27B_TEXT_GGUF_PTQ1_FILENAME, QWEN38_27B_MTP_GGUF_FILENAME, QWEN38_27B_VISION_FILENAME]],
         },
     ]

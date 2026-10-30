@@ -1,4 +1,6 @@
-import os
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .infos import MAGI_HELP
 from typing import Any, Dict, Tuple
 
 import torch
@@ -44,30 +46,16 @@ class family_handler:
         return {"magi_human": (62, "Magi Human")}
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-magi-human",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Magi Human LoRAs (default: {os.path.join(lora_root, 'magi_human')})",
-        )
-        parser.add_argument(
-            "--lora-dir-magi-human-distill",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains Magi Human Distill LoRAs (default: {os.path.join(lora_root, 'magi_human_distill')})",
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
+    def get_lora_dir(base_model_type):
         if base_model_type == BASE_ARCH:
-            return getattr(args, "lora_dir_magi_human", None) or os.path.join(lora_root, "magi_human")
-        return getattr(args, "lora_dir_magi_human_distill", None) or os.path.join(lora_root, "magi_human_distill")
+            return "magi_human"
+        return "magi_human_distill"
 
     @staticmethod
     def query_model_def(base_model_type: str, model_def: Dict[str, Any]):
         is_distill = base_model_type == DISTILL_ARCH
         extra_model_def = {
+            "tiny_vae_architecture": "ti2v_2_2",
             "returns_audio": True,
             "any_audio_prompt": True,
             "audio_prompt_choices": True,
@@ -125,7 +113,7 @@ class family_handler:
                 "guidance_max_phases": 2,
                 "lock_guidance_phases": True,
             })
-        return extra_model_def
+        return merge_help(extra_model_def, MAGI_HELP)
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):

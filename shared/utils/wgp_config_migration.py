@@ -1,15 +1,16 @@
-import json
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from shared.utils.config_store import write_config
 from decimal import Decimal, InvalidOperation
 
 from postprocessing.mmaudio import MMAUDIO_DEFAULT_MODE
 from postprocessing.mmaudio.audio_processor import MMAudioProcessor
-from postprocessing.seedvc.audio_processor import SeedVCProcessor
-from shared.deepy.config import DEEPY_ENABLED_KEY, DEEPY_TEMPLATE_CONFIG_MIGRATIONS
+from postprocessing.seedvc_processor.audio_processor import SeedVCProcessor
+from shared.deepy.config import DEEPY_CONTEXT_TOKENS_KEY, DEEPY_CONTEXT_TOKENS_MIN, DEEPY_ENABLED_KEY, DEEPY_TEMPLATE_CONFIG_MIGRATIONS
 
 
 LEGACY_EXTENSIONS_DEFAULTS_MIGRATED_KEY = "_extensions_defaults_migrated"
 EXTENSIONS_DEFAULTS_VERSION_KEY = "extensions_defaults_version"
-EXTENSIONS_DEFAULTS_TARGET_VERSION = Decimal("1.20")
+EXTENSIONS_DEFAULTS_TARGET_VERSION = Decimal("1.30")
 EXTENSIONS_DEFAULTS_TARGET_VERSION_TEXT = str(EXTENSIONS_DEFAULTS_TARGET_VERSION)
 INSTALLED_REMOTE_PLUGINS_KEY = "installed_remote_plugins"
 
@@ -20,6 +21,7 @@ PROMPT_ENHANCER_CHOICES = [
     ("Qwen3.5VL Abliterated 4B (recommended, captioning + uncensored text enhancement, vllm accelerated if available)", 3),
     ("Qwen3.5VL Abliterated 9B (captioning + uncensored high end text enhancement, vllm accelerated if available)", 4),
     ("Qwen3.8VL Uncensored 27B by Jonathan Coletti (highest quality, choose GGUF Q2, Q3 or Q4 below)", 5),
+    ("Qwen3.8VL Uncensored 9B (distilled from Qwen3.8, Deepy Prime in about 6.5 GB VRAM, choose GGUF Q4 or Q8 below)", 6),
 ]
 
 SEEDVC_DEFAULT_MODE = 2
@@ -90,8 +92,7 @@ def get_prompt_enhancer_default_mode() -> int:
 def _write_config(config, config_filename):
     if not config_filename:
         return
-    with open(config_filename, "w", encoding="utf-8") as writer:
-        writer.write(json.dumps(config, indent=4))
+    write_config(config, config_filename)
 
 
 def _set_missing_persistence(config, key):
@@ -210,7 +211,18 @@ def _extension_defaults_version(config) -> Decimal:
     return Decimal("1.1") if config.get(LEGACY_EXTENSIONS_DEFAULTS_MIGRATED_KEY, False) else Decimal("1.0")
 
 
-def migrate_extension_defaults(server_config, server_config_filename="") -> bool:
+def _migrate_int8_kernels(server_config) -> bool:
+    changed = False
+    if "int8_kernels" not in server_config:
+        server_config["int8_kernels"] = "auto" if _to_int(server_config.get("enable_int8_kernels", 1), 0) == 1 else "disabled"
+        changed = True
+    if "enable_int8_kernels" in server_config:
+        del server_config["enable_int8_kernels"]
+        changed = True
+    return changed
+
+
+def migrate_extension_defaults(server_config, server_config_filename="", *, workspace_root=None) -> bool:
     if not isinstance(server_config, dict):
         return False
 
@@ -265,8 +277,48 @@ def migrate_extension_defaults(server_config, server_config_filename="") -> bool
     if version < Decimal("1.20"):
         changed = _migrate_deepy_template_names(server_config) or changed
 
+    if version < Decimal("1.21"):
+        changed = _migrate_int8_kernels(server_config) or changed
+
+    if version < Decimal("1.22") and "kernel_precision" not in server_config:
+        server_config["kernel_precision"] = "fast"
+        changed = True
+
+    if version < Decimal("1.23"):
+        from shared.prompt_enhancer.config import PROMPT_ENHANCER_SPECULATIVE_DECODING_KEY, PROMPT_ENHANCER_SPECULATIVE_DECODING_DEFAULT, split_speculative_decoding, speculative_decoding_config
+        key = PROMPT_ENHANCER_SPECULATIVE_DECODING_KEY
+        server_config[key] = speculative_decoding_config(*split_speculative_decoding(server_config.get(key, PROMPT_ENHANCER_SPECULATIVE_DECODING_DEFAULT)))
+        changed = True
+
+    if version < Decimal("1.25"): # a VRAM preload per kind of output, Default (0) or Manual (a value set), Dynamic chosen later
+        preload = server_config.pop("preload_in_VRAM", 0)
+        server_config.pop("auto_preload_in_VRAM", None)
+        for output_type in ("video", "image", "audio"):
+            value = _to_int(server_config.setdefault(f"{output_type}_preload_in_VRAM", preload))
+            server_config[f"{output_type}_preload_mode"] = "manual" if value > 0 else "default"
+        changed = True
+
+    if version < Decimal("1.29") and server_config.get("compile", "") == "":
+        # Compilation off is "disabled" (1.26); 1.29 also corrects the configs that got an empty value again after 1.26, which
+        # the Configuration tab could not save.
+        server_config["compile"] = "disabled"
+        changed = True
+
+    if version < Decimal("1.30") and DEEPY_CONTEXT_TOKENS_KEY in server_config and _to_int(server_config[DEEPY_CONTEXT_TOKENS_KEY]) < DEEPY_CONTEXT_TOKENS_MIN:
+        server_config[DEEPY_CONTEXT_TOKENS_KEY] = DEEPY_CONTEXT_TOKENS_MIN  # Deepy context window: 20,480 tokens at least
+        changed = True
+
+    if workspace_root is not None and version < Decimal('1.28'):
+        # Also correct 1.27's overly broad skip of stale session lock files.
+        from shared.deepy.session_store import migrate_session_folders
+        from shared.utils.workspaces import migrate_session_references
+        blocked = migrate_session_references(workspace_root)
+        migrate_session_folders(blocked=blocked)
+
     changed = _migrate_audio_processors_config(server_config, version) or changed
     changed = _migrate_temporal_upsamplers_config(server_config) or changed
+    from postprocessing.memory import migrate_config as migrate_postprocessor_memory
+    changed = migrate_postprocessor_memory(server_config) or changed
 
     if server_config.pop(LEGACY_EXTENSIONS_DEFAULTS_MIGRATED_KEY, None) is not None:
         changed = True

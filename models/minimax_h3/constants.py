@@ -1,7 +1,12 @@
 H3_PHASE_2_NOISE_LEVEL_START_DEFAULT = 0.9035
+H3_REGENERATE_LORA = "open_h3_regenerate_2k_lora.safetensors"
 H3_AUDIO_REFINEMENT_SETTING = "audio_refinement"
 H3_AUDIO_REFINEMENT_DENOISE = 0.5
 H3_AUDIO_REFINEMENT_STEPS = 6
+
+# Retain the latent-handoff experiment for further investigation. It worsened the
+# first outpainting join; False restores pixel conditioning and 1 + 17n overlaps.
+H3_CONTROL_LATENT_CONTINUATION = False
 
 H3_MASK_MODE_SETTING = "h3_mask_mode"
 H3_MASK_MODE_SHARED_TIMESTEP = "shared_timestep"

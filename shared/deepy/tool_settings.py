@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import copy
@@ -15,26 +16,38 @@ from shared.deepy.config import (
     DEEPY_DEFAULT_EDIT_IMAGE,
     DEEPY_DEFAULT_GEN_IMAGE,
     DEEPY_DEFAULT_GEN_SONG,
+    DEEPY_DEFAULT_GEN_VIDEO_WITH_REFS,
     DEEPY_DEFAULT_GEN_SPEECH_FROM_DESCRIPTION,
     DEEPY_DEFAULT_GEN_SPEECH_FROM_SAMPLE,
     DEEPY_DEFAULT_GEN_VIDEO,
     DEEPY_DEFAULT_GEN_VIDEO_WITH_SPEECH,
+    DEEPY_DEFAULT_GEN_3D,
+    DEEPY_DEFAULT_GEN_WORLD,
+    DEEPY_DEFAULT_TEXTURE_3D,
     DEEPY_TEMPLATE_CONFIG_MIGRATIONS,
     DEEPY_TOOL_EDIT_IMAGE_KEY,
     DEEPY_TOOL_GEN_IMAGE_KEY,
     DEEPY_TOOL_GEN_SONG_KEY,
+    DEEPY_TOOL_GEN_VIDEO_WITH_REFS_KEY,
     DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY,
     DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY,
     DEEPY_TOOL_GEN_VIDEO_KEY,
     DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY,
+    DEEPY_TOOL_GEN_3D_KEY,
+    DEEPY_TOOL_GEN_WORLD_KEY,
+    DEEPY_TOOL_TEXTURE_3D_KEY,
     get_deepy_config_value,
     normalize_deepy_tool_edit_image,
     normalize_deepy_tool_gen_image,
     normalize_deepy_tool_gen_song,
+    normalize_deepy_tool_gen_video_with_refs,
     normalize_deepy_tool_gen_speech_from_description,
     normalize_deepy_tool_gen_speech_from_sample,
     normalize_deepy_tool_gen_video,
     normalize_deepy_tool_gen_video_with_speech,
+    normalize_deepy_tool_gen_3d,
+    normalize_deepy_tool_gen_world,
+    normalize_deepy_tool_texture_3d,
 )
 
 
@@ -48,41 +61,60 @@ DEFAULT_SPEECH_FROM_SAMPLE_VARIANT = DEEPY_DEFAULT_GEN_SPEECH_FROM_SAMPLE
 TOOL_DISPLAY_NAMES = {
     "gen_image": "Image Generator",
     "edit_image": "Image Editor",
-    "gen_video": "Media Generator",
+    "gen_video": "Video Generator",
     "gen_video_with_speech": "Video With Speech",
     "gen_song": "Song Generator",
+    "gen_video_with_refs": "Video Generator with Ref.",
     "gen_speech_from_description": "Speech From Description",
     "gen_speech_from_sample": "Speech From Sample",
+    "gen_world": "World Generator",
+    "gen_3d": "3D Generator",
+    "texture_3d": "3D Texturer",
 }
 _TOOL_TEMPLATE_VALIDATION_ERRORS = {
     "gen_video": "The settings should generate a video",
     "gen_video_with_speech": "The settings should generate a Video and accept an Audio Prompt",
     "gen_song": "The settings should generate music",
+    "gen_video_with_refs": "The settings should generate video using references",
     "gen_image": "The settings of the model must generate an Image",
     "edit_image": "The settings of the model must generate an Image and accept an Image Ref",
     "gen_speech_from_description": "The model should generate only an audio output",
     "gen_speech_from_sample": "The model should generate only an audio output and a sample audio ois expected",
+    "gen_world": "The settings should generate an explorable world",
+    "gen_3d": "The settings should generate a 3D asset",
+    "texture_3d": "The settings should texture a mesh",
 }
+# The template tasks, in the order of the settings pickers: a new one needs an entry here (config key, built-in default, ui_key: its field
+# in the Deepy tool settings), a display name, a validation rule and its templates folder; the settings forms, the CLI and the MCP catalog
+# follow this registry. A new task is for agents (Deepy Prime, MCP) only unless it is added to ZERO_GENERATION_TOOL_IDS.
 _TOOL_CONFIG_SPECS = {
-    "gen_image": {"key": DEEPY_TOOL_GEN_IMAGE_KEY, "default": DEEPY_DEFAULT_GEN_IMAGE, "normalize": normalize_deepy_tool_gen_image},
-    "edit_image": {"key": DEEPY_TOOL_EDIT_IMAGE_KEY, "default": DEEPY_DEFAULT_EDIT_IMAGE, "normalize": normalize_deepy_tool_edit_image},
-    "gen_video": {"key": DEEPY_TOOL_GEN_VIDEO_KEY, "default": DEEPY_DEFAULT_GEN_VIDEO, "normalize": normalize_deepy_tool_gen_video},
+    "gen_image": {"key": DEEPY_TOOL_GEN_IMAGE_KEY, "default": DEEPY_DEFAULT_GEN_IMAGE, "normalize": normalize_deepy_tool_gen_image, "ui_key": "image_generator_variant"},
+    "edit_image": {"key": DEEPY_TOOL_EDIT_IMAGE_KEY, "default": DEEPY_DEFAULT_EDIT_IMAGE, "normalize": normalize_deepy_tool_edit_image, "ui_key": "image_editor_variant"},
+    "gen_video": {"key": DEEPY_TOOL_GEN_VIDEO_KEY, "default": DEEPY_DEFAULT_GEN_VIDEO, "normalize": normalize_deepy_tool_gen_video, "ui_key": "video_generator_variant"},
     "gen_video_with_speech": {
         "key": DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY,
         "default": DEEPY_DEFAULT_GEN_VIDEO_WITH_SPEECH,
         "normalize": normalize_deepy_tool_gen_video_with_speech,
+        "ui_key": "video_with_speech_variant",
     },
-    "gen_song": {"key": DEEPY_TOOL_GEN_SONG_KEY, "default": DEEPY_DEFAULT_GEN_SONG, "normalize": normalize_deepy_tool_gen_song},
+    "gen_video_with_refs": {"key": DEEPY_TOOL_GEN_VIDEO_WITH_REFS_KEY, "default": DEEPY_DEFAULT_GEN_VIDEO_WITH_REFS, "normalize": normalize_deepy_tool_gen_video_with_refs,
+                            "ui_key": "with_refs_variant"},
+    "gen_song": {"key": DEEPY_TOOL_GEN_SONG_KEY, "default": DEEPY_DEFAULT_GEN_SONG, "normalize": normalize_deepy_tool_gen_song, "ui_key": "song_variant"},
     "gen_speech_from_description": {
         "key": DEEPY_TOOL_GEN_SPEECH_FROM_DESCRIPTION_KEY,
         "default": DEEPY_DEFAULT_GEN_SPEECH_FROM_DESCRIPTION,
         "normalize": normalize_deepy_tool_gen_speech_from_description,
+        "ui_key": "speech_from_description_variant",
     },
     "gen_speech_from_sample": {
         "key": DEEPY_TOOL_GEN_SPEECH_FROM_SAMPLE_KEY,
         "default": DEEPY_DEFAULT_GEN_SPEECH_FROM_SAMPLE,
         "normalize": normalize_deepy_tool_gen_speech_from_sample,
+        "ui_key": "speech_from_sample_variant",
     },
+    "gen_3d": {"key": DEEPY_TOOL_GEN_3D_KEY, "default": DEEPY_DEFAULT_GEN_3D, "normalize": normalize_deepy_tool_gen_3d, "ui_key": "generator_3d_variant"},
+    "texture_3d": {"key": DEEPY_TOOL_TEXTURE_3D_KEY, "default": DEEPY_DEFAULT_TEXTURE_3D, "normalize": normalize_deepy_tool_texture_3d, "ui_key": "texturer_3d_variant"},
+    "gen_world": {"key": DEEPY_TOOL_GEN_WORLD_KEY, "default": DEEPY_DEFAULT_GEN_WORLD, "normalize": normalize_deepy_tool_gen_world, "ui_key": "world_generator_variant"},
 }
 _PRESET_SOURCE_BUILTIN = "builtin"
 _PRESET_SOURCE_LINKED = "linked"
@@ -91,13 +123,20 @@ _PRESET_SOURCE_PRIORITY = {
     _PRESET_SOURCE_LINKED: 1,
 }
 _LEGACY_VARIANT_ALIASES = {
-    "edit_image": {"Qwen_Edit": DEEPY_DEFAULT_EDIT_IMAGE},
-    "gen_image": {"Z_Image_Turbo": DEEPY_DEFAULT_GEN_IMAGE},
-    "gen_video": {"ltx2_22B_distilled": DEEPY_DEFAULT_GEN_VIDEO, "LTX-2 2.3 Distilled": DEEPY_DEFAULT_GEN_VIDEO, **DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_GEN_VIDEO_KEY]},
+    "edit_image": {"Qwen_Edit": DEEPY_DEFAULT_EDIT_IMAGE, **DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_EDIT_IMAGE_KEY]},
+    "gen_image": {"Z_Image_Turbo": "Z Image Turbo", **DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_GEN_IMAGE_KEY]},
+    "gen_video": {"ltx2_22B_distilled": "LTX-2 2.3 Distilled 1.0", "LTX-2 2.3 Distilled": "LTX-2 2.3 Distilled 1.0", **DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_GEN_VIDEO_KEY]},
     "gen_video_with_speech": {"LTX-2.3 Distilled With Sound": "LTX-2.3 Distilled 1.0 With Sound", **DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_GEN_VIDEO_WITH_SPEECH_KEY]},
+    "gen_3d": DEEPY_TEMPLATE_CONFIG_MIGRATIONS[DEEPY_TOOL_GEN_3D_KEY],
 }
 _LIVE_FILE_PRESET_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 GENERATION_TOOL_IDS = tuple(_TOOL_CONFIG_SPECS.keys())
+TOOL_UI_KEYS = {tool: spec["ui_key"] for tool, spec in _TOOL_CONFIG_SPECS.items()}  # field of each task's template in the tool settings
+TOOL_CONFIG_KEYS = {tool: spec["key"] for tool, spec in _TOOL_CONFIG_SPECS.items()}  # its wgp_config key
+# Deepy Zero's tasks, in the order its tools list them (part of its schemas): the others are tasks of Deepy Prime and MCP agents only
+ZERO_GENERATION_TOOL_IDS = ("gen_image", "edit_image", "gen_video", "gen_video_with_speech", "gen_song", "gen_video_with_refs", "gen_speech_from_description",
+                            "gen_speech_from_sample")
+AGENT_TOOL_IDS = tuple(tool for tool in GENERATION_TOOL_IDS if tool not in ZERO_GENERATION_TOOL_IDS)
 
 
 def _canonical_variant(tool_name: str, variant: Any) -> str:
@@ -467,10 +506,15 @@ def validate_wangp_settings_payload_for_tool(tool_name: str, payload: dict[str, 
         "gen_video": image_mode == 0,
         "gen_video_with_speech": image_mode == 0 and accepts_audio_prompt,
         "gen_song": audio_only and isinstance(model_def, dict) and str(model_def.get("group", "") or "").strip() == "music",
+        "gen_video_with_refs": image_mode == 0 and (has_image_refs or (isinstance(model_def, dict) and model_def.get("reference_video_enabled", False))),
         "gen_image": image_mode == 1,
         "edit_image": image_mode == 1 and has_image_refs,
         "gen_speech_from_description": audio_only,
         "gen_speech_from_sample": audio_only and accepts_audio_prompt,
+        "gen_world": isinstance(model_def, dict) and bool(model_def.get("world_outputs", False)),
+        "gen_3d": isinstance(model_def, dict) and bool(model_def.get("mesh_outputs", False)),
+        # a texturing model, or a mesh model whose Texturer (temporal slot) paints its result
+        "texture_3d": isinstance(model_def, dict) and bool(model_def.get("mesh_outputs", False)) and (bool(model_def.get("mesh_texture", False)) or bool(str(payload.get("temporal_upsampling", "") or "").strip())),
     }
     return None if checks.get(lookup_name, True) else _TOOL_TEMPLATE_VALIDATION_ERRORS[lookup_name]
 
@@ -535,6 +579,11 @@ def get_default_image_generator_variant() -> str:
     return resolve_tool_variant("gen_image", configured, default_variant=DEEPY_DEFAULT_GEN_IMAGE)
 
 
+def get_default_tool_variant(tool_name: str) -> str:
+    """The configured default template of a task, its built-in default when none is configured."""
+    return resolve_tool_variant(tool_name, _get_configured_tool_variant(tool_name), default_variant=_TOOL_CONFIG_SPECS[tool_name]["default"])
+
+
 def get_default_video_generator_variant() -> str:
     configured = _get_configured_tool_variant("gen_video")
     return resolve_tool_variant("gen_video", configured, default_variant=DEEPY_DEFAULT_GEN_VIDEO)
@@ -548,6 +597,11 @@ def get_default_image_editor_variant() -> str:
 def get_default_video_with_speech_variant() -> str:
     configured = _get_configured_tool_variant("gen_video_with_speech")
     return resolve_tool_variant("gen_video_with_speech", configured, default_variant=DEEPY_DEFAULT_GEN_VIDEO_WITH_SPEECH)
+
+
+def get_default_with_refs_variant() -> str:
+    configured = _get_configured_tool_variant("gen_video_with_refs")
+    return resolve_tool_variant("gen_video_with_refs", configured, default_variant=DEEPY_DEFAULT_GEN_VIDEO_WITH_REFS)
 
 
 def get_default_song_variant() -> str:
@@ -761,13 +815,18 @@ def build_generation_task(
         if "E" not in image_prompt_types_allowed:
             raise ValueError("This preset does not support an End Image.")
         task["image_prompt_type"] = _add_unique_flags(task.get("image_prompt_type", ""), "E")
-    if has_image_refs and str(tool_name or "").strip() in {"gen_video", "gen_video_with_speech"} and "I" not in str(task.get("video_prompt_type", "") or ""):
+    if has_image_refs and str(tool_name or "").strip() in {"gen_video", "gen_video_with_speech", "gen_video_with_refs"} and "I" not in str(task.get("video_prompt_type", "") or ""):
         raise ValueError("This preset received Reference Images but its Video Prompt Type does not enable them.")
     return task
 
 
 __all__ = [
+    "AGENT_TOOL_IDS",
     "GENERATION_TOOL_IDS",
+    "TOOL_CONFIG_KEYS",
+    "TOOL_UI_KEYS",
+    "ZERO_GENERATION_TOOL_IDS",
+    "get_default_tool_variant",
     "apply_tool_loras",
     "DEFAULT_IMAGE_EDITOR_VARIANT",
     "TOOL_DISPLAY_NAMES",
@@ -779,6 +838,7 @@ __all__ = [
     "get_default_image_editor_variant",
     "get_default_image_generator_variant",
     "get_default_song_variant",
+    "get_default_with_refs_variant",
     "get_default_speech_from_description_variant",
     "get_default_speech_from_sample_variant",
     "get_default_video_generator_variant",

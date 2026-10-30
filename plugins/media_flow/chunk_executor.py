@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 import copy
@@ -176,8 +177,12 @@ class ChunkExecutor:
                 if self.active_job.get("cancel_requested"):
                     progress.write_state.stopped = True
                     break
-                settings = context.system_handler.build_queue_settings(context.process_settings, source_path=context.source_path, start_frame=actual_control_start_frame, frame_count=plan_requested_frames, target_control=context.system_target_control, seed=chunk_index, continue_cache=progress.continue_cache, audio_track_no=context.selected_audio_track)
-                settings["spatial_upsampler_parameters"] = dict(context.spatial_upsampler_parameters or {})
+                process_settings = context.process_settings
+                if not getattr(context.system_handler, "hide_prompt", False):
+                    process_settings = dict(process_settings, prompt=prompts.resolve_prompt_for_chunk(context.prompt_schedule, float(actual_done) / float(context.fps_float), context.default_prompt_text))
+                settings = context.system_handler.build_queue_settings(process_settings, source_path=context.source_path, start_frame=actual_control_start_frame, frame_count=plan_requested_frames, target_control=context.system_target_control, seed=chunk_index, continue_cache=progress.continue_cache, audio_track_no=context.selected_audio_track)
+                # the process's own values (the LTX Detail Refiner's style prompt) completed with the user's
+                settings["spatial_postprocessing_parameters"] = {**dict(settings.get("spatial_postprocessing_parameters") or {}), **dict(context.spatial_upsampler_parameters or {})}
                 self.reset_live_chunk_status(context.state)
                 job = self.api_session.submit_task(settings, callbacks=callbacks)
                 self.active_job["job"] = job
@@ -267,7 +272,9 @@ class ChunkExecutor:
                 next_overlap_frames = context.plans[chunk_index].overlap_frames if chunk_index < len(context.plans) else 0
                 leading_overlap_already_written = chunk_index == 1 and context.resumed_unique_frames > 0
                 crossfade_overlap_outputs = bool(getattr(context.system_handler, "crossfade_overlap_outputs", False))
-                blended_overlap = crossfade_video_overlap(progress.overlap_tail, video_tensor_uint8[:, :plan_overlap_frames]) if crossfade_overlap_outputs and progress.overlap_tail is not None else None
+                overlap_output_split = getattr(context.system_handler, "overlap_output_split", None)
+                split_frames = overlap_output_split(plan_overlap_frames) if callable(overlap_output_split) else None
+                blended_overlap = None if not crossfade_overlap_outputs or progress.overlap_tail is None else crossfade_video_overlap(progress.overlap_tail, video_tensor_uint8[:, :plan_overlap_frames]) if split_frames is None else torch.cat((progress.overlap_tail[:, :split_frames], video_tensor_uint8[:, split_frames:plan_overlap_frames]), dim=1)
                 source_write_start, source_write_end = system_chunk_write_range(plan_overlap_frames=plan_overlap_frames, plan_requested_frames=plan_requested_frames, next_overlap_frames=next_overlap_frames, leading_overlap_already_written=leading_overlap_already_written)
                 source_frames_to_write = source_write_end - source_write_start
                 output_write_start, output_write_end = system_chunk_output_write_range(context.system_handler, returned_frame_count, source_write_start=source_write_start, source_write_end=source_write_end, next_overlap_frames=next_overlap_frames)
@@ -332,7 +339,7 @@ class ChunkExecutor:
                 continue
 
             settings = build_task_settings(context.process_settings, is_user_process=context.is_user_process)
-            settings["spatial_upsampler_parameters"] = dict(context.spatial_upsampler_parameters or {})
+            settings["spatial_postprocessing_parameters"] = {**dict(settings.get("spatial_postprocessing_parameters") or {}), **dict(context.spatial_upsampler_parameters or {})}
             chunk_prompt_start_seconds = float(actual_done) / float(context.fps_float)
             settings["model_type"] = context.model_type
             settings["prompt"] = prompts.resolve_prompt_for_chunk(context.prompt_schedule, chunk_prompt_start_seconds, context.default_prompt_text)

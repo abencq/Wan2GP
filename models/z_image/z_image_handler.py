@@ -1,4 +1,6 @@
-import os
+# Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .infos import z_image_help
 import torch
 from shared.utils.hf import build_hf_url
 
@@ -10,11 +12,16 @@ class family_handler:
         guidance_max_phases = 1 if z_image_base else 0
         extra_model_def = {
             "image_outputs": True,
+            "dtype": "bf16",  # in FP16 the activations overflow from the first refiner block: black or prompt-less images
+            "sage_v_scaling": z_image_base,  # v overflows the fp16 P.V sums of the SageAttention Triton kernels
+            "device_explicit": base_model_type != "z_image_control",
+            "cuda_graphs": [] if base_model_type in ("z_image_control", "z_image_control2", "z_image_control2_1") else ["transformer"],  # control blocks run control layers inside them
             "guidance_max_phases": guidance_max_phases,
             "fit_into_canvas_image_refs": 0,
             "profiles_dir": [],
             "vae_upsamplers": {"flux_vae_pid": [1, 2]},
             "excluded_spatial_upsamplers": ["flux_pid"],
+            "tiny_vae_architecture": "flux",
         }
         text_encoder_folder = "Qwen3"
         extra_model_def["text_encoder_URLs"] = [
@@ -57,7 +64,14 @@ class family_handler:
          
         extra_model_def["flow_shift"] = z_image_base
         extra_model_def["NAG"] = base_model_type in ["z_image"]
-        return extra_model_def
+        if base_model_type in ("z_image", "z_image_base"):
+            extra_model_def.update({
+                "deepy_infos": "Text-to-image: `prompt` describes the image; `resolution` sets its dimensions.",
+                "deepy_prompt_infos": "Describe the finished image: subject/action, composition, setting, lighting and style. Put key details first and exact visible text in quotes. English and Chinese are supported.",
+                "infos": "Generate an image from the Text Prompt (`prompt`) at the selected resolution. The prompt supplies the subjects, composition, setting and visual style together.",
+                "prompt_infos": 'Write a description of the finished image in natural language: subject and action, composition, background, lighting, colors and medium. For example: "A man in a red coat stands beside a rainy bus stop, reflected neon on the pavement, documentary photograph." Put important details first and spell visible text exactly in quotes. English and Chinese descriptions are supported.',
+            })
+        return merge_help(extra_model_def, z_image_help(base_model_type))
 
     @staticmethod
     def query_supported_types():
@@ -84,17 +98,8 @@ class family_handler:
         return {"z_image": (1120, "Z-Image") }
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-z-image",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains z image settings (default: {os.path.join(lora_root, 'z_image')})"
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
-        return getattr(args, "lora_dir_z_image", None) or os.path.join(lora_root, "z_image")
+    def get_lora_dir(base_model_type):
+        return "z_image"
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):

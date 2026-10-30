@@ -6,7 +6,7 @@ import torch
 from einops import rearrange
 from transformers import AutoImageProcessor, Gemma3ForConditionalGeneration, Gemma3Processor, Gemma3ForCausalLM
 
-from mmgp import offload
+from mmgp import offload, runtime
 from ....loader.module_ops import ModuleOps
 from ..embeddings_connector import Embeddings1DConnector
 from ..feature_extractor import GemmaFeaturesExtractorProjLinear
@@ -53,7 +53,10 @@ class GemmaTextEncoderModelBase(torch.nn.Module):
         input_ids = torch.tensor([[t[0] for t in token_pairs]], device=self.model.device)
         attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=self.model.device)
         language_model = self.model.model if hasattr(self.model, "model") else self.model
-        outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=False)
+        from shared.utils.phase_progress import text_encoding_progress
+        layers = self.model.get_decoder().layers if isinstance(self.model, Gemma3ForConditionalGeneration) else language_model.layers
+        with text_encoding_progress(layers, next_status="Processing Text Embeddings"):
+            outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=False)
         return RawTextEmbeddings(outputs.hidden_states, attention_mask, padding_side)
 
     def _run_feature_extractor(
@@ -469,6 +472,9 @@ def build_gemma_text_encoder(
         default_dtype=default_dtype,
         ignore_unused_weights=gemma4,
     )
+    # the 1.9 GB token table stays in RAM: mmgp looks up the prompt's rows on the CPU; its tied head never runs
+    runtime.lookup_on_cpu(text_encoder.model.model.embed_tokens)
+    runtime.unused(text_encoder.model.lm_head)
     text_encoder.tokenizer = LTXVGemmaTokenizer(tokenizer_path, 1024, fix_mistral_regex=gemma4)
     text_encoder._gemma_root = side_files_root
 

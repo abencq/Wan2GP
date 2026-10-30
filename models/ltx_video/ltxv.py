@@ -1,4 +1,5 @@
-from mmgp import offload
+from shared.utils.phase_progress import generation_progress
+from mmgp import offload, runtime
 import argparse
 import os
 import random
@@ -216,6 +217,7 @@ class LTXV:
         # offload.save_model(text_encoder, "T5_xxl_1.1_enc_quanto_bf16_int8.safetensors", do_quantize= True, config_file_path="T5_config.json")
 
         text_encoder = offload.fast_load_transformers_model(text_encoder_filepath, writable_tensors=False)
+        runtime.lookup_on_cpu(text_encoder.get_input_embeddings())  # the token table stays in RAM: mmgp looks up the prompt's rows on the CPU
         patchifier = SymmetricPatchifier(patch_size=1)
         text_encoder_folder = self.model_def.get("text_encoder_folder")
         if text_encoder_folder:
@@ -261,6 +263,7 @@ class LTXV:
         self.vae = vae
         # return pipeline, pipe
 
+    @generation_progress
     def generate(
         self,
         input_prompt: str,
@@ -283,6 +286,7 @@ class LTXV:
         device: Optional[str] = None,
         VAE_tile_size = None,
         apg_switch = 0,
+        set_progress_status=None,
         **kwargs,
     ):
 

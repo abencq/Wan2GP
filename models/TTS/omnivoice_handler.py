@@ -1,19 +1,12 @@
-import json
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+from models.help_shared import merge_help
+from .help import OMNIVOICE_HELP
 import os
 import re
 
 import torch
-import whisper
-from accelerate import init_empty_weights
 
-from mmgp import offload
-
-from shared.deepy.transcription import (
-    WHISPER_MEDIUM_CONFIG_FILENAME,
-    WHISPER_MEDIUM_FOLDER,
-    WHISPER_MEDIUM_REPO,
-    WHISPER_MEDIUM_WEIGHTS_FILENAME,
-)
+from shared.deepy.assets import whisper_download_def
 from shared.mps import mps_device_or
 from shared.utils import files_locator as fl
 
@@ -50,10 +43,6 @@ OMNIVOICE_AUDIO_TOKENIZER_FILES = [
     "preprocessor_config.json",
     OMNIVOICE_AUDIO_TOKENIZER_WEIGHTS,
 ]
-OMNIVOICE_WHISPER_FILES = [
-    WHISPER_MEDIUM_CONFIG_FILENAME,
-    WHISPER_MEDIUM_WEIGHTS_FILENAME,
-]
 OMNIVOICE_LANGUAGE_CHOICES = [
     ("Auto", "auto"),
     ("English", "english"),
@@ -71,19 +60,21 @@ OMNIVOICE_LANGUAGE_CHOICES = [
 ]
 OMNIVOICE_DURATION_SLIDER = {
     "label": "Max duration (seconds, 0 = auto)",
+    "name": "Max Duration",
     "min": 0,
     "max": 600,
     "increment": 1,
     "default": 0,
 }
 OMNIVOICE_AUDIO_PROMPT_TYPE_SOURCES = {
-    "selection": ["", "A", "AB"],
+    "selection": ["", "A", "AB", "ABD"],
     "labels": {
         "": "Voice design",
         "A": "Voice cloning (1 reference audio)",
         "AB": "Voice cloning dialogue (Speaker 1 and Speaker 2)",
+        "ABD": "Voice cloning dialogue (Speakers 1, 2 and 3)",
     },
-    "letters_filter": "AB",
+    "letters_filter": "ABD",
     "default": "",
 }
 OMNIVOICE_AUDIO_PROMPT_TYPE_CUSTOM_OPTION = {
@@ -185,43 +176,16 @@ The transcript must describe the reference audio, not the target prompt. For bes
 
 If this field contains only valid voice tags such as `female` or `male, british accent`, WanGP treats it as a voice instruction rather than a reference transcript.
 
-### Two-speaker cloning
+### Two- or three-speaker cloning
 
-Upload both reference voices and provide transcripts like this, or leave blank for Whisper transcription:
+Upload the two or three reference voices and provide transcripts like this, or leave blank for Whisper transcription:
 
 ```text
 Speaker 1: Exact words spoken in the first reference audio.
 Speaker 2: Exact words spoken in the second reference audio.
+Speaker 3: Exact words spoken in the third reference audio.
 ```
 """
-
-
-def _detach_whisper_alignment_heads(whisper_model):
-    alignment_heads = getattr(whisper_model, "alignment_heads", None)
-    if alignment_heads is not None and getattr(alignment_heads, "layout", None) == torch.sparse_coo:
-        whisper_model._buffers.pop("alignment_heads", None)
-        object.__setattr__(whisper_model, "alignment_heads", alignment_heads)
-
-
-def _load_omnivoice_whisper_medium():
-    model_dir = fl.locate_folder(WHISPER_MEDIUM_FOLDER)
-    config_path = os.path.join(model_dir, WHISPER_MEDIUM_CONFIG_FILENAME)
-    weights_path = fl.locate_file(os.path.join(WHISPER_MEDIUM_FOLDER, WHISPER_MEDIUM_WEIGHTS_FILENAME))
-    with open(config_path, "r", encoding="utf-8") as reader:
-        config = json.load(reader)
-    dims = whisper.model.ModelDimensions(**dict(config.get("dims", {}) or {}))
-    with init_empty_weights(include_buffers=False):
-        whisper_model = whisper.model.Whisper(dims)
-    whisper_model._buffers.pop("alignment_heads", None)
-    offload.load_model_data(whisper_model, weights_path, default_dtype=torch.float32, writable_tensors=False)
-    whisper_model.to(dtype=torch.float32)
-    alignment_heads = str(config.get("alignment_heads", "") or "").strip()
-    if len(alignment_heads) > 0:
-        whisper_model.set_alignment_heads(alignment_heads.encode("ascii"))
-    _detach_whisper_alignment_heads(whisper_model)
-    whisper_model.eval().requires_grad_(False)
-    whisper_model._model_dtype = torch.float32
-    return whisper_model
 
 
 def _get_omnivoice_model_def():
@@ -257,6 +221,7 @@ def _get_omnivoice_model_def():
         "custom_settings": [one.copy() for one in OMNIVOICE_CUSTOM_SETTINGS],
         "audio_guide_label": "Speaker 1 reference voice",
         "audio_guide2_label": "Speaker 2 reference voice",
+        "audio_guide3_label": "Speaker 3 reference voice",
         "text_prompt_enhancer_instructions": TTS_MONOLOGUE_PROMPT,
         "text_prompt_enhancer_instructions1": TTS_QWEN3_DIALOGUE_PROMPT,
         "text_prompt_enhancer_max_tokens": 512,
@@ -281,11 +246,7 @@ def _get_omnivoice_download_def():
             "sourceFolderList": [OMNIVOICE_ASSET_DIR, OMNIVOICE_AUDIO_TOKENIZER_DIR],
             "fileList": [OMNIVOICE_TOKENIZER_FILES, OMNIVOICE_AUDIO_TOKENIZER_FILES],
         },
-        {
-            "repoId": WHISPER_MEDIUM_REPO,
-            "sourceFolderList": [WHISPER_MEDIUM_FOLDER],
-            "fileList": [OMNIVOICE_WHISPER_FILES],
-        }
+        whisper_download_def(),
     ]
 
 
@@ -307,21 +268,12 @@ class family_handler:
         return {"tts": (2200, "TTS")}
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-omnivoice",
-            type=str,
-            default=None,
-            help=f"Path to a directory that contains OmniVoice settings (default: {os.path.join(lora_root, 'omnivoice')})",
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
-        return getattr(args, "lora_dir_omnivoice", None) or os.path.join(lora_root, "omnivoice")
+    def get_lora_dir(base_model_type):
+        return "omnivoice"
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
-        return _get_omnivoice_model_def()
+        return merge_help({**_get_omnivoice_model_def(), "device_explicit": True}, OMNIVOICE_HELP)
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
@@ -342,7 +294,6 @@ class family_handler:
         submodel_no_list=None,
         text_encoder_filename=None,
         profile=0,
-        lm_decoder_engine="legacy",
         **kwargs,
     ):
         from .omnivoice.pipeline import OmniVoicePipeline
@@ -354,12 +305,9 @@ class family_handler:
             device=mps_device_or(torch.device("cpu")),
             dtype=dtype or torch.bfloat16,
         )
-        whisper_model = _load_omnivoice_whisper_medium()
-        pipeline.set_whisper_model(whisper_model)
         pipe = {
             "transformer": pipeline.model,
             "audio_tokenizer": pipeline.audio_tokenizer,
-            "whisper": whisper_model,
         }
 
         if save_quantized and weights_path:
@@ -414,16 +362,17 @@ class family_handler:
         if "A" in audio_prompt_type and "B" not in audio_prompt_type and inputs.get("audio_guide") is None:
             return "OmniVoice voice cloning requires a reference audio file."
         if "B" in audio_prompt_type:
-            if inputs.get("audio_guide") is None or inputs.get("audio_guide2") is None:
-                return "OmniVoice dialogue mode requires two reference audio files."
+            speaker_count = 3 if "D" in audio_prompt_type else 2
+            if any(inputs.get(key) is None for key in ("audio_guide", "audio_guide2", "audio_guide3")[:speaker_count]):
+                return f"OmniVoice dialogue mode requires {speaker_count} reference audio files."
             speaker_matches = list(re.finditer(r"Speaker\s*(\d+)\s*:", text, flags=re.IGNORECASE))
             if not speaker_matches:
-                return "OmniVoice dialogue mode requires prompt lines using Speaker 1: and Speaker 2:."
+                return f"OmniVoice dialogue mode requires prompt lines using Speaker 1: to Speaker {speaker_count}:."
             speaker_ids = sorted({int(m.group(1)) for m in speaker_matches})
-            if len(speaker_ids) != 2:
-                return "OmniVoice dialogue mode requires exactly two speaker IDs. Use Speaker 1: and Speaker 2:."
+            if len(speaker_ids) != speaker_count:
+                return f"OmniVoice dialogue mode requires exactly {speaker_count} speaker IDs. Use Speaker 1: to Speaker {speaker_count}:."
         elif has_speaker_syntax:
-            return "Speaker-tag dialogue requires OmniVoice two-speaker mode."
+            return "Speaker-tag dialogue requires an OmniVoice dialogue mode."
         return None
 
     @staticmethod

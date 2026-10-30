@@ -1,4 +1,5 @@
 # Copyright Alibaba Inc. All Rights Reserved.
+# Modifications Copyright (c) 2025-2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 
@@ -8,6 +9,10 @@ import gc, torch
 from shared.utils import files_locator as fl 
 
 def parse_audio(audio_path, start_frame, num_frames, fps = 23, device = "cuda"):
+    from models.wan.fantasytalking.assets import query_download_def
+    from shared.utils.download import process_files_def_if_needed
+
+    process_files_def_if_needed(query_download_def())
     fantasytalking = FantasyTalkingAudioConditionModel(None, 768, 2048).to(device)
     from mmgp import offload
     from accelerate import init_empty_weights

@@ -1,9 +1,11 @@
+from shared.utils.phase_progress import text_encoding_progress
 import math
 from typing import Callable, Literal
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
@@ -52,25 +54,26 @@ def get_noise(
 
 
 def prepare_prompt(t5: HFEmbedder, clip: HFEmbedder, bs: int, prompt: str | list[str], neg: bool = False, device: str = "cuda") -> dict[str, Tensor]:
-    if bs == 1 and not isinstance(prompt, str):
-        bs = len(prompt)
+    with text_encoding_progress(list(t5.hf_module.encoder.block) + list(clip.hf_module.text_model.encoder.layers), prompt_count=1 if isinstance(prompt, str) else len(prompt)):
+        if bs == 1 and not isinstance(prompt, str):
+            bs = len(prompt)
 
-    if isinstance(prompt, str):
-        prompt = [prompt]
-    txt = t5(prompt)
-    if txt.shape[0] == 1 and bs > 1:
-        txt = repeat(txt, "1 ... -> bs ...", bs=bs)
-    txt_ids = torch.zeros(bs, txt.shape[1], 3)
+        if isinstance(prompt, str):
+            prompt = [prompt]
+        txt = t5(prompt)
+        if txt.shape[0] == 1 and bs > 1:
+            txt = repeat(txt, "1 ... -> bs ...", bs=bs)
+        txt_ids = torch.zeros(bs, txt.shape[1], 3, device=device)
 
-    vec = clip(prompt)
-    if vec.shape[0] == 1 and bs > 1:
-        vec = repeat(vec, "1 ... -> bs ...", bs=bs)
+        vec = clip(prompt)
+        if vec.shape[0] == 1 and bs > 1:
+            vec = repeat(vec, "1 ... -> bs ...", bs=bs)
 
-    return {
-        "neg_txt" if neg else "txt": txt.to(device),
-        "neg_txt_ids" if neg else "txt_ids": txt_ids.to(device),
-        "neg_vec" if neg else "vec": vec.to(device),
-    }
+        return {
+            "neg_txt" if neg else "txt": txt.to(device),
+            "neg_txt_ids" if neg else "txt_ids": txt_ids.to(device),
+            "neg_vec" if neg else "vec": vec.to(device),
+        }
 
 
 def prepare_img(img: Tensor, patch_size: int = 2) -> dict[str, Tensor]:
@@ -80,9 +83,9 @@ def prepare_img(img: Tensor, patch_size: int = 2) -> dict[str, Tensor]:
     if img.shape[0] == 1 and bs > 1:
         img = repeat(img, "1 ... -> bs ...", bs=bs)
 
-    img_ids = torch.zeros(h // patch_size, w // patch_size, 3)
-    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // patch_size)[:, None]
-    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // patch_size)[None, :]
+    img_ids = torch.zeros(h // patch_size, w // patch_size, 3, device=img.device)
+    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // patch_size, device=img.device)[:, None]
+    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // patch_size, device=img.device)[None, :]
     img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
 
     return {
@@ -118,9 +121,9 @@ def prepare_redux(
     if img.shape[0] == 1 and bs > 1:
         img = repeat(img, "1 ... -> bs ...", bs=bs)
 
-    img_ids = torch.zeros(h // 2, w // 2, 3)
-    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
-    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+    img_ids = torch.zeros(h // 2, w // 2, 3, device=img.device)
+    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2, device=img.device)[:, None]
+    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2, device=img.device)[None, :]
     img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
 
     if isinstance(prompt, str):
@@ -129,7 +132,7 @@ def prepare_redux(
     txt = torch.cat((txt, img_cond.to(txt)), dim=-2)
     if txt.shape[0] == 1 and bs > 1:
         txt = repeat(txt, "1 ... -> bs ...", bs=bs)
-    txt_ids = torch.zeros(bs, txt.shape[1], 3)
+    txt_ids = torch.zeros(bs, txt.shape[1], 3, device=txt.device)
 
     vec = clip(prompt)
     if vec.shape[0] == 1 and bs > 1:
@@ -218,10 +221,10 @@ def prepare_kontext(
 
         # image ids are the same as base image with the first dimension set to 1
         # instead of 0
-        img_cond_ids = torch.zeros(height // 2, width // 2, 3)
+        img_cond_ids = torch.zeros(height // 2, width // 2, 3, device=img_cond_latents.device)
         img_cond_ids[..., 0] = 1
-        img_cond_ids[..., 1] = img_cond_ids[..., 1] + torch.arange(height // 2)[:, None] + height_offset
-        img_cond_ids[..., 2] = img_cond_ids[..., 2] + torch.arange(width // 2)[None, :] + width_offset
+        img_cond_ids[..., 1] = img_cond_ids[..., 1] + torch.arange(height // 2, device=img_cond_latents.device)[:, None] + height_offset
+        img_cond_ids[..., 2] = img_cond_ids[..., 2] + torch.arange(width // 2, device=img_cond_latents.device)[None, :] + width_offset
         img_cond_ids = repeat(img_cond_ids, "h w c -> b (h w) c", b=bs)
         height_offset +=  height // 2 
         width_offset +=  width // 2
@@ -275,14 +278,14 @@ def generalized_time_snr_shift(t: Tensor, mu: float, sigma: float) -> Tensor:
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
-def get_schedule_flux2(num_steps: int, image_seq_len: int) -> list[float]:
+def get_schedule_flux2(num_steps: int, image_seq_len: int, device: torch.device) -> list[float]:
     mu = compute_empirical_mu(image_seq_len, num_steps)
-    timesteps = torch.linspace(1, 0, num_steps + 1)
+    timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
     timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
     return timesteps.tolist()
 
 
-def get_schedule_piflux2(num_steps: int, image_seq_len: int) -> list[float]:
+def get_schedule_piflux2(num_steps: int, image_seq_len: int, device: torch.device) -> list[float]:
     """
     pi-FLUX.2 FlowMapSDE schedule with shift=3.2 and final_step_size_scale=0.5.
     """
@@ -292,10 +295,10 @@ def get_schedule_piflux2(num_steps: int, image_seq_len: int) -> list[float]:
     final_step_size_scale = 0.5
     end = (final_step_size_scale - 1.0) / (num_steps + final_step_size_scale - 1.0)
     step = (end - 1.0) / num_steps
-    raw_timesteps = 1.0 + step * torch.arange(num_steps, dtype=torch.float32)
+    raw_timesteps = 1.0 + step * torch.arange(num_steps, dtype=torch.float32, device=device)
     raw_timesteps = raw_timesteps.clamp(min=0)
     sigmas = shift * raw_timesteps / (1 + (shift - 1) * raw_timesteps)
-    sigmas = torch.cat([sigmas, torch.zeros(1, dtype=sigmas.dtype)])
+    sigmas = torch.cat([sigmas, sigmas.new_zeros(1)])
     return sigmas.tolist()
 
 
@@ -496,9 +499,10 @@ def get_schedule(
     base_shift: float = 0.5,
     max_shift: float = 1.15,
     shift: bool = True,
+    device: torch.device = None,
 ) -> list[float]:
     # extra step for zero
-    timesteps = torch.linspace(1, 0, num_steps + 1)
+    timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
 
     # shifting the schedule to favor high timesteps for higher signal images
     if shift:
@@ -552,6 +556,7 @@ def denoise(
     piflow_substeps: int = 128,
     piflow_generator: torch.Generator | None = None,
     piflow_gm_temperature: float | None = None,
+    kv_cache=None,
 ):
 
     kwargs = {
@@ -563,9 +568,6 @@ def denoise(
     }
     if NAG is not None:
         kwargs["NAG"] = NAG
-
-    if callback != None:
-        callback(-1, None, True)
 
     original_timesteps = timesteps
     is_piflow = getattr(model, "piflow", False)
@@ -614,7 +616,7 @@ def denoise(
                         img_cond_seq = img_cond_seq[:, base_len:]
                         if img_cond_seq_ids is not None:
                             img_cond_seq_ids = img_cond_seq_ids[:, base_len:]
-            from shared.inpainting.lanpaint import LanPaint
+            from shared.lanpaint import LanPaint
             lanpaint_steps = {2: 2, 3: 5, 4: 10, 5: 15}.get(model_mode_int, 5)
             lanpaint_proc = LanPaint(NSteps=lanpaint_steps)
             denoising_strength = 1.0
@@ -644,10 +646,9 @@ def denoise(
         piflow_spatial_w = int(base_img_ids[..., 2].max().item() + 1)
 
     updated_num_steps= len(timesteps) -1
-    if callback != None:
+    if loras_slists is not None:
         from shared.utils.loras_mutipliers import update_loras_slists
         update_loras_slists(model, loras_slists, len(original_timesteps))
-        callback(-1, None, True, override_num_inference_steps = updated_num_steps)
     from mmgp import offload
     # this is ignored for schnell
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
@@ -660,8 +661,15 @@ def denoise(
             nfe = len(timesteps) - 1
             piflow_gm_temperature = min(max(0.1 * (nfe - 1), 0.0), 1.0)
 
-    for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+    dynamic_loras = loras_slists is not None and any(isinstance(value, list) or value != loras_slists["phase1"][index]
+        for phase in ("phase1", "phase2", "phase3") for index, value in enumerate(loras_slists[phase]))
+    if callback is not None:
+        callback(-1, None, True, override_num_inference_steps=updated_num_steps)
+    for i, (t_curr, t_prev) in enumerate(tqdm(zip(timesteps[:-1], timesteps[1:]), total=updated_num_steps, desc="Denoising", mininterval=1 / 3)):
         offload.set_step_no_for_lora(model, first_step  + i)
+        if kv_cache is not None and dynamic_loras and i > 0:
+            for cache in kv_cache:
+                cache.clear(keep_ring=True)
         if pipeline._interrupt:
             return None
 
@@ -677,8 +685,11 @@ def denoise(
             if img_cond is not None:
                 img_input = torch.cat((img_input, img_cond), dim=-1)
             if img_cond_seq is not None:
-                img_input = torch.cat((img_input, img_cond_seq), dim=1)
-                img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
+                if kv_cache is None:
+                    img_input = torch.cat((img_input, img_cond_seq), dim=1)
+                    img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
+                else:
+                    kwargs.update(reference_latents=img_cond_seq, reference_ids=img_cond_seq_ids, kv_cache=kv_cache)
             if not joint_pass or cfg_scale == 1:
                 noise_pred = model(
                     img=img_input,
@@ -853,9 +864,9 @@ def prepare_multi_ip(
     if img.shape[0] == 1 and bs > 1:
         img = repeat(img, "1 ... -> bs ...", bs=bs)
 
-    img_ids = torch.zeros(h // patch_size, w // patch_size, 3)
-    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // patch_size)[:, None]
-    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // patch_size)[None, :]
+    img_ids = torch.zeros(h // patch_size, w // patch_size, 3, device=img.device)
+    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // patch_size, device=img.device)[:, None]
+    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // patch_size, device=img.device)[None, :]
     img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
     img_cond_seq = img_cond_seq_ids = None
     if conditions_zero_start:
@@ -869,16 +880,16 @@ def prepare_multi_ip(
         )
         if ref_img.shape[0] == 1 and bs > 1:
             ref_img = repeat(ref_img, "1 ... -> bs ...", bs=bs)
-        ref_img_ids1 = torch.zeros(ref_h1 // 2, ref_w1 // 2, 3)
+        ref_img_ids1 = torch.zeros(ref_h1 // 2, ref_w1 // 2, 3, device=ref_img.device)
         if set_cond_index:
             ref_img_ids1[..., 0] = cond_no + 1
         h_offset = pe_shift_h if pe in {"d", "h"} else 0
         w_offset = pe_shift_w if pe in {"d", "w"} else 0
         ref_img_ids1[..., 1] = (
-            ref_img_ids1[..., 1] + torch.arange(ref_h1 // 2)[:, None] + h_offset
+            ref_img_ids1[..., 1] + torch.arange(ref_h1 // 2, device=ref_img.device)[:, None] + h_offset
         )
         ref_img_ids1[..., 2] = (
-            ref_img_ids1[..., 2] + torch.arange(ref_w1 // 2)[None, :] + w_offset
+            ref_img_ids1[..., 2] + torch.arange(ref_w1 // 2, device=ref_img.device)[None, :] + w_offset
         )
         ref_img_ids1 = repeat(ref_img_ids1, "h w c -> b (h w) c", b=bs)
 

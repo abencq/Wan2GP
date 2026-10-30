@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from shared.utils.phase_progress import vae_decoding_progress, text_encoding_progress, generation_progress
 import math
 import os
 
@@ -9,7 +10,7 @@ from transformers import AutoTokenizer
 from transformers.masking_utils import create_causal_mask
 from tqdm import tqdm
 
-from mmgp import offload
+from mmgp import offload, runtime
 from shared.utils import files_locator as fl
 
 from models.flux.modules.autoencoder_flux2 import AutoencoderKLFlux2, AutoEncoderParamsFlux2
@@ -134,6 +135,7 @@ def _load_text_encoder(filename: str, config_path: str, dtype: torch.dtype) -> I
         text_encoder = Ideogram4TextEncoder(config)
     text_encoder.language_model.rotary_emb.reset_inv_freq()
     offload.load_model_data(text_encoder.language_model, filename, modelPrefix="language_model", writable_tensors=False, default_dtype=dtype)
+    runtime.lookup_on_cpu(text_encoder.language_model.embed_tokens)  # the 1.2 GB token table stays in RAM: mmgp looks up the prompt's rows on the CPU
     text_encoder.eval().requires_grad_(False)
     return text_encoder
 
@@ -192,23 +194,23 @@ class Ideogram4WanPipeline:
         max_text_tokens = max(num_text for _, num_text in tokenized)
         total_seq_len = max_text_tokens + num_image_tokens
 
-        h_idx = torch.arange(grid_h).view(-1, 1).expand(grid_h, grid_w).reshape(-1)
-        w_idx = torch.arange(grid_w).view(1, -1).expand(grid_h, grid_w).reshape(-1)
+        h_idx = torch.arange(grid_h, device="cpu").view(-1, 1).expand(grid_h, grid_w).reshape(-1)
+        w_idx = torch.arange(grid_w, device="cpu").view(1, -1).expand(grid_h, grid_w).reshape(-1)
         t_idx = torch.zeros_like(h_idx)
         image_pos = torch.stack([t_idx, h_idx, w_idx], dim=1) + IMAGE_POSITION_OFFSET
 
-        token_ids = torch.zeros(batch_size, max_text_tokens, dtype=torch.long)
-        text_position_ids = torch.zeros(batch_size, max_text_tokens, 3, dtype=torch.long)
-        position_ids = torch.zeros(batch_size, total_seq_len, 3, dtype=torch.long)
-        segment_ids = torch.full((batch_size, total_seq_len), SEQUENCE_PADDING_INDICATOR, dtype=torch.long)
-        indicator = torch.zeros(batch_size, total_seq_len, dtype=torch.long)
+        token_ids = torch.zeros(batch_size, max_text_tokens, dtype=torch.long, device="cpu")
+        text_position_ids = torch.zeros(batch_size, max_text_tokens, 3, dtype=torch.long, device="cpu")
+        position_ids = torch.zeros(batch_size, total_seq_len, 3, dtype=torch.long, device="cpu")
+        segment_ids = torch.full((batch_size, total_seq_len), SEQUENCE_PADDING_INDICATOR, dtype=torch.long, device="cpu")
+        indicator = torch.zeros(batch_size, total_seq_len, dtype=torch.long, device="cpu")
 
         for batch_idx, (tokens, num_text) in enumerate(tokenized):
             pad_len = max_text_tokens - num_text
             total_unpadded = num_text + num_image_tokens
             offset = pad_len
             token_ids[batch_idx, offset:offset + num_text] = tokens
-            text_pos = torch.arange(num_text)
+            text_pos = torch.arange(num_text, device="cpu")
             text_pos_3d = torch.stack([text_pos, text_pos, text_pos], dim=1)
             text_position_ids[batch_idx, offset:offset + num_text] = text_pos_3d
             position_ids[batch_idx, offset:offset + num_text] = text_pos_3d
@@ -222,7 +224,8 @@ class Ideogram4WanPipeline:
             "token_ids": token_ids.to(device),
             "text_position_ids": text_position_ids.to(device),
             "position_ids": position_ids.to(device),
-            "segment_ids": segment_ids.to(device),
+            # a key mask only with padding (prompts of different lengths): all True otherwise, and attention without a mask is faster
+            "segment_ids": segment_ids.to(device) if (segment_ids == SEQUENCE_PADDING_INDICATOR).any() else None,
             "indicator": indicator.to(device),
             "num_image_tokens": num_image_tokens,
             "grid_h": grid_h,
@@ -253,19 +256,20 @@ class Ideogram4WanPipeline:
             tap_layers = set(QWEN3_VL_ACTIVATION_LAYERS)
             captured = {}
             hidden_states = inputs_embeds
-            for layer_idx, decoder_layer in enumerate(language_model.layers):
-                hidden_states = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=text_position_ids,
-                    past_key_values=None,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                )
-                if layer_idx in tap_layers:
-                    captured[layer_idx] = hidden_states.clone()
-                if self._interrupt:
-                    return None
+            with text_encoding_progress(language_model.layers, prompt_count=token_ids.shape[0]):
+                for layer_idx, decoder_layer in enumerate(language_model.layers):
+                    hidden_states = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=text_position_ids,
+                        past_key_values=None,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                    )
+                    if layer_idx in tap_layers:
+                        captured[layer_idx] = hidden_states.clone()
+                    if self._interrupt:
+                        return None
         del hidden_states, inputs_embeds, position_embeddings, causal_mask, position_ids, mrope_position_ids, cache_position, text_position_ids
         first = captured[QWEN3_VL_ACTIVATION_LAYERS[0]]
         batch_size, seq_len, hidden_size = first.shape
@@ -281,7 +285,8 @@ class Ideogram4WanPipeline:
     def _decode_image(self, z: torch.Tensor, grid_h: int, grid_w: int) -> torch.Tensor:
         z = self._unpack_vae_latents(z, grid_h, grid_w)
         vae_dtype = next(self.autoencoder.decoder.parameters()).dtype
-        return self.autoencoder.decoder(z.to(vae_dtype)).float().clamp(-1.0, 1.0)
+        with vae_decoding_progress(1, self.autoencoder.decoder):
+            return self.autoencoder.decoder(z.to(vae_dtype)).float().clamp(-1.0, 1.0)
 
     def _decode(self, z: torch.Tensor, grid_h: int, grid_w: int) -> torch.Tensor:
         return self._decode_image(z, grid_h, grid_w).cpu().transpose(0, 1)
@@ -344,7 +349,7 @@ class Ideogram4WanPipeline:
             raise ValueError(f"Unsupported Ideogram 4 sampler '{sample_solver}'.")
         device = self.runtime_device
         schedule = get_schedule_for_resolution((height, width), known_mean=mu, std=std)
-        step_intervals = make_step_intervals(num_steps).to(device)
+        step_intervals = make_step_intervals(num_steps, device)
         time_points = schedule(step_intervals).to(device)
         sigma_points = 1.0 - time_points
         phase_switch_step = num_steps
@@ -389,7 +394,7 @@ class Ideogram4WanPipeline:
 
         if self.unconditional_transformer is not None:
             neg_position_ids = inputs["position_ids"][:, max_text_tokens:]
-            neg_segment_ids = inputs["segment_ids"][:, max_text_tokens:]
+            neg_segment_ids = None  # image tokens are never padded
             neg_indicator = inputs["indicator"][:, max_text_tokens:]
             neg_llm_features = llm_features.new_empty(batch_size, 0, llm_features.shape[-1])
 
@@ -479,11 +484,11 @@ class Ideogram4WanPipeline:
             if callable(set_progress_status):
                 progress_label = getattr(vae_upsampler, "progress_label", "VAE Spatial Upsampling")
                 if current_step is None or total_steps is None:
-                    set_progress_status(f"{progress_label} in progress")
+                    set_progress_status(f"{progress_label} in Progress")
                 else:
                     total_steps = int(total_steps)
                     step_no = min(int(current_step) + 1, total_steps)
-                    set_progress_status(f"{progress_label} in progress ({step_no}/{total_steps})")
+                    set_progress_status(f"{progress_label} in Progress ({step_no}/{total_steps})")
 
         _vae_upsampler_progress(None)
         lq_image_ref = [self._decode_image(z, grid_h=grid_h, grid_w=grid_w)]
@@ -558,6 +563,7 @@ class model_factory:
             dtype=VAE_dtype,
         )
 
+    @generation_progress
     def generate(
         self,
         seed=None,

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -111,6 +112,12 @@ class SystemUpsamplerProcessHandler:
             "seed": int(settings.get("seed", seed)),
             "_api": api_options,
         })
+        return settings
+
+    def build_image_queue_settings(self, process_settings: dict, *, source_path: str, target_control: str, seed: int) -> dict:
+        settings = self.build_queue_settings(process_settings, source_path=source_path, start_frame=0, frame_count=1, target_control=target_control, seed=seed, continue_cache=None)
+        settings.update({"model_type": "__system_image_postprocessing", "image_mode": 1, "video_source": source_path})
+        settings["_api"]["suppress_source_audio"] = True
         return settings
 
     def expected_output_frame_count(self, input_frame_count: int, target_control: str) -> int:

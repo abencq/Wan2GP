@@ -63,11 +63,11 @@ class KugelAudioPipeline:
         *,
         ckpt_root: Optional[Path] = None,
         device: Optional[torch.device] = None,
-        lm_decoder_engine: Optional[str] = None,
+        cuda_graphs: bool = False,
     ) -> None:
         self.device = device or torch.device("cpu")
         self.ckpt_root = Path(ckpt_root) if ckpt_root is not None else Path(fl.get_download_location())
-        self.lm_decoder_engine = str(lm_decoder_engine or "legacy").strip().lower()
+        self.cuda_graphs = bool(cuda_graphs)
         self._interrupt = False
         self._early_stop = False
 
@@ -77,9 +77,8 @@ class KugelAudioPipeline:
         self.sample_rate = getattr(self.processor.audio_processor, "sampling_rate", 24000)
 
         self.generation_config = self._load_generation_config(assets["generation_config_path"])
-        engine = "cg" if self.lm_decoder_engine == "cg" else "legacy"
         attn = getattr(self.model, "_attn_implementation", "sdpa")
-        print(f"[KugelAudio] LM engine='{engine}', attention='{attn}'")
+        print(f"[KugelAudio] CUDA graphs: {'on' if self.cuda_graphs else 'off'}, attention='{attn}'")
 
     def _abort_requested(self) -> bool:
         return bool(self._interrupt)
@@ -153,7 +152,7 @@ class KugelAudioPipeline:
             default_dtype=None,
             writable_tensors=False,
         )
-        model.set_lm_decoder_engine(self.lm_decoder_engine)
+        model.set_cuda_graphs(self.cuda_graphs)
         model.eval()
         language_model = getattr(getattr(model, "model", None), "language_model", None)
         if language_model is not None and hasattr(language_model, "config"):
@@ -338,6 +337,7 @@ class KugelAudioPipeline:
         audio_guide: Optional[str],
         *,
         temperature: float = 1.0,
+        audio_guide3: Optional[str] = None,
         **kwargs,
     ):
         self._interrupt = False
@@ -523,14 +523,12 @@ class KugelAudioPipeline:
                 if line_text:
                     parsed.append((speaker_id, line_text))
             speaker_id_map = None
+            voices = [audio_guide, audio_guide2] + ([audio_guide3] if audio_guide3 is not None else [])
             if parsed and audio_guide2 is not None:
                 unique_ids = sorted({speaker_id for speaker_id, _ in parsed})
-                if len(unique_ids) > 2:
-                    raise ValueError("Two-speaker mode supports exactly two speaker IDs.")
-                if len(unique_ids) >= 2:
-                    speaker_id_map = {unique_ids[0]: 0, unique_ids[1]: 1}
-                elif len(unique_ids) == 1:
-                    speaker_id_map = {unique_ids[0]: 0}
+                if len(unique_ids) > len(voices):
+                    raise ValueError(f"{len(voices)}-voice cloning supports at most {len(voices)} speaker IDs.")
+                speaker_id_map = {speaker_id: index for index, speaker_id in enumerate(unique_ids)}
             if KUGELAUDIO_DEBUG:
                 print("[KugelAudio][debug] parsed segments:", len(parsed))
                 for idx, (sid, seg) in enumerate(parsed[:6]):
@@ -576,11 +574,8 @@ class KugelAudioPipeline:
                         if duration_left <= 0:
                             break
                     voice_path = audio_guide
-                    mapped_id = speaker_id
                     if speaker_id_map is not None:
-                        mapped_id = speaker_id_map.get(speaker_id, 0)
-                    if mapped_id == 1 and audio_guide2 is not None:
-                        voice_path = audio_guide2
+                        voice_path = voices[speaker_id_map.get(speaker_id, 0)]
                     extra_tail_tokens = tail_tokens
                     segment = _run_single(
                         line_text,
