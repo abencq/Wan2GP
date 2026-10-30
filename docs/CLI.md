@@ -566,8 +566,8 @@ WanGP hands the terminal back the way it received it. It starts helper programs 
 the TTS and other native runtimes -- and they inherit the terminal, keyboard included. A tool that
 reads the keyboard switches echo, line editing and Ctrl+C off on that shared terminal; WanGP's
 children live in their own process groups, so a Ctrl+C never reaches them and they are killed without
-a chance to clean up, leaving the terminal in that state. The shell prompt stops answering -- the user
-types blind -- and `reset` is the only way back.
+a chance to clean up, leaving the terminal in that state. The shell prompt stops answering, typed keys
+make no sound, and `reset` is the only way back.
 
 The guard takes the terminal settings at startup and writes them back when the run ends: at exit, on
 Ctrl+C and SIGTERM, and from the app's own Save and Quit / Restart paths. A terminal that arrives
