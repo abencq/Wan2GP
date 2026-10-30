@@ -1,6 +1,7 @@
 # Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
 from __future__ import annotations
 
+import contextlib
 import gc
 import json
 import os
@@ -13,16 +14,15 @@ import numpy as np
 import torch
 from mmgp import offload, runtime
 from tqdm.auto import tqdm
-from shared.kernels.dispatch import triton_dtype_supported
 
 from shared.llm_io import known_token_ids, llm_io_enabled, log_llm_io
-from shared.deepy.config import DEEPY_REPETITION_PENALTY_DEFAULT, DEEPY_REPETITION_PENALTY_KEY, get_deepy_config_value, normalize_deepy_repetition_penalty
+from shared.deepy.config import DEEPY_CONTEXT_TOKENS_KEY, DEEPY_REPETITION_PENALTY_DEFAULT, DEEPY_REPETITION_PENALTY_KEY, get_deepy_config_value, normalize_deepy_context_tokens, normalize_deepy_repetition_penalty
 from shared.utils import files_locator as fl
 from shared.llm_engines.lmgp import SamplingParams
 from shared.llm_engines.lmgp.models.qwen3_5 import Qwen3_5ForCausalLM, clear_qwen35_runtime_caches
 from shared.llm_engines.lmgp.layers.attention import reset_attention_backend_logs
 from shared.llm_engines.lmgp.utils.context import reset_context
-from shared.llm_engines.lmgp.vllm_support import TextEngine, resolve_lm_features
+from shared.llm_engines.lmgp.vllm_support import TextEngine, resolve_prompt_enhancer_lm_features
 from shared.qtypes.gguf import GGUFFirstRowsLinear, GGUFWeightTensor, materialize_module_source_tensors
 try:
     from optimum.quanto.tensor.weights.qbytes import WeightQBytesTensor
@@ -49,8 +49,10 @@ from .qwen35_vl import (
 QWEN35_LLM_DISABLE_ENV = "WGP_LLM_DISABLE"
 QWEN35_LLM_PLANNED_CONTEXT = 32768  # tokens of KV cache planned beside the LLM's weights (MMGP cpuCompute pinning share)
 QWEN35_LLM_MAX_PRELOAD_MB = 0  # tests of partial residency: most VRAM the LLM's weights may keep (base, blocks, slots of the streamed ones); 0: all that fit
+QWEN35_LLM_PRELOAD_MARGIN_MB = 256  # VRAM the dynamic preload leaves free beyond the LLM's measured peaks, half of MMGP's default: its decode passes replay in CUDA graphs and vary less (16 GB cards near the edge: 35 -> 65 tk/s); None: MMGP's default
 # the input token table, unless the head shares it, in reserved RAM read by the GPU in place (MMGP runtime.map_in_ram): out of VRAM, same outputs
 QWEN35_LLM_MAPPED_TOKEN_TABLE = True
+QWEN35_LLM_ACTIVATIONS_MB = 512  # speculative decoding Auto: VRAM the LLM's passes take beside its weights and KV cache (about 330 MB measured for the 27B)
 
 QWEN35_GGUF_LLAMACPP_ENV = "WGP_GGUF_LLAMACPP_CUDA"
 QWEN35_PROMPT_MIN_NEW_TOKENS = 4
@@ -129,6 +131,66 @@ def _resolve_gguf_linear_attention_layout_from_filename(model_path: str) -> tupl
     }:
         return False, True, False
     return False, False, True
+
+
+def _qwen35_kv_bytes(config, kv_cache_layout: str, tokens: int) -> int:
+    # the KV cache of the full-attention layers for tokens: BF16, or the body and exact overlays of a Deepy layout
+    layers = sum(layer_type == "full_attention" for layer_type in config.layer_types)
+    kv_heads, head_dim = int(config.num_key_value_heads), int(getattr(config, "head_dim", int(config.hidden_size) // int(config.num_attention_heads)))
+    if not kv_cache_layout:
+        return layers * 2 * kv_heads * head_dim * 2 * tokens
+    from shared.llm_engines.lmgp.layers.kv_formats import parse_layout
+    layout = parse_layout(kv_cache_layout)
+    return layout.body_bytes_per_token(layers, kv_heads, head_dim) * tokens + layout.overlay_bytes(layers, kv_heads, head_dim, 256, 1)
+
+
+def _qwen35_mtp_filename(spec, backend, model_path, prism_metadata):
+    # the MTP drafter's own checkpoint, None when the text checkpoint holds it
+    q3_filename = spec.get("text_gguf_q3_filename")
+    uses_separate_q3_mtp = backend == enhancer_quantization_GGUF and q3_filename and os.path.basename(str(model_path or "")).lower() == q3_filename.lower()
+    return spec["text_gguf_ptq1_mtp_filename"] if prism_metadata else spec.get("text_gguf_q3_mtp_filename" if uses_separate_q3_mtp else "text_mtp_filename")
+
+
+def qwen35_mtp_fit(assets_dir: str | None, variant: str | None, backend: str, model_path: str | None, kv_cache_layout: str):
+    """For speculative decoding Auto: (VRAM the text model needs without MTP, VRAM the MTP drafter adds, VRAM this process may hold), in
+    bytes. The weights are the GGUF tensors the GPU holds (the token table is read in place from RAM), beside the KV cache of Deepy's
+    context, the activations and the margins of MMGP's dynamic preload; the drafter adds its layer and its own BF16 KV cache. None when the
+    checkpoint is not GGUF or not downloaded yet."""
+    from mmgp import allocator, auto_preload, memory_pressure
+    from shared.qtypes import gguf
+    from shared.qtypes.prism import get_prism_metadata
+    if backend != enhancer_quantization_GGUF:
+        return None
+    assets_dir = _resolve_qwen35_assets_dir(assets_dir, variant=variant)
+    spec = get_qwen35_variant_spec(variant)
+    try:
+        model_path = _resolve_gguf_model_path(model_path, assets_dir, variant=variant)
+    except FileNotFoundError:
+        return None
+    config_path = _resolve_qwen35_asset_file(assets_dir, "config.json", error_if_none=False) or os.path.join(assets_dir, "config.json")
+    if not os.path.isfile(config_path):
+        return None
+    config = _load_text_config(config_path)
+    drafter = lambda name: name.startswith(f"blk.{int(config.num_hidden_layers)}.") or name.startswith("mtp.")  # the MTP layer follows the model's
+    tensors = [(info.name, info.n_bytes) for info in gguf._gguf_get_index(model_path).tensor_infos]
+    in_ram = "token_embd.weight" if QWEN35_LLM_MAPPED_TOKEN_TABLE and not spec.get("tie_word_embeddings", False) else None
+    weights = sum(nbytes for name, nbytes in tensors if not drafter(name) and name != in_ram)
+    mtp = sum(nbytes for name, nbytes in tensors if drafter(name))
+    mtp_filename = _qwen35_mtp_filename(spec, backend, model_path, get_prism_metadata(model_path))
+    if mtp_filename:
+        mtp_path = _resolve_qwen35_checkpoint_file(assets_dir, mtp_filename, variant=variant)
+        if not mtp_path or not os.path.isfile(mtp_path):
+            return None
+        mtp += sum(info.n_bytes for info in gguf._gguf_get_index(mtp_path).tensor_infos if info.name != "token_embd.weight")
+    tokens = normalize_deepy_context_tokens(get_deepy_config_value(DEEPY_CONTEXT_TOKENS_KEY))
+    kv_heads, head_dim = int(config.num_key_value_heads), int(getattr(config, "head_dim", int(config.hidden_size) // int(config.num_attention_heads)))
+    work = _qwen35_kv_bytes(config, kv_cache_layout, tokens) + (QWEN35_LLM_ACTIVATIONS_MB << 20)
+    margin = (auto_preload.MARGIN if QWEN35_LLM_PRELOAD_MARGIN_MB is None else QWEN35_LLM_PRELOAD_MARGIN_MB << 20) + memory_pressure.HEADROOM + int(auto_preload.MARGIN_SHARE * work)
+    if allocator.active == "vmm":
+        available = allocator.stats()["reserved"] + allocator.room()
+    else:
+        available = torch.cuda.mem_get_info()[0] + torch.cuda.memory_reserved()
+    return weights + work + margin, mtp + 2 * kv_heads * head_dim * 2 * tokens, available
 
 
 def _map_qwen35_token_table(model) -> None:
@@ -647,7 +709,7 @@ def _resolve_llm_features(backend: str) -> dict:
     """What the LLM engine uses: the LM decoder optimizations the installation supports, each on its own (resolve_lm_features: CUDA
     graphs, MMGP's, the weights stay under its management; the Triton kernels: fused norms, activations, cache writes, GDN, sampling;
     FlashAttention 2), and the GGUF CUDA kernels."""
-    lm = resolve_lm_features()
+    lm = resolve_prompt_enhancer_lm_features()
     if backend == enhancer_quantization_GGUF:
         from shared.qtypes.gguf import _gguf_cuda_module
         native = _gguf_cuda_module()
@@ -714,7 +776,7 @@ def _get_or_create_vllm_engine(model, usage_mode: str | None = None):
     engine = getattr(model, "_prompt_enhancer_vllm_engine", None)
     active_mode = getattr(model, "_prompt_enhancer_vllm_mode", None)
     if engine is not None and usage_mode is not None and active_mode not in (None, usage_mode):
-        try:
+        try:  # its close saves the live context of an owner away (Deepy parked)
             engine.close()
         except Exception:
             pass
@@ -781,7 +843,11 @@ def _generate_messages_vllm(
     if len(messages) == 0:
         return []
 
-    engine = _get_or_create_vllm_engine(self, usage_mode="text")
+    engine = getattr(self, "_prompt_enhancer_vllm_engine", None)
+    # an assistant's context in the engine (Deepy kept loaded): each prompt runs beside it, in the free pages of its cache (LLMEngine.aside)
+    beside = engine is not None and engine.has_live_context()
+    if not beside:
+        engine = _get_or_create_vllm_engine(self, usage_mode="text")
     outputs = []
     apply_repetition_penalty = normalize_deepy_repetition_penalty(get_deepy_config_value(DEEPY_REPETITION_PENALTY_KEY, DEEPY_REPETITION_PENALTY_DEFAULT))
     thinking_enabled = _prompt_enhancer_thinking_enabled(self, thinking_enabled=thinking_enabled)
@@ -799,9 +865,14 @@ def _generate_messages_vllm(
             prompt_token_ids = []
             prompt_len = 0
         generation_max_tokens = int(max_new_tokens) + runtime_extra_tokens
-        # its own minimum: Deepy, which shares the model, leaves its context window in _prompt_enhancer_min_model_len_hint
-        engine.reserve_runtime(prompt_len=prompt_len, max_tokens=generation_max_tokens, cfg_scale=1.0, min_model_len=QWEN35_PROMPT_MIN_MODEL_LEN)
-        engine._ensure_llm()
+        if beside and not engine._llm.can_aside(prompt_len + generation_max_tokens):
+            engine.save_context()  # no room beside it: its owner saves it to RAM (restored at its next use), the prompts run as alone
+            beside = False
+            engine = _get_or_create_vllm_engine(self, usage_mode="text")
+        if not beside:
+            # its own minimum: Deepy, which shares the model, leaves its context window in _prompt_enhancer_min_model_len_hint
+            engine.reserve_runtime(prompt_len=prompt_len, max_tokens=generation_max_tokens, cfg_scale=1.0, min_model_len=QWEN35_PROMPT_MIN_MODEL_LEN)
+            engine._ensure_llm()
         if engine._llm is None:
             raise RuntimeError("Qwen3.5 prompt enhancer vLLM runtime is not available.")
         temp, normalized_top_p, normalized_top_k = _normalize_vllm_sampling(
@@ -839,16 +910,17 @@ def _generate_messages_vllm(
             }, prompt_number=idx + 1)
 
         try:
-            response = generate_prompt(
-                engine._llm,
-                prompt,
-                sampling_params=sampling_params,
-                stop_token_ids=self._prompt_enhancer_stop_token_ids,
-                close_think_token_id=self._prompt_enhancer_close_think_token_id if thinking_enabled else None,
-                max_thinking_tokens=self._prompt_enhancer_thinking_max_tokens,
-                stop_requested=stop_requested,
-                stream_callback=stream_callback,
-            )
+            with engine._llm.aside() if beside else contextlib.nullcontext():
+                response = generate_prompt(
+                    engine._llm,
+                    prompt,
+                    sampling_params=sampling_params,
+                    stop_token_ids=self._prompt_enhancer_stop_token_ids,
+                    close_think_token_id=self._prompt_enhancer_close_think_token_id if thinking_enabled else None,
+                    max_thinking_tokens=self._prompt_enhancer_thinking_max_tokens,
+                    stop_requested=stop_requested,
+                    stream_callback=stream_callback,
+                )
             raw_text = response["text"]
             log_llm_io("IN", "local-prompt-enhancer", "qwen-generation", response, prompt_number=idx + 1)
             # The template supplies the opening <think>; generated text starts
@@ -866,11 +938,13 @@ def _generate_messages_vllm(
             engine._last_failure_reason = ""
         except BaseException as exc:
             engine._last_failure_reason = str(exc)
-            # Discard failed/cancelled runtime state before another enhancement.
-            try:
-                _unload_prompt_enhancer_text_runtime(self)
-            except Exception as cleanup_error:
-                tqdm.write(f"Prompt Enhancer Cleanup Failed: {cleanup_error}")
+            # Discard failed/cancelled runtime state before another enhancement (beside a live context, aside() already discarded the
+            # prompt's own and gave the context back)
+            if not beside:
+                try:
+                    _unload_prompt_enhancer_text_runtime(self)
+                except Exception as cleanup_error:
+                    tqdm.write(f"Prompt Enhancer Cleanup Failed: {cleanup_error}")
             raise
         finally:
             reset_context()
@@ -959,8 +1033,6 @@ def _load_local_text_model(
 ):
     config = _load_text_config(config_path)
     config._prompt_enhancer_safe_legacy = bool(safe_legacy_mode)
-    config._prompt_enhancer_safe_fused_kernels = (torch.cuda.is_available()
-        and not triton_dtype_supported(torch.device("cuda", torch.cuda.current_device()), torch.bfloat16))
     if flash_attention is not None:
         config._prompt_enhancer_flash_attention = bool(flash_attention)
     config._prompt_enhancer_enable_mtp_speculative = bool(enable_mtp)
@@ -1238,11 +1310,7 @@ def load_qwen35_text_prompt_enhancer(
     if block_draft_method is not None and (variant != "27b" or not (features["triton"] and features["flash"])):
         raise ValueError("DSpark and DFlash2 require Qwen3.8/Bonsai 27B, Triton and FlashAttention 2.")
     enable_mtp = bool(speculative_decoding and block_draft_method is None and spec.get("supports_mtp", False))
-    q3_filename = spec.get("text_gguf_q3_filename")
-    uses_separate_q3_mtp = backend == enhancer_quantization_GGUF and q3_filename and os.path.basename(str(model_path or "")).lower() == q3_filename.lower()
-    mtp_filename = spec.get("text_gguf_q3_mtp_filename" if uses_separate_q3_mtp else "text_mtp_filename") if enable_mtp else None
-    if enable_mtp and prism_metadata:
-        mtp_filename = spec["text_gguf_ptq1_mtp_filename"]
+    mtp_filename = _qwen35_mtp_filename(spec, backend, model_path, prism_metadata) if enable_mtp else None
     mtp_modules = [_resolve_qwen35_checkpoint_file(assets_dir, mtp_filename, variant=variant)] if mtp_filename else None
     postprocess_sd = _add_qwen35_mtp_shared_weights if enable_mtp else None
     if backend == enhancer_quantization_GGUF:
@@ -1374,8 +1442,9 @@ def load_qwen35_text_prompt_enhancer(
         install_block_draft(model, block_draft_method, bonsai=bool(prism_metadata))
     model._prompt_enhancer_use_vllm = features["cuda"]  # the LM engine with each optimization where supported, else (Apple GPUs) the legacy runner
     model._prompt_enhancer_use_legacy_cuda_runner = not features["cuda"]
-    # MMGP manages the weights: its graphs replay the decoding passes, its dynamic preload keeps in VRAM all the blocks that fit beside the
-    # KV cache and the activations (all of them at first: without its VRAM allocator, the budgets of the profile apply)
+    # MMGP manages the weights: its dynamic preload keeps in VRAM all the blocks that fit beside the KV cache and the activations (all of
+    # them at first: without its VRAM allocator, the budgets of the profile apply), with CUDA graphs its graphs replay the decoding passes
+    model._lm_engine_mmgp = features["cuda"]
     model._lm_engine_mmgp_graphs = features["graphs"]
     if QWEN35_LLM_MAPPED_TOKEN_TABLE:
         _map_qwen35_token_table(model)
@@ -1383,15 +1452,7 @@ def load_qwen35_text_prompt_enhancer(
     if allocator.active == "vmm":
         model._budget = 2 * os.path.getsize(model_path)  # beyond the model: every block preloaded
     # MMGP cpuCompute (decoding computes the blocks out of VRAM on the CPU): what the runtime needs beside the weights, for its pinning share
-    config = model.config
-    layers = sum(layer_type == "full_attention" for layer_type in config.layer_types)
-    kv_heads, head_dim = int(config.num_key_value_heads), int(getattr(config, "head_dim", int(config.hidden_size) // int(config.num_attention_heads)))
-    if kv_cache_int8:
-        from shared.llm_engines.lmgp.layers.kv_formats import parse_layout
-        layout = parse_layout(model._deepy_kv_cache_layout)
-        kv_bytes = layout.body_bytes_per_token(layers, kv_heads, head_dim) * QWEN35_LLM_PLANNED_CONTEXT + layout.overlay_bytes(layers, kv_heads, head_dim, 256, 1)
-    else:
-        kv_bytes = layers * 2 * kv_heads * head_dim * 2 * QWEN35_LLM_PLANNED_CONTEXT
+    kv_bytes = _qwen35_kv_bytes(model.config, model._deepy_kv_cache_layout if kv_cache_int8 else "", QWEN35_LLM_PLANNED_CONTEXT)
     model._mm_cpu_compute_reserve = kv_bytes + (2 << 30)  # KV cache, activations, vision tower
     if QWEN35_LLM_MAX_PRELOAD_MB:
         model._budget = model._auto_preload_max = QWEN35_LLM_MAX_PRELOAD_MB << 20
@@ -1399,6 +1460,8 @@ def load_qwen35_text_prompt_enhancer(
     model._mm_graph_placement_key = True  # only MMGP moves its weights: the key of a whole-model graph is checked in constant time
     model._mm_graph_check_once = True  # its passes of any length read the same state: reads checked, cuBLAS use found, at the first capture
     model._auto_preload_workload = _qwen35_preload_workload
+    if QWEN35_LLM_PRELOAD_MARGIN_MB is not None:
+        model._auto_preload_margin = QWEN35_LLM_PRELOAD_MARGIN_MB << 20
     for block in model.blk:
         block._mm_graph_keys = 32
     reset_attention_backend_logs()
