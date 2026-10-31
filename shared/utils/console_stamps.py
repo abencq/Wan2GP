@@ -1,3 +1,5 @@
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
+
 """Console stamps: a wall-clock stamp at the start of every line the app prints.
 
 Console only: nothing is written to a file and no folder is created. The stamps ride on stdout, so
@@ -23,6 +25,13 @@ Invisible bytes carry no text. A bar lives on control codes -- ``\x1b[K``, ``\x1
 ``\x1b[?25h``, the ``\x1b]8;;`` link strings, the ``\x03`` an interrupt leaves behind -- the terminal
 consumes them and draws nothing, so a line built only of them is echoed unstamped. Counting them as
 text stamped a line that printed as nothing: a timestamp with no message after it.
+
+A rule of stars is a header, not a message. The app centres its banners in a field of stars -- the
+WanGP version line, the mmgp welcome line, the mmgp memory profile line -- so the line is decoration
+around the words inside it, and such a line is echoed unstamped. A stamp in front of it takes the
+rule past the width it was built with and breaks the framing the rule exists for, and a terminal
+under that width wraps the tail of the rule onto a line of its own. A single star is a bullet --
+``* Running on local URL:`` -- and two stars open a bold line, so both keep their stamp.
 
 The last line is closed on the way out. A bar's closing write ends on a carriage return, not a
 newline, so the stamp written on that line stayed open and the shell prompt arrived right after it
@@ -177,13 +186,12 @@ def _escape_span(text, start, stop):
         return stop - start
     return 2                                            # a lone ESC, or a pair (ESC \, ESC 7): nothing draws
 
-def _carries_text(text, start, stop):
-    """True when this line has a character the terminal draws.
+def _first_drawn(text, start, stop):
+    """The index of the first character of the line the terminal draws, ``stop`` when none does.
 
     Spaces, tabs, carriage returns, backspaces and the closing newline carry no text, and neither do
     the control codes a progress bar is made of: the cursor moves and colour codes, the erase-to-end,
     the show/hide cursor, the OSC link strings, and the bare ``\\x03`` an interrupt leaves on a stream.
-    A line of them alone prints as nothing, so it stays unstamped.
     """
     index = start
     stop = min(stop, len(text))
@@ -205,8 +213,29 @@ def _carries_text(text, start, stop):
         if code < 0x20 or code == 0x7f or (0x80 <= code < 0xa0):
             index += 1                                               # C0 / DEL / C1 controls draw nothing
             continue
-        return True                                                  # one drawn character is enough
-    return False
+        return index                                                   # one drawn character is enough
+    return stop
+
+def _carries_text(text, start, stop):
+    """True when this line has a character the terminal draws: one is enough to ask for a stamp."""
+    return _first_drawn(text, start, stop) < min(stop, len(text))
+
+_STAR_RULE_RUN = 3
+
+def _opens_with_stars(text, start, stop):
+    """True when the line opens with a rule of stars: a header, not a message.
+
+    The app centres its banners in a field of stars, so the stars frame the words inside them and the
+    line is decoration: it is echoed unstamped and keeps the width it was built with. Three stars is
+    the shortest run that is a rule -- the thinnest banner in the app has six on each side. A single
+    star is the bullet the server prints, and two stars open a bold line, and both keep their stamp.
+    """
+    index = _first_drawn(text, start, stop)
+    stop = min(stop, len(text))
+    run = 0
+    while index + run < stop and text[index + run] == "*":
+        run += 1
+    return run >= _STAR_RULE_RUN
 
 def render_stamp(fmt=None):
     """One rendered stamp, cached per wall-clock second (bars write many lines per second)."""
@@ -241,6 +270,8 @@ class _LineStamper:
     line, so a bar is stamped once, and a closing newline is what asks for the next stamp. A line
     that carries nothing -- a bare ``print()``, a padded status line closing on a carriage return,
     a line of spaces -- is echoed unstamped, and a line split across writes keeps its one stamp.
+    A line that opens with a rule of stars -- a banner -- is a header, and it too is echoed
+    unstamped, so its rule keeps the width the app built it with.
     A ``Traceback (most recent call last)`` line is the last stamp the stream writes: a crash
     dump and the prompt that returns after it read clean.
     """
@@ -258,7 +289,8 @@ class _LineStamper:
         while position < len(text):
             index = text.find("\n", position)
             stop = index if index >= 0 else len(text)
-            if self._need_stamp and not self._stamps_stopped and _carries_text(text, position, stop):
+            if (self._need_stamp and not self._stamps_stopped and _carries_text(text, position, stop)
+                    and not _opens_with_stars(text, position, stop)):
                 stamp = render_stamp()
                 if stamp:
                     _safe_write(self._console, f"{stamp}{_STATE['separator_resolved']}")

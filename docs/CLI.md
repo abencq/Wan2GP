@@ -546,6 +546,11 @@ Progress rules, since they are what decides how a console reads:
 - A `Traceback (most recent call last)` line is the last line the console is ever stamped on:
   the crash dump under it, and the prompt that returns after the crash, are echoed exactly as
   they are -- a stamped backtrace is noise to read through.
+- A line that opens with a rule of stars is a header, not a message, and is echoed unstamped: the
+  `WanGP v…` banner, the `Memory Management for the GPU Poor` banner and the `Applying MMGP Memory
+  Profile` banner, each centred in a field of stars. The line keeps the width it was built with, so
+  a stamped run shows the same rule as a plain run. A single star is a bullet and two stars open a
+  bold line, so `* Running on local URL:` keeps its stamp.
 
 Shutting the server down: in a terminal, Ctrl+C writes one newline of its own, so the shutdown
 lines read `2026-10-13 15:50:10 | Keyboard interruption in main thread... closing server.` on a

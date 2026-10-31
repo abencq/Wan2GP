@@ -41,6 +41,8 @@ if sys.platform.startswith("linux") and "NUMBA_THREADING_LAYER" not in os.enviro
 # stamped log. In a terminal, Ctrl+C writes one newline so the shutdown lines start on a clean
 # line, clear of the ^C the terminal echoes.
 # A Traceback line takes the stamps off for good: a crash dump and the prompt after it read clean.
+# A line that opens with a rule of stars -- the version banner, the mmgp banners -- is a header, not
+# a message: it is echoed unstamped, so its rule keeps the width the app built it with.
 # Installed before torch / mmgp so the model loading output is stamped too.
 # Off by default in every mode: --log-timestamp=on stamps this run, WAN2GP_LOG_TIMESTAMP=1 stamps
 # every run, and a plain run keeps the output it produced before, byte for byte.
