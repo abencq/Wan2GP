@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="250" viewBox="0 0 1060 250" role="img" aria-label="Each template keyword and the piece of filename it produces, with the effective output resolution highlighted.">
+  <style>
+    text { font-family: "DejaVu Sans", "Helvetica Neue", Arial, sans-serif; fill: #24303f; }
+    .m { font-family: "DejaVu Sans Mono", "Consolas", monospace; font-size: 13px; }
+    .s { font-size: 12.5px; fill: #5b6675; }
+    .h { font-size: 16px; font-weight: 700; }
+    .e { font-size: 12.5px; font-weight: 700; }
+    rect { stroke-width: 1.2; rx: 5; }
+  </style>
+
+  <text class="h" x="24" y="26">Each keyword, and the piece of name it writes</text>
+
+  <text class="s" x="24" y="58">the template</text>
+  <rect x="118" y="42" width="72" height="30" fill="#eef2f7" stroke="#94a3b8"/><text class="m" x="127" y="62">{model}</text>
+  <rect x="196" y="42" width="112" height="30" fill="#fff3e0" stroke="#e0b87a"/><text class="m" x="205" y="62">{date(…)}</text>
+  <rect x="314" y="42" width="118" height="30" fill="#e9f2ff" stroke="#8bb0e6"/><text class="m" x="323" y="62">{width}x{height}</text>
+  <rect x="438" y="42" width="64" height="30" fill="#eef7f0" stroke="#93c8a4"/><text class="m" x="447" y="62">{fps:.0f}f</text>
+  <rect x="508" y="42" width="70" height="30" fill="#f3ecfb" stroke="#b79ade"/><text class="m" x="517" y="62">{steps:.0f}s</text>
+  <rect x="584" y="42" width="60" height="30" fill="#f7eef4" stroke="#d69ab6"/><text class="m" x="593" y="62">{seed}</text>
+  <rect x="650" y="42" width="104" height="30" fill="#eaf5f6" stroke="#8ec3c9"/><text class="m" x="659" y="62">{prompt(40)}</text>
+
+  <text class="s" x="24" y="126">the file you get</text>
+  <rect x="118" y="110" width="72" height="30" fill="#eef2f7" stroke="#94a3b8"/><text class="m" x="124" y="130">wan1.3</text>
+  <rect x="196" y="110" width="112" height="30" fill="#fff3e0" stroke="#e0b87a"/><text class="m" x="202" y="130">2026-11-02</text>
+  <rect x="314" y="110" width="118" height="30" fill="#e9f2ff" stroke="#5b8fd6"/><text class="m" x="320" y="130">2560x1440</text>
+  <rect x="438" y="110" width="64" height="30" fill="#eef7f0" stroke="#93c8a4"/><text class="m" x="447" y="130">32f</text>
+  <rect x="508" y="110" width="70" height="30" fill="#f3ecfb" stroke="#b79ade"/><text class="m" x="517" y="130">30s</text>
+  <rect x="584" y="110" width="60" height="30" fill="#f7eef4" stroke="#d69ab6"/><text class="m" x="593" y="130">1234</text>
+  <rect x="650" y="110" width="330" height="30" fill="#eaf5f6" stroke="#8ec3c9"/><text class="m" x="656" y="130">a cat riding a motorcycle.mp4</text>
+
+  <path d="M 373 140 L 373 168" stroke="#5b8fd6" stroke-width="1.8" fill="none"/>
+  <text class="e" x="384" y="176" fill="#3f6fb5">the effective output: drawn at 1280x720, spatially upsampled x2</text>
+  <text class="s" x="384" y="196">so the file is named for 1440p, not for the resolution you clicked</text>
+
+  <text class="s" x="24" y="236">20 keywords in all, each accepting a Python format spec — {scale:.2f}, {teacache}, {temporal_upsampling}, {sliding_window_size} …</text>
+</svg>

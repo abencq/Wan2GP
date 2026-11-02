@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="400" viewBox="0 0 1060 400" role="img" aria-label="A generation with Save Latents writes a video and a latent sidecar; the sidecar feeds two branches: re-decoding it in Media Flow, or starting a new generation from it.">
+  <defs>
+    <marker id="ag" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#94a3b8"/></marker>
+    <marker id="ab" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#5b8fd6"/></marker>
+    <marker id="ap" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#9a7ecb"/></marker>
+  </defs>
+  <style>
+    text { font-family: "DejaVu Sans", "Helvetica Neue", Arial, sans-serif; fill: #24303f; }
+    .t { font-size: 15px; font-weight: 600; }
+    .s { font-size: 12.5px; fill: #5b6675; }
+    .e { font-size: 12.5px; font-weight: 700; }
+    .h { font-size: 16px; font-weight: 700; }
+    rect { stroke-width: 1.4; }
+  </style>
+
+  <text class="h" x="24" y="26">A generation, and the two things its latent makes possible</text>
+
+  <rect x="24" y="60" width="216" height="96" rx="10" fill="#eef2f7" stroke="#94a3b8"/>
+  <text class="t" x="44" y="92">a generation</text>
+  <text class="s" x="44" y="114">Misc. tab →</text>
+  <text class="s" x="44" y="132">Save Latents on</text>
+
+  <rect x="330" y="60" width="238" height="96" rx="10" fill="#fff3e0" stroke="#e0b87a"/>
+  <text class="t" x="350" y="92">my_shot_latent.pt</text>
+  <text class="s" x="350" y="114">the latent sidecar,</text>
+  <text class="s" x="350" y="132">kept next to the video</text>
+
+  <rect x="330" y="278" width="238" height="66" rx="10" fill="#eef7f0" stroke="#93c8a4"/>
+  <text class="t" x="350" y="306">my_shot.mp4</text>
+  <text class="s" x="350" y="326">the video, as usual</text>
+
+  <rect x="690" y="46" width="346" height="112" rx="10" fill="#e9f2ff" stroke="#8bb0e6"/>
+  <text class="t" x="710" y="76">Media Flow → Latent Decode</text>
+  <text class="s" x="710" y="98">re-decode with another decoder,</text>
+  <text class="s" x="710" y="116">scale, colour or schedule</text>
+  <text class="e" x="710" y="140" fill="#3f6fb5">no diffusion re-run</text>
+
+  <rect x="690" y="222" width="346" height="112" rx="10" fill="#f3ecfb" stroke="#b79ade"/>
+  <text class="t" x="710" y="252">From WanGP latent file</text>
+  <text class="s" x="710" y="274">a new generation starting from the</text>
+  <text class="s" x="710" y="292">latent this one ended on</text>
+  <text class="e" x="710" y="316" fill="#7b52ab">seed and work preserved</text>
+
+  <path d="M 240 108 L 330 108" stroke="#94a3b8" stroke-width="1.6" fill="none" marker-end="url(#ag)"/>
+  <path d="M 132 156 L 132 311 L 330 311" stroke="#94a3b8" stroke-width="1.6" fill="none" marker-end="url(#ag)"/>
+  <path d="M 568 96 C 630 96 630 102 690 102" stroke="#5b8fd6" stroke-width="2" fill="none" marker-end="url(#ab)"/>
+  <path d="M 568 120 C 622 120 618 278 690 278" stroke="#9a7ecb" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+
+  <text class="e" x="576" y="88" fill="#3f6fb5">decode it again</text>
+  <text class="e" x="576" y="266" fill="#7b52ab">branch from it</text>
+  <text class="s" x="252" y="100">writes</text>
+  <text class="s" x="140" y="190">writes</text>
+
+  <text class="s" x="24" y="384">Wan 2.1 / 2.2 · LongCat · LTX-2 · MiniMax H3 — upstream PR #2441 is open, not accepted: this needs the fork</text>
+</svg>

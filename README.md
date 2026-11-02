@@ -6,24 +6,108 @@
 ![upstream PRs merged](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Fsearch%2Fissues%3Fq%3Drepo%3Adeepbeepmeep%2FWanGP%2Bis%3Apr%2Bauthor%3Aabencq%2Bis%3Amerged&query=%24.total_count&label=upstream%20PRs%20merged&color=blue)
 
 **This is a personal fork of [WanGP](https://github.com/deepbeepmeep/WanGP) by
-[DeepBeepMeep](https://github.com/deepbeepmeep)** — the app, its name, its docs, its models and its licence
-are the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai).
-This repository is **not affiliated with, sponsored or endorsed** by the upstream author.
+[DeepBeepMeep](https://github.com/deepbeepmeep)** — the app, its name, its docs, its models and its licence are
+the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai). This repository
+is **not affiliated with, sponsored or endorsed** by the upstream author.
 
-The `main` branch here is an integration branch: current upstream, plus my own work (75 authored commits,
-synced with v19). Everything general enough is submitted upstream as a pull request.
+The `main` branch here is an integration branch: current upstream, plus my own work — **88 files, +13 219
+lines**, 75 authored commits, synced with v19. Everything general enough is submitted upstream, which means the
+three features below are **not in an official WanGP release today**.
 
-* **[What this fork adds](docs/FORK.md)** — latent saving, decoding and branching, output-filename
-  templates, Linux DLSS temporal upscaling and Frame Generation, SageAttention / SpargeAttn / flash-attn
-  Linux installs, LTX-2 fixes, console time stamps, audio and shell fixes.
-* **[State of my upstream PRs](docs/FORK.md#in-this-fork-submitted-upstream)** — generated table,
-  refreshed on every publish, with the work kept in this fork that is not submitted yet.
-* **Install:** as upstream — `git clone https://github.com/abencq/Wan2GP.git && cd Wan2GP && python wgp.py`
-  (Windows: `run.bat`). Your models, settings and outputs are laid out as upstream puts them.
+## Latent saving, decoding and branching
+
+**What it is.** Keep the latents a generation produced, and reuse them: decode them again, or continue from
+them. Wan 2.1/2.2, LongCat, LTX-2 and MiniMax H3.
+
+**Why it is worth having.** The diffusion is the expensive part, and upstream discards its latents once the
+video is written. With the latents on disk, changing the decoder, the scale, the colour or the schedule stops
+costing a full re-generation, and a shot you like stops being a one-off: you branch a new generation from the
+exact latent the model ended on, seed and work preserved.
+
+![The latent sidecar and the two things it makes possible](docs/images/fork/latent-flow.svg)
+
+The sidecar is a plain `torch.save` payload, so a generation you did not plan for is scriptable too:
+
+```
+my_shot.mp4
+my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent.pt'); print(d.keys())"
+```
+
+- 23 files, +7 450 lines, `shared/utils/latent_io.py` alone being 2 276 of them
+- the settings are documented in [docs/SETTINGS.md](docs/SETTINGS.md)
+- upstream: **[PR #2441](https://github.com/deepbeepmeep/WanGP/pull/2441)** — open, not accepted, so today this
+  needs the fork
+
+## Output filenames you control
+
+**What it is.** One default filename template per model, honoured at generation time and checked before the
+generation starts.
+
+**Why it is worth having.** A folder of `ltx2_1280x720_1234.mp4` says nothing a week later. The template writes
+in what produced the file, using the *effective* output values: a task upsampled to 1440p is named 1440p, not
+the resolution you clicked. A template that cannot be honoured is reported when you generate, not halfway
+through the video.
+
+![The template keywords and the filename they produce](docs/images/fork/filename-anatomy.svg)
+
+- 20 keywords — `{model}`, `{date(…)}`, `{width}`, `{height}`, `{fps}`, `{scale}`, `{steps}`, `{seed}`,
+  `{prompt(40)}`, `{teacache}`, `{temporal_upsampling}` … — and any of them takes a Python format spec,
+  `{fps:.0f}`, `{scale:.2f}`
+- upstream: **[PR #2292](https://github.com/deepbeepmeep/WanGP/pull/2292)** (the default filename) and
+  **[PR #2290](https://github.com/deepbeepmeep/WanGP/pull/2290)** (the keywords, the format specs, the precheck)
+  — both open
+
+## Linux DLSS: x3–x6, with native Frame Generation
+
+**What it is.** Temporal upscaling beyond x2 on Linux — x3/x4 on RTX 40 and RTX 50, up to x6 on RTX 50 — plus
+Frame Generation whose worker builds natively on Linux: no Windows, no Wine.
+
+**Why it is worth having.** On Linux the *Temporal Upsampling* menu stopped at x2, and the frame-generation
+binaries existed only for Windows, so the same graphics cards gave smooth high-resolution output under Windows
+and not under Linux. They do now, from the same menu, and on a two-GPU host the run prints which card makes the
+frames.
+
+| | upstream | this fork |
+|---|---|---|
+| temporal upscaling on Linux | up to x2 | x3, x4, up to x6 on RTX 50 |
+| frame generation on Linux | Windows binaries only | built natively, `scripts/build_dlssg_worker_linux.sh` |
+| the DLSS SDK runtime files | fetched by hand | `scripts/install_dlss5.sh` |
+| a saved choice in the menu | reset by the model menus | kept |
+| a two-GPU host | the worker follows noone | prints the card that makes the frames |
+
+- the worker is `scripts/dlssg_worker_linux/`, 1 196 lines of C++ (a Vulkan port, MIT, notice kept), built on
+  your machine because the NVIDIA runtime licence forbids redistributing it
+- upstream: **[PR #2535](https://github.com/deepbeepmeep/WanGP/pull/2535)** — open, superseding
+  **[PR #2295](https://github.com/deepbeepmeep/WanGP/pull/2295)**
+
+## Also in this fork
+
+| Feature | What it does | Upstream |
+|---|---|---|
+| Sol-Attn for LTX-2 | optional sparse self-attention on native LTX-2 inference: more context for the same VRAM | [#2289](https://github.com/deepbeepmeep/WanGP/pull/2289) open |
+| LTX-2 compilation fix | no more minutes-long first step on each new size when *PyTorch Compilation* is picked; LTX-2 keeps CUDA Graph | [#2551](https://github.com/deepbeepmeep/WanGP/pull/2551) open |
+| SpargeAttn on CUDA 13 | the one-click Linux CUDA 13 install of SpargeAttn completes on RTX 30XX–50XX | [#2284](https://github.com/deepbeepmeep/WanGP/pull/2284) open |
+| Prompt enhancer on GGUF | the prompt enhancer stops crashing when Auto Speculative Decoding runs a GGUF model | [#2553](https://github.com/deepbeepmeep/WanGP/pull/2553) open |
+| Console time stamps | a `[14:03:27]` prefix on the console lines WanGP draws, progress line untouched | [#2568](https://github.com/deepbeepmeep/WanGP/pull/2568) open |
+| Live shell after Ctrl+C | Ctrl+C stops WanGP and leaves the shell prompt usable | [#2526](https://github.com/deepbeepmeep/WanGP/pull/2526) open |
+| Sliding window up to 999 frames | the *Sliding Window Size* sliders accept it on every video model | [#2288](https://github.com/deepbeepmeep/WanGP/pull/2288) open |
+| x264 MJPEG codec | every frame an I-frame, so a generation cuts straight into an editor | [#2287](https://github.com/deepbeepmeep/WanGP/pull/2287) open |
+| Empty-audio crash | a job whose audio came out empty no longer crashes when it saves it | [#2482](https://github.com/deepbeepmeep/WanGP/pull/2482) open |
+| “Continue Video” joins | continuations work when the source soundtrack ends before the video | [#2478](https://github.com/deepbeepmeep/WanGP/pull/2478) open |
+| Silent startup | the `SyntaxWarning` on the About tab credits line is gone | [#2565](https://github.com/deepbeepmeep/WanGP/pull/2565) open |
+
+The table lists what is **open upstream** and what upstream has **accepted**, the latter as **Merged**
+![merged](https://img.shields.io/badge/merged-brightgreen). A pull request closed without merging is not a
+feature of this fork, so it is not listed here; [docs/FORK.md](docs/FORK.md) keeps those with their reason, as
+the licence record asks, and it is regenerated from the GitHub API on every publish.
+
+**Install:** as upstream — `git clone https://github.com/abencq/Wan2GP.git && cd Wan2GP && python wgp.py`
+(Windows: `run.bat`). Your models, settings and outputs are laid out as upstream puts them, so switching either
+way keeps them.
 
 > Per section 4.1 of the [WanGP Community License 2.0](LICENSE.txt), this fork states its modifications and
-> their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and
-> the [third-party licence texts](docs/third_party_licenses/).
+> their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
+> [third-party licence texts](docs/third_party_licenses/).
 
 -----
 
