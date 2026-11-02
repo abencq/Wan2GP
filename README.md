@@ -1,3 +1,33 @@
+# Wan2GP — unofficial fork of WanGP
+
+[![fork of WanGP](https://img.shields.io/badge/fork_of-WanGP-blue)](https://github.com/deepbeepmeep/WanGP)
+![synced with upstream](https://img.shields.io/badge/synced_with_upstream-616e6050-orange)
+![upstream PRs open](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Fsearch%2Fissues%3Fq%3Drepo%3Adeepbeepmeep%2FWanGP%2Bis%3Apr%2Bauthor%3Aabencq%2Bis%3Aopen&query=%24.total_count&label=upstream%20PRs%20open&color=blue)
+![upstream PRs merged](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Fsearch%2Fissues%3Fq%3Drepo%3Adeepbeepmeep%2FWanGP%2Bis%3Apr%2Bauthor%3Aabencq%2Bis%3Amerged&query=%24.total_count&label=upstream%20PRs%20merged&color=blue)
+
+**This is a personal fork of [WanGP](https://github.com/deepbeepmeep/WanGP) by
+[DeepBeepMeep](https://github.com/deepbeepmeep)** — the app, its name, its docs, its models and its licence
+are the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai).
+This repository is **not affiliated with, sponsored or endorsed** by the upstream author.
+
+The `main` branch here is an integration branch: current upstream, plus my own work (75 authored commits,
+synced with v19). Everything general enough is submitted upstream as a pull request.
+
+* **[What this fork adds](docs/FORK.md)** — latent saving, decoding and branching, output-filename
+  templates, Linux DLSS temporal upscaling and Frame Generation, SageAttention / SpargeAttn / flash-attn
+  Linux installs, LTX-2 fixes, console time stamps, audio and shell fixes.
+* **[State of my upstream PRs](docs/FORK.md#in-this-fork-submitted-upstream)** — generated table,
+  refreshed on every publish, with the work kept in this fork that is not submitted yet.
+* **Install:** as upstream — `git clone https://github.com/abencq/Wan2GP.git && cd Wan2GP && python wgp.py`
+  (Windows: `run.bat`). Your models, settings and outputs are laid out as upstream puts them.
+
+> Per section 4.1 of the [WanGP Community License 2.0](LICENSE.txt), this fork states its modifications and
+> their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and
+> the [third-party licence texts](docs/third_party_licenses/).
+
+-----
+
+
 # WanGP
 
 -----

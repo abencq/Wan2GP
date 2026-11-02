@@ -1,0 +1,55 @@
+{
+  "_comment": "Hand-written bookkeeping for docs/FORK.md. scripts/fork-pr-table.sh merges this with the live GitHub API data; the rendered tables live between the markers in docs/FORK.md. Every open PR that is missing a note here gets a loud TODO row, so nothing is ever silently omitted.",
+  "upstream_repo": "deepbeepmeep/WanGP",
+  "author": "abencq",
+  "areas": {
+    "latents": "Latents",
+    "filenames": "Output filenames",
+    "dlss": "Linux DLSS",
+    "attn": "Attention installs",
+    "ltx2": "LTX-2",
+    "enhancer": "Prompt enhancer",
+    "console": "Console",
+    "video": "Video",
+    "audio": "Audio",
+    "shell": "Shell & UI"
+  },
+  "prs": {
+    "2441": { "area": "latents",   "note": "Save, decode and branch latents for Wan, LongCat, LTX-2 and MiniMax H3; pick a latent file straight from a video" },
+    "2292": { "area": "filenames", "note": "A default output filename for every model, with a template checked before the generation starts" },
+    "2290": { "area": "filenames", "note": "Effective-output keywords and Python format specs for the Output Filename box" },
+    "2535": { "area": "dlss",      "note": "DLSS temporal upscaling at x3-x4, up to x6 on RTX 50, with the native Linux Frame Generation worker and installer" },
+    "2295": { "area": "dlss",      "note": "Native Linux DLSS Frame Generation worker, temporal-only x2-x4 (x5/x6 on RTX 50)" },
+    "2284": { "area": "attn",      "note": "SpargeAttn install on Linux with CUDA 13 for RTX 30XX-50XX" },
+    "2286": { "area": "attn",      "note": "scripts/install-flashattn.sh, a Linux builder for flash-attn 2.8.3.post1 on RTX 50xx (Blackwell)" },
+    "2289": { "area": "ltx2",      "note": "Optional Sol-Attn sparse self-attention for native LTX-2 inference (experimental)" },
+    "2551": { "area": "ltx2",      "note": "Keep LTX-2 on CUDA Graph and stop the minutes-long first steps of PyTorch compilation; the Inductor cache of a session is kept and its shapes capped. The copy in this fork carries the measured RTX 5090 timings in docs/MODELS.md; its code lines are identical" },
+    "2553": { "area": "enhancer",  "note": "Prompt enhancer crash with Auto Speculative Decoding on GGUF" },
+    "2568": { "area": "console",   "note": "Time stamps at the start of the console lines WanGP prints, on the lines the terminal draws only" },
+    "2288": { "area": "video",     "note": "Sliding Window sizes up to 999 frames for every video model" },
+    "2287": { "area": "video",     "note": "x264 MJPEG (intra-frame-only) video codec option" },
+    "2482": { "area": "audio",     "note": "Crash when saving audio that came out empty" },
+    "2478": { "area": "audio",     "note": "\u201cContinue Video\u201d audio joins when the soundtrack ends early" },
+    "2526": { "area": "shell",     "note": "Shell prompt left dead after Ctrl+C in a WanGP run" },
+    "2565": { "area": "shell",     "note": "SyntaxWarning printed at startup by the About tab credits line" }
+  },
+  "closed_reason": {
+    "2295": "superseded by #2535 (2026-10-24)",
+    "2286": "not picked up; the builder script stays in this fork"
+  },
+  "fork_only": [
+    {
+      "area": "ltx2",
+      "note": "Watchdog that turns a silent torch Inductor compile-sidecar stall into a reported error (shared/utils/compile_watchdog.py, started from wgp.py). Not submitted yet: it must become opt-in, its 600 s stall rule needs an activity-aware check so a slow but healthy compile is never killed, and the design note shared/inductor-quiesce-refork-deadlock.md cited by its docstring still has to be written"
+    },
+    {
+      "area": "dlss",
+      "note": "Local fixes around the DLSS entries: the Frame Generation multipliers offered on a multi-GPU host, and a saved Frame Generation choice that the menus used to reset (part of #2535)"
+    }
+  ],
+  "fork_infra": [
+    "git publish-main, which publishes the integration branch as the fork default branch",
+    "scripts/fork-pr-table.sh, which regenerates the tables of this page from the GitHub API",
+    "the fork banner at the top of README.md and this file, which state the modifications for section 4.1 of the WanGP Community License"
+  ]
+}
