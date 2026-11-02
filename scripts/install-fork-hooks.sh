@@ -23,6 +23,17 @@ git config alias.fork-refresh '!cd "$(git rev-parse --show-toplevel)" && scripts
 echo 'install: hooksPath = ' "$(git config core.hooksPath)"
 echo 'install: aliases   = publish-main, fork-refresh (repository only)'
 
+# A hook left under .git/hooks is inert once core.hooksPath points into the tree, and an inert copy
+# of an old reminder is worse than nothing: it reads like the ritual and never runs. Ask for the git
+# dir, not for `git rev-parse --git-path hooks`, which answers with core.hooksPath and would name the
+# live hook.
+old_hook=$(git rev-parse --absolute-git-dir)/hooks/pre-push
+if [ -e "$old_hook" ] && [ ! -L "$old_hook" ] \
+   && [ "$(realpath "$old_hook")" != "$(realpath scripts/git-hooks/pre-push)" ]; then
+  rm -f "$old_hook"
+  echo "install: removed the superseded hook at $old_hook — scripts/git-hooks/pre-push is the one that runs"
+fi
+
 if git config --global --get-regexp '^alias\.publish-main' >/dev/null 2>&1; then
   git config --global --unset alias.publish-main
   echo 'install: removed the old global alias publish-main, which pushed the page of the previous run'

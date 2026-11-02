@@ -3,11 +3,12 @@
 #
 #   scripts/publish-main.sh            regenerate the pages, commit them, push
 #   scripts/publish-main.sh --dry-run  regenerate, show what would be committed, push nothing
+#   scripts/publish-main.sh --fast     skip the read-back of the committed pages (one API pass less)
 #
 # The order is the whole point. scripts/fork-pr-table.sh rewrites README.md and docs/FORK.md in the
 # working tree, so a page that has just been refreshed is an uncommitted change: pushing first
-# publishes the page of the previous run. So the sequence is generate, commit what the generator
-# touched, push.
+# publishes the page of the previous run. So the sequence is look at the remote, generate, commit
+# what the generator touched, read the pages back, push.
 #
 # Only the fork is ever pushed: the script refuses a remote whose URL names the upstream owner,
 # because in this clone `origin` is upstream (deepbeepmeep) and `fork` is mine (abencq).
@@ -21,12 +22,15 @@ notes='scripts/fork-pr-notes.json'
 [ -f "$notes" ] && UPSTREAM_OWNER=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['upstream_repo'].split('/')[0])" "$notes")
 
 DRY=0
-case "${1:-}" in
-  '') ;;
-  --dry-run) DRY=1 ;;
-  -h|--help) echo "usage: $(basename "$0") [--dry-run]"; exit 0 ;;
-  *) echo "usage: $(basename "$0") [--dry-run]" >&2; exit 2 ;;
-esac
+FAST=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY=1 ;;
+    --fast) FAST=1 ;;
+    -h|--help) echo 'usage: publish-main [--dry-run] [--fast]'; exit 0 ;;
+    *) echo "usage: publish-main [--dry-run] [--fast]" >&2; exit 2 ;;
+  esac
+done
 
 url=$(git remote get-url "$FORK_REMOTE" 2>/dev/null || echo '')
 if [ -z "$url" ]; then
@@ -39,6 +43,25 @@ case "$url" in
     exit 1 ;;
 esac
 LOCAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# Look at the remote before writing anything. A page commit made on top of a branch that has fallen
+# behind its remote ends in a rejected push and a page commit stranded in the local history.
+echo "publish-main: looking at $FORK_REMOTE/$FORK_BRANCH"
+remote_tip=''
+if git fetch --quiet "$FORK_REMOTE" "$FORK_BRANCH" 2>/dev/null; then
+  remote_tip=$(git rev-parse --verify --quiet "refs/remotes/$FORK_REMOTE/$FORK_BRANCH" || echo '')
+  if [ -n "$remote_tip" ] && ! git merge-base --is-ancestor "$remote_tip" HEAD; then
+    echo "publish-main: $FORK_REMOTE/$FORK_BRANCH holds $(git log --oneline -1 "$remote_tip")," >&2
+    echo "publish-main: which $LOCAL_BRANCH does not contain. Merge it first; nothing is generated, committed or pushed." >&2
+    if [ "$DRY" = 1 ]; then exit 0; fi
+    exit 1
+  fi
+  if [ -n "$remote_tip" ]; then
+    echo "publish-main: $FORK_REMOTE/$FORK_BRANCH is at $(git rev-parse --short "$remote_tip"), an ancestor of $LOCAL_BRANCH"
+  fi
+else
+  echo "publish-main: $FORK_REMOTE cannot be reached, so the remote state is unknown; the push will tell the truth" >&2
+fi
 
 echo "publish-main: regenerating README.md and docs/FORK.md"
 scripts/fork-pr-table.sh
@@ -101,5 +124,35 @@ fi
 if ! git diff --quiet; then
   echo "publish-main: note: the working tree still has changes of its own; they stay uncommitted" >&2
 fi
+
+# Read the committed pages back from the data. A generator that cannot reproduce its own output has a
+# rule that depends on something it did not read, and that is cheaper to find here than on GitHub.
+if [ "$FAST" = 0 ]; then
+  echo "publish-main: reading the pages back"
+  if ! scripts/fork-pr-table.sh --check; then
+    echo "publish-main: the committed pages do not reproduce from git and the GitHub API." >&2
+    echo "publish-main: the page commit sits in the local history; run git fork-refresh, look at the" >&2
+    echo "publish-main: diff, and publish again. Nothing is pushed." >&2
+    exit 1
+  fi
+fi
+
 echo "publish-main: pushing $LOCAL_BRANCH to $FORK_REMOTE/$FORK_BRANCH"
 git push "$FORK_REMOTE" "$LOCAL_BRANCH:$FORK_BRANCH"
+
+python3 - "$FORK_REMOTE" "$FORK_BRANCH" <<'PY'
+import pathlib, re, subprocess, sys
+t = pathlib.Path('README.md').read_text(encoding='utf-8')
+m = re.search(r'<!-- front page: regenerated \d{4}-\d\d-\d\d · (\d+) files \+(\d+) lines · (\d+)'
+              r' authored commits · (\d+) open, (\d+) merged', t)
+remote, branch = sys.argv[1], sys.argv[2]
+sha = subprocess.run(['git', 'rev-parse', '--short', '%s/%s' % (remote, branch)],
+                     capture_output=True, text=True).stdout.strip()
+if m:
+    files, adds, commits, open_, merged = m.groups()
+    said = '%s files, +%s lines, %s authored commits, %s pull requests open upstream, %s merged' % (
+        files, adds, commits, open_, merged)
+else:
+    said = 'the page stamp is unreadable'
+print('publish-main: %s/%s is now %s — %s' % (remote, branch, sha, said))
+PY

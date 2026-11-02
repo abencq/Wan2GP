@@ -14,7 +14,8 @@ the fork and the GitHub API for the state of every pull request. The ritual belo
 | command | what it does |
 |---|---|
 | `git fork-refresh` | regenerate both pages and show the diff; commits nothing, pushes nothing |
-| `git publish-main` | regenerate, commit the regenerated pages, push `local` to `fork/main` |
+| `git publish-main` | look at `fork/main`, regenerate, commit the regenerated pages, read them back, push `local` to `fork/main` |
+| `git publish-main --fast` | the same, without the read-back (one API pass less, for when the page is known good) |
 | `scripts/fork-pr-table.sh --check` | exit 1 when a page is not what the data says today |
 
 `scripts/install-fork-hooks.sh` wires those two aliases, the `pre-push` reminder and the skills in
@@ -42,9 +43,12 @@ regeneration, and the licence record in `docs/FORK.md` is a generated file.
    count, so publishing the page is not counted as work and the headline number does not move when
    the page is published. A typed number in the front page block is a bug: the hand-typed
    `88 files / +13 219 / 75 commits` was already false when it was published.
-2. **Generate, then commit, then push.** The generator rewrites the working tree. A refreshed page is
-   an uncommitted change, so pushing first publishes the page of the previous run — that was the
-   `publish-main` bug. `git publish-main` keeps the order.
+2. **Look at the remote, generate, commit, read back, push.** The generator rewrites the working
+   tree. A refreshed page is an uncommitted change, so pushing first publishes the page of the
+   previous run — that was the `publish-main` bug. Publishing also refuses a `fork/main` holding a
+   commit the local branch does not contain, and reads the committed pages back from git and the API:
+   a generator that cannot reproduce its own output stops the publish, rather than publishing a page
+   nobody checked.
 3. **A pull request closed without merging is not a feature.** It stays out of the front page table
    and out of the feature sections; `docs/FORK.md` keeps it with its reason, as the licence record asks.
 4. **A new pull request needs a note in the same session it is opened.** Add its `area`, `short` and
@@ -53,9 +57,12 @@ regeneration, and the licence record in `docs/FORK.md` is a generated file.
 5. **Never push to upstream.** In this clone `origin` is `deepbeepmeep/WanGP` and `fork` is
    `abencq/Wan2GP`. `git publish-main` refuses a remote whose URL names the upstream owner; a manual
    push is `git push fork local:main`.
-6. **The pre-push hook is a reminder, not a gate.** It is offline, it compares the numbers on the
-   page with git, and it never stops a push. Silence from it means the page matches the commits; a
-   warning means run `git fork-refresh`.
+6. **The pre-push hook is a reminder, not a gate.** It never touches the network and never stops a
+   push. It compares the numbers on the front page with git, the dates of the two pages with today and
+   with each other, the words behind the page with the page, and the upstream commit named in the
+   licence statement of `docs/FORK.md` with `origin/main`. Silence means the pages match the commits;
+   a warning means run `git fork-refresh`. In a clone where the installer has not run, the generator
+   says so.
 7. **Keep the merge with upstream cheap.** The fork block ends before the `-----` rule that opens
    upstream's README text, and everything below that rule is left byte-identical. Upstream rewrites
    its README about fifty times a year; a fork block that spans their text turns every one of those
@@ -64,6 +71,7 @@ regeneration, and the licence record in `docs/FORK.md` is a generated file.
 ## Before publishing, check
 
 - `scripts/fork-pr-table.sh --check` says both pages are up to date.
+- `scripts/install-fork-hooks.sh` has run in this clone: the generator says when it has not.
 - The diff of the generated block changes only numbers, dates and states — a changed *sentence* means
   `docs/fork-features.md` changed, and that is a change worth naming in the commit message.
 - Nothing outside the markers moved: `git diff --stat` shows `README.md` and `docs/FORK.md` only.

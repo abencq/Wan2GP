@@ -317,6 +317,23 @@ def rewrite(path, new_block):
         tail = tail[len(END):].lstrip('\n')     # the block brings its own END
     return cur, cur[:i] + new_block + '\n\n' + tail
 
+def clone_reminder():
+    """A fresh clone has no hook, no alias and no skill link until scripts/install-fork-hooks.sh ran.
+
+    The generator is the first thing anyone runs in a new clone, so it is the right place to say so:
+    the pre-push reminder cannot speak before it is installed.
+    """
+    missing = []
+    if git('config', '--get', 'core.hooksPath') != 'scripts/git-hooks':
+        missing.append('core.hooksPath')
+    for a in ('publish-main', 'fork-refresh'):
+        if not git('config', '--get', 'alias.' + a):
+            missing.append('alias.' + a)
+    skills = os.path.expanduser(os.environ.get('SKILLS_DIR', '~/.config/Code/User/skills'))
+    if os.path.isdir(skills) and not os.path.islink(os.path.join(skills, 'fork-publish')):
+        missing.append('the fork-publish skill')
+    return missing
+
 stale = []
 wrote = []
 for path, new_block in ((ledger, block), (front, front_block)):
@@ -335,4 +352,9 @@ if mode == 'check':
     print('fork-pr-table: docs/FORK.md and README.md are up to date')
 elif not wrote:
     print('fork-pr-table: docs/FORK.md and README.md already up to date')
+
+missing = clone_reminder()
+if missing:
+    print('fork-pr-table: this clone is missing %s — run scripts/install-fork-hooks.sh'
+          % ', '.join(missing))
 PY
