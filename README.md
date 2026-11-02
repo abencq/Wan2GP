@@ -1,3 +1,5 @@
+<!-- BEGIN GENERATED (front page) by scripts/fork-pr-table.sh -- do not edit between the markers;
+     the words are docs/fork-features.md, the size comes from git, the states from the API -->
 # Wan2GP — unofficial fork of WanGP
 
 [![fork of WanGP](https://img.shields.io/badge/fork_of-WanGP-blue)](https://github.com/deepbeepmeep/WanGP)
@@ -10,9 +12,9 @@
 the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai). This repository
 is **not affiliated with, sponsored or endorsed** by the upstream author.
 
-The `main` branch here is an integration branch: current upstream, plus my own work — **88 files, +13 219
-lines**, 75 authored commits, synced with v19. Everything general enough is submitted upstream, which means the
-three features below are **not in an official WanGP release today**.
+The `main` branch here is an integration branch: current upstream, plus my own work — **90 files,
++13 394 lines**, 77 authored commits, synced with upstream `616e6050`. Everything general enough is
+submitted upstream, which means the 3 features below are **not in an official WanGP release today**.
 
 ## Latent saving, decoding and branching
 
@@ -33,10 +35,10 @@ my_shot.mp4
 my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent.pt'); print(d.keys())"
 ```
 
-- 23 files, +7 450 lines, `shared/utils/latent_io.py` alone being 2 276 of them
+- 23 files, +7 450 lines, `shared/utils/latent_io.py` alone being 2 276 of them (PR #2441)
 - the settings are documented in [docs/SETTINGS.md](docs/SETTINGS.md)
-- upstream: **[PR #2441](https://github.com/deepbeepmeep/WanGP/pull/2441)** — open, not accepted, so today this
-  needs the fork
+- upstream: **[PR #2441](https://github.com/deepbeepmeep/WanGP/pull/2441)** — open, not accepted, so
+  today this needs the fork
 
 ## Output filenames you control
 
@@ -53,9 +55,10 @@ through the video.
 - 20 keywords — `{model}`, `{date(…)}`, `{width}`, `{height}`, `{fps}`, `{scale}`, `{steps}`, `{seed}`,
   `{prompt(40)}`, `{teacache}`, `{temporal_upsampling}` … — and any of them takes a Python format spec,
   `{fps:.0f}`, `{scale:.2f}`
-- upstream: **[PR #2292](https://github.com/deepbeepmeep/WanGP/pull/2292)** (the default filename) and
-  **[PR #2290](https://github.com/deepbeepmeep/WanGP/pull/2290)** (the keywords, the format specs, the precheck)
-  — both open
+
+- upstream: **[PR #2292](https://github.com/deepbeepmeep/WanGP/pull/2292)** (the default filename)
+  and **[PR #2290](https://github.com/deepbeepmeep/WanGP/pull/2290)** (the keywords, the format
+  specs, the precheck) — open, not accepted, so today this needs the fork
 
 ## Linux DLSS: x3–x6, with native Frame Generation
 
@@ -77,29 +80,31 @@ frames.
 
 - the worker is `scripts/dlssg_worker_linux/`, 1 196 lines of C++ (a Vulkan port, MIT, notice kept), built on
   your machine because the NVIDIA runtime licence forbids redistributing it
-- upstream: **[PR #2535](https://github.com/deepbeepmeep/WanGP/pull/2535)** — open, superseding
-  **[PR #2295](https://github.com/deepbeepmeep/WanGP/pull/2295)**
+
+- upstream: **[PR #2535](https://github.com/deepbeepmeep/WanGP/pull/2535)** — open, not accepted, so
+  today this needs the fork
 
 ## Also in this fork
 
 | Feature | What it does | Upstream |
 |---|---|---|
-| Sol-Attn for LTX-2 | optional sparse self-attention on native LTX-2 inference: more context for the same VRAM | [#2289](https://github.com/deepbeepmeep/WanGP/pull/2289) open |
-| LTX-2 compilation fix | no more minutes-long first step on each new size when *PyTorch Compilation* is picked; LTX-2 keeps CUDA Graph | [#2551](https://github.com/deepbeepmeep/WanGP/pull/2551) open |
-| SpargeAttn on CUDA 13 | the one-click Linux CUDA 13 install of SpargeAttn completes on RTX 30XX–50XX | [#2284](https://github.com/deepbeepmeep/WanGP/pull/2284) open |
-| Prompt enhancer on GGUF | the prompt enhancer stops crashing when Auto Speculative Decoding runs a GGUF model | [#2553](https://github.com/deepbeepmeep/WanGP/pull/2553) open |
-| Console time stamps | a `[14:03:27]` prefix on the console lines WanGP draws, progress line untouched | [#2568](https://github.com/deepbeepmeep/WanGP/pull/2568) open |
-| Live shell after Ctrl+C | Ctrl+C stops WanGP and leaves the shell prompt usable | [#2526](https://github.com/deepbeepmeep/WanGP/pull/2526) open |
-| Sliding window up to 999 frames | the *Sliding Window Size* sliders accept it on every video model | [#2288](https://github.com/deepbeepmeep/WanGP/pull/2288) open |
-| x264 MJPEG codec | every frame an I-frame, so a generation cuts straight into an editor | [#2287](https://github.com/deepbeepmeep/WanGP/pull/2287) open |
-| Empty-audio crash | a job whose audio came out empty no longer crashes when it saves it | [#2482](https://github.com/deepbeepmeep/WanGP/pull/2482) open |
-| “Continue Video” joins | continuations work when the source soundtrack ends before the video | [#2478](https://github.com/deepbeepmeep/WanGP/pull/2478) open |
-| Silent startup | the `SyntaxWarning` on the About tab credits line is gone | [#2565](https://github.com/deepbeepmeep/WanGP/pull/2565) open |
+| SpargeAttn on CUDA 13 | SpargeAttn install on Linux with CUDA 13 for RTX 30XX-50XX | [#2284](https://github.com/deepbeepmeep/WanGP/pull/2284) open |
+| LTX-2 compilation fix | Keep LTX-2 on CUDA Graph and stop the minutes-long first steps of PyTorch compilation; the Inductor cache of a session is kept and its shapes capped. The copy in this fork carries the measured RTX 5090 timings in docs/MODELS.md; its code lines are identical | [#2551](https://github.com/deepbeepmeep/WanGP/pull/2551) open |
+| Sol-Attn for LTX-2 | Optional Sol-Attn sparse self-attention for native LTX-2 inference (experimental) | [#2289](https://github.com/deepbeepmeep/WanGP/pull/2289) open |
+| Prompt enhancer on GGUF | Prompt enhancer crash with Auto Speculative Decoding on GGUF | [#2553](https://github.com/deepbeepmeep/WanGP/pull/2553) open |
+| Console time stamps | Time stamps at the start of the console lines WanGP prints, on the lines the terminal draws only | [#2568](https://github.com/deepbeepmeep/WanGP/pull/2568) open |
+| Sliding window up to 999 frames | Sliding Window sizes up to 999 frames for every video model | [#2288](https://github.com/deepbeepmeep/WanGP/pull/2288) open |
+| x264 MJPEG codec | x264 MJPEG (intra-frame-only) video codec option | [#2287](https://github.com/deepbeepmeep/WanGP/pull/2287) open |
+| Empty-audio crash | Crash when saving audio that came out empty | [#2482](https://github.com/deepbeepmeep/WanGP/pull/2482) open |
+| “Continue Video” joins | “Continue Video” audio joins when the soundtrack ends early | [#2478](https://github.com/deepbeepmeep/WanGP/pull/2478) open |
+| Silent startup | SyntaxWarning printed at startup by the About tab credits line | [#2565](https://github.com/deepbeepmeep/WanGP/pull/2565) open |
+| Live shell after Ctrl+C | Shell prompt left dead after Ctrl+C in a WanGP run | [#2526](https://github.com/deepbeepmeep/WanGP/pull/2526) open |
 
-The table lists what is **open upstream** and what upstream has **accepted**, the latter as **Merged**
-![merged](https://img.shields.io/badge/merged-brightgreen). A pull request closed without merging is not a
-feature of this fork, so it is not listed here; [docs/FORK.md](docs/FORK.md) keeps those with their reason, as
-the licence record asks, and it is regenerated from the GitHub API on every publish.
+The table lists what is **open upstream** and what upstream has **accepted**, the latter as
+**Merged** ![merged](https://img.shields.io/badge/merged-brightgreen). A pull request closed without
+merging is not a feature of this fork, so it is not listed here; [docs/FORK.md](docs/FORK.md) keeps
+those with their reason, as the licence record asks, and it is regenerated from the GitHub API on
+every publish.
 
 **Install:** as upstream — `git clone https://github.com/abencq/Wan2GP.git && cd Wan2GP && python wgp.py`
 (Windows: `run.bat`). Your models, settings and outputs are laid out as upstream puts them, so switching either
@@ -108,6 +113,9 @@ way keeps them.
 > Per section 4.1 of the [WanGP Community License 2.0](LICENSE.txt), this fork states its modifications and
 > their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
 > [third-party licence texts](docs/third_party_licenses/).
+
+<!-- front page: regenerated 2026-11-02 · 90 files +13394 lines · 77 authored commits · 15 open, 0 merged upstream -->
+<!-- END GENERATED -->
 
 -----
 

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# pre-push -- this fork's own reminder: offline, cheap, and never a gate.
+#
+# It compares the numbers printed on the front page with what git says about the commits being
+# pushed, and it says when the page or the words behind it are older than the last publish. It
+# never touches the network and never stops a push: the full regeneration reads the GitHub API about
+# twenty times, and that belongs to `git publish-main`, not to every push.
+#
+# Installed by scripts/install-fork-hooks.sh, which sets git config core.hooksPath scripts/git-hooks.
+set -u
+root=$(git rev-parse --show-toplevel)
+exec python3 "$root/scripts/git-hooks/pre-push.py" "$root"
+exit 0

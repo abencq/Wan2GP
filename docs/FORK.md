@@ -21,16 +21,26 @@ header, not a claim of separate ownership.
 
 ## How this fork is kept
 
-- **`main`** (the default branch here) is an integration branch: current upstream, plus my work —
-  75 authored commits on top of upstream, merged from upstream as it moves.
+- **`main`** (the default branch here) is an integration branch: current upstream, plus my work, merged
+  from upstream as it moves. Its size against upstream — files, lines, authored commits — is counted
+  from git on the [front page](../README.md), never typed here.
 - **`pr-*`** branches are the thin branches that carry my pull requests to upstream, each one cut from an
   upstream snapshot so that its diff is only that change.
 - Anything general enough is submitted upstream as a pull request, under the project CLA. When upstream
   accepts one, the feature is removed from the list below, and the row moves to the "merged upstream"
   table on its own.
-- The integration branch is published with `git publish-main`, which also regenerates the tables of this
-  page with [scripts/fork-pr-table.sh](../scripts/fork-pr-table.sh). The wording of each row is in
-  [scripts/fork-pr-notes.json](../scripts/fork-pr-notes.json).
+- The pages write themselves. [scripts/fork-pr-table.sh](../scripts/fork-pr-table.sh) counts this fork
+  against upstream, reads the state of every pull request from the GitHub API, and assembles the tables
+  below and the front page of the [README](../README.md). The wording of a row is in
+  [scripts/fork-pr-notes.json](../scripts/fork-pr-notes.json), the sentences of the front page in
+  [docs/fork-features.md](fork-features.md). Nothing between the `BEGIN GENERATED` markers of those two
+  files is written by hand, and a pull request with no note shows up as a loud **TODO** row.
+- Publish with `git publish-main`: regenerate the pages, commit them, push. The order is the point — a
+  regenerated page is an uncommitted change, so pushing first publishes the page of the previous run.
+  `git fork-refresh` regenerates and shows the diff, and pushes nothing.
+- After a fresh clone, run [scripts/install-fork-hooks.sh](../scripts/install-fork-hooks.sh). It wires
+  the `pre-push` reminder — offline, it warns when the page and the commits disagree and never stops a
+  push — the two aliases, and the skill texts of `docs/fork-skills/` into the clone.
 
 ## Use it
 

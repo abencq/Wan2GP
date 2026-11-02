@@ -14,24 +14,52 @@
     "audio": "Audio",
     "shell": "Shell & UI"
   },
+  "features": [
+    {
+      "id": "latents",
+      "title": "Latent saving, decoding and branching",
+      "prs": [2441],
+      "image": "docs/images/fork/latent-flow.svg",
+      "alt": "The latent sidecar and the two things it makes possible",
+      "doc": "docs/SETTINGS.md",
+      "doc_note": "the settings are documented in [docs/SETTINGS.md](docs/SETTINGS.md)",
+      "stat": true,
+      "stat_extra": ", `shared/utils/latent_io.py` alone being 2 276 of them"
+    },
+    {
+      "id": "filenames",
+      "title": "Output filenames you control",
+      "prs": [2292, 2290],
+      "image": "docs/images/fork/filename-anatomy.svg",
+      "alt": "The template keywords and the filename they produce",
+      "stat": false
+    },
+    {
+      "id": "dlss",
+      "title": "Linux DLSS: x3–x6, with native Frame Generation",
+      "prs": [2535],
+      "stat": false
+    }
+  ],
+  "front_claim_sentence": "Everything general enough is submitted upstream, which means the",
   "prs": {
     "2441": { "area": "latents",   "note": "Save, decode and branch latents for Wan, LongCat, LTX-2 and MiniMax H3; pick a latent file straight from a video" },
-    "2292": { "area": "filenames", "note": "A default output filename for every model, with a template checked before the generation starts" },
-    "2290": { "area": "filenames", "note": "Effective-output keywords and Python format specs for the Output Filename box" },
+    "2292": { "area": "filenames", "short": "the default filename", "note": "A default output filename for every model, with a template checked before the generation starts" },
+    "2290": { "area": "filenames", "short": "the keywords, the format specs, the precheck", "note": "Effective-output keywords and Python format specs for the Output Filename box" },
     "2535": { "area": "dlss",      "note": "DLSS temporal upscaling at x3-x4, up to x6 on RTX 50, with the native Linux Frame Generation worker and installer" },
     "2295": { "area": "dlss",      "note": "Native Linux DLSS Frame Generation worker, temporal-only x2-x4 (x5/x6 on RTX 50)" },
-    "2284": { "area": "attn",      "note": "SpargeAttn install on Linux with CUDA 13 for RTX 30XX-50XX" },
+    "2284": { "area": "attn", "short": "SpargeAttn on CUDA 13", "short": "SpargeAttn on CUDA 13",      "note": "SpargeAttn install on Linux with CUDA 13 for RTX 30XX-50XX" },
     "2286": { "area": "attn",      "note": "scripts/install-flashattn.sh, a Linux builder for flash-attn 2.8.3.post1 on RTX 50xx (Blackwell)" },
-    "2289": { "area": "ltx2",      "note": "Optional Sol-Attn sparse self-attention for native LTX-2 inference (experimental)" },
-    "2551": { "area": "ltx2",      "note": "Keep LTX-2 on CUDA Graph and stop the minutes-long first steps of PyTorch compilation; the Inductor cache of a session is kept and its shapes capped. The copy in this fork carries the measured RTX 5090 timings in docs/MODELS.md; its code lines are identical" },
-    "2553": { "area": "enhancer",  "note": "Prompt enhancer crash with Auto Speculative Decoding on GGUF" },
-    "2568": { "area": "console",   "note": "Time stamps at the start of the console lines WanGP prints, on the lines the terminal draws only" },
-    "2288": { "area": "video",     "note": "Sliding Window sizes up to 999 frames for every video model" },
-    "2287": { "area": "video",     "note": "x264 MJPEG (intra-frame-only) video codec option" },
-    "2482": { "area": "audio",     "note": "Crash when saving audio that came out empty" },
-    "2478": { "area": "audio",     "note": "\u201cContinue Video\u201d audio joins when the soundtrack ends early" },
-    "2526": { "area": "shell",     "note": "Shell prompt left dead after Ctrl+C in a WanGP run" },
-    "2565": { "area": "shell",     "note": "SyntaxWarning printed at startup by the About tab credits line" }
+    "2289": { "area": "ltx2", "short": "Sol-Attn for LTX-2", "short": "Sol-Attn for LTX-2",      "note": "Optional Sol-Attn sparse self-attention for native LTX-2 inference (experimental)" },
+    "2551": { "area": "ltx2", "short": "LTX-2 compilation fix", "short": "LTX-2 compilation fix",      "note": "Keep LTX-2 on CUDA Graph and stop the minutes-long first steps of PyTorch compilation; the Inductor cache of a session is kept and its shapes capped. The copy in this fork carries the measured RTX 5090 timings in docs/MODELS.md; its code lines are identical" },
+    "2553": { "area": "enhancer", "short": "Prompt enhancer on GGUF", "short": "Prompt enhancer on GGUF",  "note": "Prompt enhancer crash with Auto Speculative Decoding on GGUF" },
+    "2568": { "area": "console", "short": "Console time stamps", "short": "Console time stamps",   "note": "Time stamps at the start of the console lines WanGP prints, on the lines the terminal draws only" },
+    "2288": { "area": "video", "short": "Sliding window up to 999 frames", "short": "Sliding window up to 999 frames",     "note": "Sliding Window sizes up to 999 frames for every video model" },
+    "2287": { "area": "video", "short": "x264 MJPEG codec", "short": "x264 MJPEG codec",     "note": "x264 MJPEG (intra-frame-only) video codec option" },
+    "2482": { "area": "audio", "short": "Empty-audio crash", "short": "Empty-audio crash",     "note": "Crash when saving audio that came out empty" },
+    "2478": { "area": "audio", "short": "“Continue Video” joins", "short": "“Continue Video” joins",     "note": "\u201cContinue Video\u201d audio joins when the soundtrack ends early" },
+    "2526": { "area": "shell", "short": "Live shell after Ctrl+C", "short": "Live shell after Ctrl+C",     "note": "Shell prompt left dead after Ctrl+C in a WanGP run" },
+    "2565": { "area": "shell", "short": "Silent startup", "short": "Silent startup",     "note": "SyntaxWarning printed at startup by the About tab credits line" }
   },
   "closed_reason": {
     "2295": "superseded by #2535 (2026-10-24)",
