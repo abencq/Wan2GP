@@ -40,25 +40,37 @@ case "$url" in
 esac
 LOCAL_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
-# A page with uncommitted edits of its own would be committed under the generator's message, and a
-# reader of the history would think the generator wrote the sentence. Keep the two kinds of change
-# in separate commits.
-dirty_first=()
-for f in README.md docs/FORK.md; do
-  git diff --quiet -- "$f" || dirty_first+=("$f")
-done
-if [ ${#dirty_first[@]} -gt 0 ]; then
-  echo "publish-main: ${dirty_first[*]} carry uncommitted edits that are not the generator's." >&2
-  echo "publish-main: commit them first; the pages are published with their own words, not mixed in." >&2
-  exit 1
-fi
-
 echo "publish-main: regenerating README.md and docs/FORK.md"
 scripts/fork-pr-table.sh
 
+# generated_only FILE — true when every changed line of FILE sits between the generated markers.
+# A hunk outside them is a hand-written sentence, and that belongs in a commit of its own.
+generated_only() {
+  python3 -c '
+import re, subprocess, sys
+path = sys.argv[1]
+cur = open(path, encoding="utf-8").read().splitlines()
+begin = next((i for i, l in enumerate(cur) if l.startswith("<!-- BEGIN GENERATED")), -1)
+end = next((i for i, l in enumerate(cur) if l.startswith("<!-- END GENERATED")), -1)
+hunks = subprocess.run(["git", "diff", "--unified=0", "--", path],
+                       capture_output=True, text=True).stdout
+ok = begin >= 0 and end >= 0
+for s, c in re.findall(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", hunks, re.M):
+    s, c = int(s), int(c or 1)
+    ok = ok and s >= begin + 1 and s + c <= end + 1
+sys.exit(0 if ok else 1)
+' "$1"
+}
+
 dirty=()
 for f in README.md docs/FORK.md; do
-  git diff --quiet -- "$f" || dirty+=("$f")
+  git diff --quiet -- "$f" && continue
+  if ! generated_only "$f"; then
+    echo "publish-main: $f holds edits outside the generated block." >&2
+    echo "publish-main: commit those words yourself — publish-main commits only what the generator wrote." >&2
+    exit 1
+  fi
+  dirty+=("$f")
 done
 if [ ${#dirty[@]} -gt 0 ]; then
   echo "publish-main: the generator changed ${dirty[*]}"
