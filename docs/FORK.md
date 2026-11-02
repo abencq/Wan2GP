@@ -12,9 +12,14 @@ Required by section 4.1 of the [WanGP Community License 2.0](../LICENSE.txt), wh
 repository.
 
 The `main` branch of this repository is the source of `deepbeepmeep/WanGP`, **modified by abencq**. My first
-change dates from **2025-04-16**; the branch is currently synced with upstream `616e6050` (the v19 line) and
-the tables on this page are regenerated from the GitHub API on each publish. The upstream licence
-([LICENSE.txt](../LICENSE.txt)), the in-tree notices and the third-party licence texts
+change dates from **2025-04-16**.
+
+<!-- SYNCED -->
+The branch is currently synced with upstream `616e6050` (WanGP v19.02), and the tables on this page
+are regenerated from the GitHub API on each publish.
+<!-- /SYNCED -->
+
+The upstream licence ([LICENSE.txt](../LICENSE.txt)), the in-tree notices and the third-party licence texts
 ([docs/third_party_licenses/](third_party_licenses/)) are preserved, and every modification of the upstream
 code is listed in the tables below, by area and by pull request. My own files carry the WanGP copyright
 header, not a claim of separate ownership.
@@ -36,10 +41,23 @@ header, not a claim of separate ownership.
   [scripts/fork-pr-notes.json](../scripts/fork-pr-notes.json), the sentences of the front page in
   [docs/fork-features.md](fork-features.md). Nothing between the `BEGIN GENERATED` markers of those two
   files is written by hand, and a pull request with no note shows up as a loud **TODO** row.
+- The sentence above naming the upstream commit this fork sits on is written by that same script,
+  between the inline `<!-- SYNCED -->` markers, because a statement of what was modified is only true
+  of the commit it names. So is the claim on the front page of which of these features are in an
+  official release: upstream tags no release of the application, so the release an accepted pull
+  request went into is the `WanGP_version` in `wgp.py` at its merge commit, and a feature counts as
+  released only when every pull request behind it is accepted into one.
+- [scripts/fork-table-fixture-test.sh](../scripts/fork-table-fixture-test.sh) runs the generator in a
+  scratch repository against written-down answers of the GitHub API, offline: an accepted pull request,
+  a shipped release, an acceptance not yet in one, a closure. Run it after changing the generator —
+  `--check` proves the pages are true today, and the fixture proves they stay true in the states that
+  have not happened here yet.
 - Publish with `git publish-main`: look at `fork/main`, regenerate the pages, commit what the
-  generator wrote, read the pages back from git and the API, push. The order is the point — a
-  regenerated page is an uncommitted change, so pushing first publishes the page of the previous run.
-  `git fork-refresh` regenerates and shows the diff, and pushes nothing.
+  generator wrote (and only that: the generated block and the licence sentence, checked by
+  [scripts/page-hunk-check.sh](../scripts/page-hunk-check.sh)), read the pages back from git and the
+  API, push. The order is the point — a regenerated page is an uncommitted change, so pushing first
+  publishes the page of the previous run. `git fork-refresh` regenerates and shows the diff, and
+  pushes nothing.
 - After a fresh clone, run [scripts/install-fork-hooks.sh](../scripts/install-fork-hooks.sh): it wires
   the `pre-push` reminder, the two aliases and the skill texts of `docs/fork-skills/` into the clone,
   and removes a hook left behind under `.git/hooks/`. The reminder is offline and never stops a push;
@@ -73,10 +91,10 @@ worker) are the ones the upstream documentation describes, made to work on Linux
 ### In this fork, submitted upstream
 | Area | What it does | PR | State |
 |---|---|---|---|
-| Latents | Save, decode and branch latents for Wan, LongCat, LTX-2 and MiniMax H3; pick a latent file straight from a video | [#2441](https://github.com/deepbeepmeep/WanGP/pull/2441) | open · clean · 0 behind |
+| Latents | Save, decode and branch latents for Wan, LongCat, LTX-2 and MiniMax H3; pick a latent file straight from a video | [#2441](https://github.com/deepbeepmeep/WanGP/pull/2441) | open · dirty · 0 behind |
 | Output filenames | A default output filename for every model, with a template checked before the generation starts | [#2292](https://github.com/deepbeepmeep/WanGP/pull/2292) | open · clean · 16 behind |
 | Output filenames | Effective-output keywords and Python format specs for the Output Filename box | [#2290](https://github.com/deepbeepmeep/WanGP/pull/2290) | open · clean · 16 behind |
-| Linux DLSS | DLSS temporal upscaling at x3-x4, up to x6 on RTX 50, with the native Linux Frame Generation worker and installer | [#2535](https://github.com/deepbeepmeep/WanGP/pull/2535) | open · clean · 6 behind |
+| Linux DLSS | DLSS temporal upscaling at x3-x4, up to x6 on RTX 50, with the native Linux Frame Generation worker and installer | [#2535](https://github.com/deepbeepmeep/WanGP/pull/2535) | open · dirty · 6 behind |
 | Attention installs | SpargeAttn install on Linux with CUDA 13 for RTX 30XX-50XX | [#2284](https://github.com/deepbeepmeep/WanGP/pull/2284) | open · clean · 0 behind |
 | LTX-2 | Keep LTX-2 on CUDA Graph and stop the minutes-long first steps of PyTorch compilation; the Inductor cache of a session is kept and its shapes capped. The copy in this fork carries the measured RTX 5090 timings in docs/MODELS.md; its code lines are identical | [#2551](https://github.com/deepbeepmeep/WanGP/pull/2551) | open · clean · 0 behind |
 | LTX-2 | Optional Sol-Attn sparse self-attention for native LTX-2 inference (experimental) | [#2289](https://github.com/deepbeepmeep/WanGP/pull/2289) | open · clean · 6 behind |

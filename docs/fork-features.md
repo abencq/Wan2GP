@@ -9,6 +9,10 @@ Sections are delimited by `<!-- intro -->`, `<!-- feature: id -->` and `<!-- clo
 skips it when the file is missing, so no broken image is ever published) and `<!-- bullets -->` is where
 the generated bullets are appended: the size of the change, the documentation link and the state upstream.
 
+The sentence that says how much of this fork is in an official WanGP release is not written here. It is
+counted from the state of every pull request, and from the upstream release each acceptance went into,
+because a typed claim of that kind goes false the day upstream accepts the first one.
+
 <!-- intro -->
 **This is a personal fork of [WanGP](https://github.com/deepbeepmeep/WanGP) by
 [DeepBeepMeep](https://github.com/deepbeepmeep)** — the app, its name, its docs, its models and its licence are

@@ -41,7 +41,7 @@
       "stat": false
     }
   ],
-  "front_claim_sentence": "Everything general enough is submitted upstream, which means the",
+  "front_claim_sentence": "Everything general enough is submitted upstream, which means",
   "prs": {
     "2441": { "area": "latents",   "note": "Save, decode and branch latents for Wan, LongCat, LTX-2 and MiniMax H3; pick a latent file straight from a video" },
     "2292": { "area": "filenames", "short": "the default filename", "note": "A default output filename for every model, with a template checked before the generation starts" },

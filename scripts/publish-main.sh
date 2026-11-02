@@ -66,24 +66,11 @@ fi
 echo "publish-main: regenerating README.md and docs/FORK.md"
 scripts/fork-pr-table.sh
 
-# generated_only FILE — true when every changed line of FILE sits between the generated markers.
-# A hunk outside them is a hand-written sentence, and that belongs in a commit of its own.
-generated_only() {
-  python3 -c '
-import re, subprocess, sys
-path = sys.argv[1]
-cur = open(path, encoding="utf-8").read().splitlines()
-begin = next((i for i, l in enumerate(cur) if l.startswith("<!-- BEGIN GENERATED")), -1)
-end = next((i for i, l in enumerate(cur) if l.startswith("<!-- END GENERATED")), -1)
-hunks = subprocess.run(["git", "diff", "--unified=0", "--", path],
-                       capture_output=True, text=True).stdout
-ok = begin >= 0 and end >= 0
-for s, c in re.findall(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", hunks, re.M):
-    s, c = int(s), int(c or 1)
-    ok = ok and s >= begin + 1 and s + c <= end + 1
-sys.exit(0 if ok else 1)
-' "$1"
-}
+# generated_only FILE — true when every changed line of FILE sits in a generated region: the block
+# between the BEGIN/END GENERATED markers, or the sentence of the licence record between the inline
+# SYNCED markers. A hunk outside both is a hand-written sentence, and that belongs in a commit of its
+# own, so scripts/page-hunk-check.sh answers the question and is tested by the fixture test.
+generated_only() { scripts/page-hunk-check.sh "$1"; }
 
 dirty=()
 for f in README.md docs/FORK.md; do

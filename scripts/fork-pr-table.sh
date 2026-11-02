@@ -15,7 +15,15 @@
 # The size of the fork is computed, never typed: git diff and git rev-list against origin/main, with
 # authored commits counted by --no-merges so a sync with upstream cannot inflate them, and without
 # the commits that only refresh these pages so that publishing a page is not counted as work.
-# Needs an authenticated gh, and a fetched origin/main for the "behind" counts.
+# The sentence in docs/FORK.md that names the upstream commit this fork sits on — the licence record
+# of section 4.1 — is written here too, between the inline <!-- SYNCED --> markers, because a dated
+# statement of what was modified is only true of the commit it names.
+# What a pull request shipped in is read from upstream's own version string in wgp.py at the merge
+# commit, since upstream publishes no release tags for the app: that is what makes the front page
+# claim "in a release" per feature rather than for the fork as a whole.
+# Needs an authenticated gh, and a fetched origin/main for the "behind" counts. With
+# FORK_TABLE_FIXTURES=dir the API is read from dir/api.json (a map of API path to response) and no
+# network is touched: scripts/fork-table-fixture-test.sh uses that to exercise acceptances offline.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 MODE="${1:-write}"
@@ -39,11 +47,23 @@ features_file = os.path.join(root, 'docs', 'fork-features.md')
 ledger = os.path.join(root, 'docs', 'FORK.md')
 front = os.path.join(root, 'README.md')
 mode = os.environ['FORK_TABLE_MODE']
+fixtures = os.environ.get('FORK_TABLE_FIXTURES')   # a dir holding api.json: then no network at all
 BEGIN, END = '<!-- BEGIN GENERATED', '<!-- END GENERATED -->'
+SYNC_BEGIN, SYNC_END = '<!-- SYNCED -->', '<!-- /SYNCED -->'
 GREEN = 'https://img.shields.io/badge/merged-brightgreen'
 REF = 'refs/remotes/origin/main'
 
 def gh(path):
+    """One GitHub API call, or one entry of a fixture map when FORK_TABLE_FIXTURES is set."""
+    if fixtures:
+        api = os.path.join(fixtures, 'api.json')
+        if not os.path.exists(api):
+            sys.exit('fork-pr-table: no fixture file at %s' % api)
+        data = json.load(open(api, encoding='utf-8'))
+        if path not in data:
+            sys.exit('fork-pr-table: the fixture has no answer for %s (it answers %s)'
+                     % (path, ', '.join(sorted(data))[:400]))
+        return data[path]
     r = subprocess.run(['gh', 'api', path], capture_output=True, text=True)
     if r.returncode != 0:
         first = (r.stderr or '').strip().splitlines()
@@ -54,6 +74,27 @@ def gh(path):
 def git(*args):
     r = subprocess.run(('git',) + args, capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else ''
+
+
+def upstream_version(at):
+    """Upstream's own version string in wgp.py at a commit, as '19.02'.
+
+    Upstream puts no release tag on the application — the only tags in this clone are the manager's —
+    so the version string in the tree is what an official release is named by, and it is readable at
+    any commit: the version at a merge commit is the release that merge went into.
+    """
+    m = re.search(r'^WanGP_version\s*=\s*["\']([^"\']+)["\']', git('show', '%s:wgp.py' % at), re.M)
+    return m.group(1) if m else ''
+
+
+def vkey(v):
+    return [int(x) if x.isdigit() else x for x in re.split(r'[._-]', v)]
+
+
+def versions(nums):
+    """'v18.10, v19.02', the releases the given pull requests went into, oldest first."""
+    return ', '.join('v%s' % v for v in sorted({info[n]['release'] for n in nums if info[n]['release']},
+                                               key=vkey))
 
 notes = json.load(open(notes_file, encoding='utf-8'))
 up, author = notes['upstream_repo'], notes['author']
@@ -70,11 +111,9 @@ info, supersedes = {}, {}
 for n in sorted(set(open_nums) | set(merged_nums) | set(dead_nums)):
     d = gh('repos/%s/pulls/%d' % (up, n))
     base_behind = git('rev-list', '--count', '%s..%s' % (d['base']['sha'], REF))
-    shipped = ''
+    release = ''
     if d.get('merged_at') and d.get('merge_commit_sha'):
-        tags = git('tag', '--contains', d['merge_commit_sha']).split()
-        tags = [t for t in tags if not t.startswith('backup-')]
-        shipped = ' shipped in ' + ', '.join(sorted(tags)[-2:]) if tags else ''
+        release = upstream_version(d['merge_commit_sha'])
     info[n] = {
         'title': d['title'], 'url': d['html_url'],
         'state': 'merged' if d.get('merged_at') else ('open' if d['state'] == 'open' else 'closed'),
@@ -85,7 +124,7 @@ for n in sorted(set(open_nums) | set(merged_nums) | set(dead_nums)):
         'created': d['created_at'][:10],
         'closed': (d.get('closed_at') or '')[:10],
         'merged': (d.get('merged_at') or '')[:10],
-        'shipped': shipped,
+        'release': release,
     }
     for m in re.finditer(r'supersedes and closes #(\d+)|supersedes #(\d+)', d.get('body') or '', re.I):
         supersedes[int(m.group(1) or m.group(2))] = n
@@ -104,8 +143,13 @@ def label(n):
     if e['state'] == 'open':
         return 'open · %s · %s behind' % (e['mergeable'], e['behind'])
     if e['state'] == 'merged':
-        return 'accepted %s%s' % (e['merged'], e['shipped'])
+        return 'accepted %s%s' % (e['merged'], in_release(e))
     return 'closed %s' % e['closed']
+
+
+def in_release(e):
+    """' in v19.02' when the acceptance reached an official release, the truth when it has not."""
+    return ' in v%s' % e['release'] if e['release'] else ', not in a release yet'
 
 def sup(n):
     return ' (supersedes #%d)' % supersedes[n] if n in supersedes else ''
@@ -121,6 +165,7 @@ def rank(n):
 
 today = datetime.date.today().isoformat()
 tip = git('rev-parse', '--short', REF) or '?'
+tip_version = upstream_version(REF)
 L = ['<!-- BEGIN GENERATED by scripts/fork-pr-table.sh -- do not edit between the markers;',
      '     the hand-written wording is in scripts/fork-pr-notes.json -->',
      '*current as of %s · upstream `%s` · %d open · %d merged · %d closed without merge*'
@@ -152,15 +197,19 @@ else:
 L.append('')
 
 L += ['### Closed without merge', '| PR | Why |', '|---|---|']
-for n in sorted(dead_nums, reverse=True):
-    why = closed_reason.get(str(n)) or 'not picked up'
-    for other, who in supersedes.items():
-        if other == n:
-            w = info.get(who, {})
-            when = w.get('closed') or w.get('merged') or ''
-            why = 'superseded by #%d (%s%s)' % (who, w.get('state', 'open'),
-                                                ' on ' + when if when else '')
-    L.append('| [#%d](%s) | %s — %s |' % (n, info[n]['url'], info[n]['title'], why))
+if dead_nums:
+    for n in sorted(dead_nums, reverse=True):
+        why = closed_reason.get(str(n)) or 'not picked up'
+        for other, who in supersedes.items():
+            if other == n:
+                w = info.get(who, {})
+                when = w.get('closed') or w.get('merged') or ''
+                why = 'superseded by #%d (%s%s)' % (who, w.get('state', 'open'),
+                                                    ' on ' + when if when else '')
+        L.append('| [#%d](%s) | %s — %s |' % (n, info[n]['url'], info[n]['title'], why))
+else:
+    del L[-2:]            # keep the heading, drop the empty table
+    L.append('*(none — nothing of mine has been closed without merge as of %s)*' % today)
 L.append('<!-- END GENERATED -->')
 block = '\n'.join(L)
 
@@ -211,10 +260,17 @@ def sections():
 def state_phrase(n):
     e = info[n]
     if e['state'] == 'merged':
-        return '**Merged** ![merged](%s) on %s%s' % (GREEN, e['merged'], e['shipped'])
+        return '**Merged** ![merged](%s) on %s%s' % (GREEN, e['merged'], in_release(e))
     if e['state'] == 'closed':
         return 'closed without merge on %s' % e['closed']
     return 'open, not accepted'
+
+def merged_phrase(nums):
+    """'on 2026-11-10 in v19.02' — the dates of a feature's acceptances and the releases they went into."""
+    dates = ', '.join(sorted({info[n]['merged'] for n in nums}))
+    vs = versions(nums)
+    return 'on %s in %s' % (dates, vs) if vs else 'on %s, not in a release yet' % dates
+
 
 def feature_bullets(f):
     """The bullets the front page writes for itself: the size of the change, the doc, the state."""
@@ -235,20 +291,52 @@ def feature_bullets(f):
     states = {info[n]['state'] for n in f['prs']}
     if len(states) == 1:
         st = states.pop()
-        tail = '' if st == 'merged' else (', so today this needs the fork' if st == 'open'
-                                          else ' — the feature lives in this fork')
-        out.append(wrap('- upstream: %s — %s%s'
-                        % (' and '.join(links), state_phrase(f['prs'][0]), tail)))
-    else:
-        for n, link in zip(f['prs'], links):
-            out.append(wrap('- upstream: %s — %s' % (link, state_phrase(n))))
+        if st == 'merged':
+            # every pull request of the feature is accepted: name the releases they went into once,
+            # and draw the conclusion the reader came for
+            tail = ', so this fork is not needed for it' \
+                if all(info[n]['release'] for n in f['prs']) else ''
+            out.append(wrap('- upstream: %s — **Merged** ![merged](%s) %s%s'
+                            % (' and '.join(links), GREEN, merged_phrase(f['prs']), tail)))
+        elif st == 'open':
+            out.append(wrap('- upstream: %s — %s, so today this needs the fork'
+                            % (' and '.join(links), state_phrase(f['prs'][0]))))
+        else:
+            out.append(wrap('- upstream: %s — %s — the feature lives in this fork'
+                            % (' and '.join(links), state_phrase(f['prs'][0]))))
+        return out
+    for n, link in zip(f['prs'], links):
+        out.append(wrap('- upstream: %s — %s' % (link, state_phrase(n))))
     return out
 
 sec = sections()
 files_n, adds_n, dels_n, commits_n = fork_size()
 claim = notes.get('front_claim_sentence',
-                  'Everything general enough is submitted upstream, which means the')
-synced = 'synced with upstream `%s`' % tip
+                  'Everything general enough is submitted upstream, which means')
+synced = 'synced with upstream `%s`%s' % (tip, ' (WanGP v%s)' % tip_version if tip_version else '')
+
+
+def release_claim():
+    """What the front page may say about official releases, feature by feature.
+
+    The claim used to be about the fork as a whole, which is true only until upstream accepts the
+    first pull request: from then on the accepted feature is in a release and the rest are not. So
+    the sentence is counted feature by feature, from the upstream version each acceptance went into.
+    """
+    def feats(n):
+        return '%d %s' % (n, 'feature' if n == 1 else 'features')
+    shipped = [f for f in features if f['prs'] and all(info[n]['release'] for n in f['prs'])]
+    left = len(features) - len(shipped)
+    if not shipped:
+        return 'the %s below are **not in an official WanGP release today**' % feats(len(features))
+    vs = versions([n for f in shipped for n in f['prs']])
+    if not left:
+        return '**all %s below are in an official WanGP release** (%s and later)' % (
+            feats(len(features)), vs)
+    return ('**%d of the %s below are in an official WanGP release** (%s and later), '
+            '**%s %s not**' % (len(shipped), feats(len(features)), vs, feats(left),
+                               'is' if left == 1 else 'are'))
+
 SHIELDS_OPEN = ('![upstream PRs open](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2F'
                 'api.github.com%2Fsearch%2Fissues%3Fq%3Drepo%3Adeepbeepmeep%2FWanGP%2Bis%3Apr%2B'
                 'author%3Aabencq%2Bis%3Aopen&query=%24.total_count&label=upstream%20PRs%20open&color=blue)')
@@ -263,9 +351,8 @@ F = ['<!-- BEGIN GENERATED (front page) by scripts/fork-pr-table.sh -- do not ed
      '![synced with upstream](https://img.shields.io/badge/synced_with_upstream-%s-orange)' % tip,
      SHIELDS_OPEN, SHIELDS_MERGED, '', sec['intro'], '',
      wrap('The `main` branch here is an integration branch: current upstream, plus my own work — '
-          '**%s files, +%s lines**, %s authored commits, %s. %s %d features below are '
-          '**not in an official WanGP release today**.'
-          % (num(files_n), num(adds_n), commits_n, synced, claim, len(features))), '']
+          '**%s files, +%s lines**, %s authored commits, %s. %s %s.'
+          % (num(files_n), num(adds_n), commits_n, synced, claim.rstrip('.'), release_claim())), '']
 for f in features:
     F += ['## ' + f['title'], '']
     for ln in sec.get('feature: ' + f['id'], '').splitlines():
@@ -304,6 +391,32 @@ F += ['', wrap('The table lists what is **open upstream** and what upstream has 
       '<!-- END GENERATED -->']
 front_block = '\n'.join(F)
 
+def sync_paragraph():
+    """The sentence of the licence record that names the commit this fork sits on.
+
+    Section 4.1 of the licence asks for a dated statement of the modifications, and that statement is
+    only true of the upstream commit it names. It used to be typed by hand, and it drifted: a sync that
+    moved the branch left the record naming a commit the branch had left behind. So the sentence is
+    written here, from git, between the inline markers in docs/FORK.md.
+    """
+    base = 'The branch is currently synced with upstream `%s`' % tip
+    if tip_version:
+        base += ' (WanGP v%s)' % tip_version
+    return wrap(base + ', and the tables on this page are regenerated from the GitHub API on each '
+                       'publish.')
+
+
+def rewrite_sync(path, cur):
+    """Replace the generated sentence inside the hand-written part of a file, between the inline markers."""
+    i, j = cur.find(SYNC_BEGIN), cur.find(SYNC_END)
+    if i < 0 and j < 0:
+        return cur                                   # a file without the markers is left as it is
+    if i < 0 or j < 0 or j < i:
+        sys.exit('fork-pr-table: %s has one of the two %s markers, or they are the wrong way round'
+                 % (os.path.relpath(path, root), SYNC_BEGIN))
+    return cur[:i + len(SYNC_BEGIN)] + '\n' + sync_paragraph() + '\n' + cur[j:]
+
+
 def rewrite(path, new_block):
     cur = open(path, encoding='utf-8').read()
     i, j = cur.find(BEGIN), cur.find(END)
@@ -315,7 +428,7 @@ def rewrite(path, new_block):
     tail = cur[j + len(END):].lstrip('\n')
     while tail.startswith(END):
         tail = tail[len(END):].lstrip('\n')     # the block brings its own END
-    return cur, cur[:i] + new_block + '\n\n' + tail
+    return cur, rewrite_sync(path, cur[:i] + new_block + '\n\n' + tail)
 
 def clone_reminder():
     """A fresh clone has no hook, no alias and no skill link until scripts/install-fork-hooks.sh ran.

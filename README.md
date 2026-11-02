@@ -13,8 +13,9 @@ the upstream project's, and upstream is the canonical project: see [wangp.ai](ht
 is **not affiliated with, sponsored or endorsed** by the upstream author.
 
 The `main` branch here is an integration branch: current upstream, plus my own work — **98 files,
-+14 197 lines**, 76 authored commits, synced with upstream `616e6050`. Everything general enough is
-submitted upstream, which means the 3 features below are **not in an official WanGP release today**.
++14 197 lines**, 76 authored commits, synced with upstream `616e6050` (WanGP v19.02). Everything
+general enough is submitted upstream, which means the 3 features below are **not in an official
+WanGP release today**.
 
 ## Latent saving, decoding and branching
 
