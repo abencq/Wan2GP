@@ -23,7 +23,8 @@ header, not a claim of separate ownership.
 
 - **`main`** (the default branch here) is an integration branch: current upstream, plus my work, merged
   from upstream as it moves. Its size against upstream — files, lines, authored commits — is counted
-  from git on the [front page](../README.md), never typed here.
+  from git on the [front page](../README.md), never typed here; commits that only refresh these pages
+  are not counted as work.
 - **`pr-*`** branches are the thin branches that carry my pull requests to upstream, each one cut from an
   upstream snapshot so that its diff is only that change.
 - Anything general enough is submitted upstream as a pull request, under the project CLA. When upstream

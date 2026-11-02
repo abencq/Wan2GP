@@ -13,7 +13,8 @@
 # and docs/fork-features.md (the sentences of the front page). New pull requests, closures and
 # upstream acceptances appear by themselves; a pull request with no note appears as a loud TODO row.
 # The size of the fork is computed, never typed: git diff and git rev-list against origin/main, with
-# authored commits counted by --no-merges so a sync with upstream cannot inflate the number.
+# authored commits counted by --no-merges so a sync with upstream cannot inflate them, and without
+# the commits that only refresh these pages so that publishing a page is not counted as work.
 # Needs an authenticated gh, and a fetched origin/main for the "behind" counts.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -168,7 +169,12 @@ def num(n):
     return format(int(n), ',').replace(',', ' ')
 
 def fork_size():
-    """The size of this fork against upstream, from git alone: a file count is never typed again."""
+    """The size of this fork against upstream, from git alone: a file count is never typed again.
+
+    The commits are counted without merges, so a sync with upstream cannot inflate them, and
+    without the commits that only refresh the two generated pages: publishing the page is not
+    work, and a headline number that moves every time it is published is never true of anything.
+    """
     names = [l for l in git('diff', '--name-only', '%s...HEAD' % REF).splitlines() if l.strip()]
     adds = dels = 0
     for line in git('diff', '--numstat', '%s...HEAD' % REF).splitlines():
@@ -176,7 +182,8 @@ def fork_size():
         if len(p) > 1:
             adds += int(p[0]) if p[0].isdigit() else 0
             dels += int(p[1]) if p[1].isdigit() else 0
-    commits = git('rev-list', '--count', '--author=%s' % author, '--no-merges', '%s...HEAD' % REF)
+    commits = git('rev-list', '--count', '--author=%s' % author, '--no-merges', '%s...HEAD' % REF,
+                  '--', '.', ':(exclude)README.md', ':(exclude)docs/FORK.md')
     return len(names), adds, dels, (commits or '?')
 
 def wrap(text, width=100):

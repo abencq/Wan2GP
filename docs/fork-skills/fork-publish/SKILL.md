@@ -38,7 +38,9 @@ regeneration, and the licence record in `docs/FORK.md` is a generated file.
 
 1. **Numbers are counted, never typed.** The size of the fork is `git diff --numstat` against
    `origin/main`, and the commits are `git rev-list --count --author=… --no-merges`, so a sync with
-   upstream cannot inflate them. A typed number in the front page block is a bug: the hand-typed
+   upstream cannot inflate them; the commits that only refresh the two pages are left out of that
+   count, so publishing the page is not counted as work and the headline number does not move when
+   the page is published. A typed number in the front page block is a bug: the hand-typed
    `88 files / +13 219 / 75 commits` was already false when it was published.
 2. **Generate, then commit, then push.** The generator rewrites the working tree. A refreshed page is
    an uncommitted change, so pushing first publishes the page of the previous run — that was the

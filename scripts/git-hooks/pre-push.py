@@ -52,7 +52,8 @@ for line in git('diff', '--numstat', '%s...HEAD' % REF).splitlines():
     parts = line.split('\t')
     if len(parts) > 1 and parts[0].isdigit():
         live_adds += int(parts[0])
-live_commits = git('rev-list', '--count', '--author=%s' % author, '--no-merges', '%s...HEAD' % REF)
+live_commits = git('rev-list', '--count', '--author=%s' % author, '--no-merges', '%s...HEAD' % REF,
+                   '--', '.', ':(exclude)README.md', ':(exclude)docs/FORK.md')
 live = (len(names), live_adds, int(live_commits) if live_commits.isdigit() else None)
 
 if live != (files, adds, commits):
