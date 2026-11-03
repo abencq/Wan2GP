@@ -12,8 +12,8 @@
 the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai). This repository
 is **not affiliated with, sponsored or endorsed** by the upstream author.
 
-The `main` branch here is an integration branch: current upstream, plus my own work — **100 files,
-+14 554 lines**, 77 authored commits, synced with upstream `616e6050` (WanGP v19.02). Everything
+The `main` branch here is an integration branch: current upstream, plus my own work — **101 files,
++14 618 lines**, 80 authored commits, synced with upstream `616e6050` (WanGP v19.02). Everything
 general enough is submitted upstream, which means the 3 features below are **not in an official
 WanGP release today**.
 
@@ -115,7 +115,7 @@ way keeps them.
 > their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
 > [third-party licence texts](docs/third_party_licenses/).
 
-<!-- front page: regenerated 2026-11-03 · 100 files +14554 lines · 77 authored commits · 15 open, 0 merged upstream -->
+<!-- front page: regenerated 2026-11-03 · 101 files +14618 lines · 80 authored commits · 15 open, 0 merged upstream -->
 <!-- END GENERATED -->
 
 -----
