@@ -41,12 +41,12 @@ true of the commit it names, and a hand-typed one drifts on the first sync.
 
 ## Rules
 
-1. **Numbers are counted, never typed.** The size of the fork is `git diff --numstat` against
-   `origin/main`, and the commits are `git rev-list --count --author=… --no-merges`, so a sync with
-   upstream cannot inflate them; the commits that only refresh the two pages are left out of that
-   count, so publishing the page is not counted as work and the headline number does not move when
-   the page is published. A typed number in the front page block is a bug: the hand-typed
-   `88 files / +13 219 / 75 commits` was already false when it was published.
+1. **Numbers are counted, never typed.** The size of the fork is `git diff --numstat` against the
+   merge base with `origin/main`, and the commits are `git rev-list --count --author=… --no-merges`.
+   Neither moves when upstream is merged, so a sync cannot inflate them; the commits that only refresh
+   the two pages are left out of that count, so publishing the page is not counted as work and the
+   headline number does not move when the page is published. A typed number in the front page block is
+   a bug: the hand-typed `88 files / +13 219 / 75 commits` was already false when it was published.
 2. **Look at the remote, generate, commit, read back, push.** The generator rewrites the working
    tree. A refreshed page is an uncommitted change, so pushing first publishes the page of the
    previous run — that was the `publish-main` bug. Publishing commits only hunks that sit in a
@@ -66,7 +66,9 @@ true of the commit it names, and a hand-typed one drifts on the first sync.
 6. **The pre-push hook is a reminder, not a gate.** It never touches the network and never stops a
    push. It compares the numbers on the front page with git, the dates of the two pages with today and
    with each other, the words behind the page with the page, and the upstream commit named in the
-   licence statement of `docs/FORK.md` with `origin/main`. Silence means the pages match the commits;
+   licence statement of `docs/FORK.md` with the newest upstream commit the branch carries. It also says
+   when `origin/main` has moved past that commit: that is a sync to do, not a page to fix, and the
+   licence statement must not move before the merge does. Silence means the pages match the commits;
    a warning means run `git fork-refresh`. In a clone where the installer has not run, the generator
    says so.
 7. **Keep the merge with upstream cheap.** The fork block ends before the `-----` rule that opens

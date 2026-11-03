@@ -43,10 +43,12 @@ header, not a claim of separate ownership.
   files is written by hand, and a pull request with no note shows up as a loud **TODO** row.
 - The sentence above naming the upstream commit this fork sits on is written by that same script,
   between the inline `<!-- SYNCED -->` markers, because a statement of what was modified is only true
-  of the commit it names. So is the claim on the front page of which of these features are in an
-  official release: upstream tags no release of the application, so the release an accepted pull
-  request went into is the `WanGP_version` in `wgp.py` at its merge commit, and a feature counts as
-  released only when every pull request behind it is accepted into one.
+  of the commit it names. The commit it names is the newest upstream commit this branch carries, and
+  not the tip of `origin/main`: a fetch moves the tip, a merge moves the branch, and only the second
+  is a sync. So is the claim on the front page of which of these features are in an official release:
+  upstream tags no release of the application, so the release an accepted pull request went into is
+  the `WanGP_version` in `wgp.py` at its merge commit, and a feature counts as released only when
+  every pull request behind it is accepted into one.
 - [scripts/fork-table-fixture-test.sh](../scripts/fork-table-fixture-test.sh) runs the generator in a
   scratch repository against written-down answers of the GitHub API, offline: an accepted pull request,
   a shipped release, an acceptance not yet in one, a closure. Run it after changing the generator —
@@ -62,8 +64,9 @@ header, not a claim of separate ownership.
   the `pre-push` reminder, the two aliases and the skill texts of `docs/fork-skills/` into the clone,
   and removes a hook left behind under `.git/hooks/`. The reminder is offline and never stops a push;
   it says when the front page and the commits disagree, when a page is older than a week, when the two
-  pages carry different dates, when the words behind the page changed after the page, and when the
-  upstream commit named in the licence statement is not the one this fork sits on. The generator
+  pages carry different dates, when the words behind the page changed after the page, when the upstream
+  commit named in the licence statement is not the one this fork carries, and when `origin/main` has
+  moved past that commit, which is a sync to do and not a page to fix. The generator
   repeats the reminder in a clone where the installer has not run.
 
 ## Use it

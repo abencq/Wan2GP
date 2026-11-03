@@ -96,10 +96,16 @@ else:
         warn('docs/FORK.md says "current as of %s" and the front page was generated on %s:'
              ' one of the two pages is stale' % (ldate, stamp))
 
-# the licence statement names the upstream commit this fork sits on; it is hand-written, so it drifts
+# the licence statement names the upstream commit this fork sits on: the newest upstream commit the
+# branch carries, which a fetch of origin/main does not move
+sync = git('merge-base', REF, 'HEAD')
+sync_tip = git('rev-parse', '--short', sync)
 synced = re.search(r'synced with upstream `([0-9a-f]{7,40})`', ltext)
-tip = git('rev-parse', '--short', REF)
-if synced and tip and not synced.group(1).startswith(tip):
-    warn('docs/FORK.md says this branch is synced with upstream %s, origin/main is %s:'
-         ' the licence statement is behind the last sync' % (synced.group(1), tip))
+if synced and sync_tip and not synced.group(1).startswith(sync_tip):
+    warn('docs/FORK.md says this branch is synced with upstream %s, and the newest upstream commit it'
+         ' carries is %s: the licence statement is behind the last sync' % (synced.group(1), sync_tip))
+ahead = git('rev-list', '--count', 'HEAD..%s' % REF)
+if ahead.isdigit() and int(ahead):
+    warn('origin/main is %s commit%s past the sync point %s: merge upstream, then regenerate the pages'
+         % (ahead, '' if ahead == '1' else 's', sync_tip))
 sys.exit(0)

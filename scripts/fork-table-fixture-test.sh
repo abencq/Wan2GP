@@ -143,6 +143,34 @@ scripts/page-hunk-check.sh docs/FORK.md && bad 'a hand-typed sentence passes as 
 git checkout -- docs/FORK.md
 gen
 
+# A fetch moves origin/main; the licence statement is true of the commit the branch carries, so the
+# fetch must not move it, and that a sync is due has to be said out loud. The commit upstream moved to
+# is built with plumbing, because the working tree of this fixture is dirty by design.
+blob=$(printf 'WanGP_version = "19.13"\n' | git hash-object -w --stdin)
+tree=$(git ls-tree "$U2" | awk -v b="$blob" '$4=="wgp.py"{$3=b} {printf "%s %s %s\t%s\n", $1, $2, $3, $4}' | git mktree)
+NEW=$(git commit-tree "$tree" -p "$U2" -m 'upstream moves to v19.13, ahead of this branch')
+[ "$(git show "$NEW:wgp.py" | sed -n 's/^WanGP_version = "\(.*\)".*/\1/p')" = 19.13 ] \
+  && ok 'the scratch upstream moves to v19.13' || bad 'the scratch upstream commit is wrong'
+NEWSHORT=$(git rev-parse --short "$NEW")
+git update-ref refs/remotes/origin/main "$NEW"
+gen
+want docs/FORK.md "synced with upstream \`$SHORT\` (WanGP v19.02)" 'a fetch leaves the licence statement on the commit the branch carries'
+wantnt docs/FORK.md "\`$NEWSHORT\`" 'the fetched commit is claimed by neither page'
+want README.md "synced_with_upstream-$SHORT" 'the front-page badge stays on the sync point'
+want README.md "synced with upstream \`$SHORT\` (WanGP v19.02)" 'the headline stays on the sync point'
+flat "$SCRATCH/gen.log" | grep -qF 'past the sync point' && ok 'the generator says the sync is due' \
+  || { bad 'the generator stayed quiet about the sync'; sed 's/^/  /' "$SCRATCH/gen.log"; }
+printf 'refs/heads/local %s refs/heads/main %s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD)" \
+  | scripts/git-hooks/pre-push fork url > "$SCRATCH/hook.log" 2>&1
+flat "$SCRATCH/hook.log" | grep -qF 'past the sync point' && ok 'the reminder says the sync is due' \
+  || { bad 'the reminder stayed quiet about the sync'; sed 's/^/  /' "$SCRATCH/hook.log"; }
+flat "$SCRATCH/hook.log" | grep -qF 'licence statement is behind' && bad 'the reminder blames the page for a fetch' \
+  || ok 'the page is not blamed for a fetch'
+git update-ref refs/remotes/origin/main "$U2"
+gen
+check && ok 'the pages read back at the sync point' \
+  || { bad 'the read-back at the sync point'; sed 's/^/  /' "$SCRATCH/check.log"; }
+
 python3 - "$SCRATCH/fork/docs/FORK.md" "$SHORT" <<'PY'
 import pathlib, sys
 p, sha = pathlib.Path(sys.argv[1]), sys.argv[2]
