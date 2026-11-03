@@ -94,7 +94,7 @@ worker) are the ones the upstream documentation describes, made to work on Linux
 ### In this fork, submitted upstream
 | Area | What it does | PR | State |
 |---|---|---|---|
-| Latents | Save, decode and branch latents for Wan, LongCat, LTX-2 and MiniMax H3; pick a latent file straight from a video | [#2441](https://github.com/deepbeepmeep/WanGP/pull/2441) | open · dirty · 7 behind |
+| Latents | Save, decode and branch latents for Wan, LongCat, LTX-2 and MiniMax H3; pick a latent file straight from a video | [#2441](https://github.com/deepbeepmeep/WanGP/pull/2441) | open · clean · 0 behind |
 | Output filenames | A default output filename for every model, with a template checked before the generation starts | [#2292](https://github.com/deepbeepmeep/WanGP/pull/2292) | open · clean · 23 behind |
 | Output filenames | Effective-output keywords and Python format specs for the Output Filename box | [#2290](https://github.com/deepbeepmeep/WanGP/pull/2290) | open · clean · 23 behind |
 | Linux DLSS | DLSS temporal upscaling at x3-x4, up to x6 on RTX 50, with the native Linux Frame Generation worker and installer | [#2535](https://github.com/deepbeepmeep/WanGP/pull/2535) | open · clean · 0 behind |
