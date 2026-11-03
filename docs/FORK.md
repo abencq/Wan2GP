@@ -101,7 +101,7 @@ worker) are the ones the upstream documentation describes, made to work on Linux
 | Attention installs | SpargeAttn install on Linux with CUDA 13 for RTX 30XX-50XX | [#2284](https://github.com/deepbeepmeep/WanGP/pull/2284) | open · clean · 7 behind |
 | LTX-2 | Keep LTX-2 on CUDA Graph and stop the minutes-long first steps of PyTorch compilation; the Inductor cache of a session is kept and its shapes capped. The copy in this fork carries the measured RTX 5090 timings in docs/MODELS.md; its code lines are identical | [#2551](https://github.com/deepbeepmeep/WanGP/pull/2551) | open · clean · 7 behind |
 | LTX-2 | Optional Sol-Attn sparse self-attention for native LTX-2 inference (experimental) | [#2289](https://github.com/deepbeepmeep/WanGP/pull/2289) | open · clean · 13 behind |
-| Prompt enhancer | Prompt enhancer crash with Auto Speculative Decoding on GGUF | [#2553](https://github.com/deepbeepmeep/WanGP/pull/2553) | open · dirty · 21 behind |
+| Prompt enhancer | Prompt enhancer crash with Auto Speculative Decoding on GGUF | [#2553](https://github.com/deepbeepmeep/WanGP/pull/2553) | open · clean · 0 behind |
 | Console | Time stamps at the start of the console lines WanGP prints, on the lines the terminal draws only | [#2568](https://github.com/deepbeepmeep/WanGP/pull/2568) | open · clean · 11 behind |
 | Video | Sliding Window sizes up to 999 frames for every video model | [#2288](https://github.com/deepbeepmeep/WanGP/pull/2288) | open · clean · 21 behind |
 | Video | x264 MJPEG (intra-frame-only) video codec option | [#2287](https://github.com/deepbeepmeep/WanGP/pull/2287) | open · clean · 160 behind |
