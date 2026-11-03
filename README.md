@@ -98,7 +98,6 @@ frames.
 | x264 MJPEG codec | x264 MJPEG (intra-frame-only) video codec option | [#2287](https://github.com/deepbeepmeep/WanGP/pull/2287) open |
 | Empty-audio crash | Crash when saving audio that came out empty | [#2482](https://github.com/deepbeepmeep/WanGP/pull/2482) open |
 | “Continue Video” joins | “Continue Video” audio joins when the soundtrack ends early | [#2478](https://github.com/deepbeepmeep/WanGP/pull/2478) open |
-| Silent startup | SyntaxWarning printed at startup by the About tab credits line | [#2565](https://github.com/deepbeepmeep/WanGP/pull/2565) open |
 | Live shell after Ctrl+C | Shell prompt left dead after Ctrl+C in a WanGP run | [#2526](https://github.com/deepbeepmeep/WanGP/pull/2526) open |
 
 The table lists what is **open upstream** and what upstream has **accepted**, the latter as
@@ -115,7 +114,7 @@ way keeps them.
 > their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
 > [third-party licence texts](docs/third_party_licenses/).
 
-<!-- front page: regenerated 2026-11-03 · 103 files +14647 lines · 81 authored commits · 15 open, 0 merged upstream -->
+<!-- front page: regenerated 2026-11-03 · 103 files +14647 lines · 81 authored commits · 14 open, 0 merged upstream -->
 <!-- END GENERATED -->
 
 -----

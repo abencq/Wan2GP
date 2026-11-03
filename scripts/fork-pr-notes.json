@@ -63,7 +63,8 @@
   },
   "closed_reason": {
     "2295": "superseded by #2535 (2026-10-24)",
-    "2286": "not picked up; the builder script stays in this fork"
+    "2286": "not picked up; the builder script stays in this fork",
+    "2565": "the fix is upstream's own: the 3D update of 2026-11-03 rewrote that credits line with the escape"
   },
   "fork_only": [
     {
