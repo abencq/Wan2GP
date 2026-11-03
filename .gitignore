@@ -81,3 +81,7 @@ postprocessing/seedvc/
 !.github/
 !.github/workflows/
 !.github/workflows/manager-catalog.yml
+
+# The fork's own check suites (scripts/fork-checks/all.sh), kept out of the published branch for now.
+scripts/fork-checks/
+
