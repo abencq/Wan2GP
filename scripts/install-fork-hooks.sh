@@ -5,7 +5,7 @@
 #   git config core.hooksPath scripts/git-hooks     the pre-push reminder, versioned in the tree
 #   git config alias.publish-main, alias.fork-refresh
 #   a symlink from docs/fork-skills/<name> into the editor's skills directory
-#   the fork clauses appended to the commit-message and pr-message skills
+#   the fork clauses appended to the commit-message, pr-message and changelog skills
 #
 # The hook, the aliases and the skill texts live in the repository exactly so that a fresh clone
 # keeps them; none of this is git's own state, so it has to be re-established per clone. The script
