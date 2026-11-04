@@ -12,8 +12,8 @@
 # release tag on the app, only on its manager.
 #
 # The scenarios asserted: an acceptance shipped in a release, an acceptance not yet in one and a
-# closure, everything open as it is today, every feature shipped, and the Unreleased entries of the
-# front page, which disappear when their word file is empty. Nothing is fetched, nothing is pushed,
+# closure, everything open as it is today, every feature shipped, and the What's new entries of
+# the front page, which disappear when their word file is empty. Nothing is fetched, nothing is pushed,
 # and the repository this script lives in is not written to.
 set -uo pipefail
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -58,7 +58,7 @@ mkdir -p scripts/git-hooks docs
 cp "$SRC/scripts/fork-pr-table.sh" "$SRC/scripts/fork-pr-notes.json" scripts/
 cp "$SRC/scripts/git-hooks/pre-push" "$SRC/scripts/git-hooks/pre-push.py" scripts/git-hooks/
 cp "$SRC/scripts/publish-main.sh" "$SRC/scripts/page-hunk-check.sh" "$SRC/scripts/install-fork-hooks.sh" scripts/
-cp "$SRC/docs/fork-features.md" "$SRC/docs/fork-unreleased.md" "$SRC/docs/FORK.md" docs/
+cp "$SRC/docs/fork-features.md" "$SRC/docs/fork-new.md" "$SRC/docs/FORK.md" docs/
 cp "$SRC/README.md" README.md
 git add -A && git commit -qm 'the fork: the pages and the scripts that write them'
 git checkout -q -B local
@@ -159,9 +159,10 @@ want README.md 'the 3 features below are **not in an official WanGP release toda
 wantnt README.md 'in an official WanGP release** (' 'no version is named when nothing is shipped'
 want docs/FORK.md '*(none yet' 'the merged table keeps its empty note'
 want README.md ', so today this needs the fork' 'an open feature says the fork is needed'
-want README.md '## Unreleased' 'the Unreleased entries sit on the front page'
-want README.md 'Console Guard' 'an Unreleased entry keeps its label'
-want README.md 'docs/LORAS.md#custom-lora-directories' 'the LoRA entry links into docs from the root'
+want README.md "## What's new in this fork" "the What's new section sits on the front page"
+want README.md '| Continue Video (MiniMax H3) |' 'the table lists the joins entry'
+want README.md 'Not covered' 'the latents section keeps the release-note detail'
+wantnt README.md 'LoRA paths' "the LoRA entry, upstream's own, is not on the page"
 check && ok 'the pages read back' || { bad 'the read-back'; sed 's/^/  /' "$SCRATCH/check.log"; }
 
 echo '=== 3. every feature accepted and shipped ==='
@@ -179,9 +180,9 @@ want README.md 'the 3 features below are **not in an official WanGP release toda
 check && ok 'the pages read back' || { bad 'the read-back'; sed 's/^/  /' "$SCRATCH/check.log"; }
 
 echo '=== 5. the Unreleased entries are empty ==='
-: > docs/fork-unreleased.md
-scenario '{}' '[]' 'no Unreleased entries'
-wantnt README.md '## Unreleased' 'an empty Unreleased file draws no section'
+: > docs/fork-new.md
+scenario '{}' '[]' "no What's new entries"
+wantnt README.md "## What's new in this fork" 'an empty word file draws no section'
 check && ok 'the pages read back' || { bad 'the read-back'; sed 's/^/  /' "$SCRATCH/check.log"; }
 
 cd / && rm -rf "$SCRATCH"

@@ -38,6 +38,45 @@ my_shot.mp4
 my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent.pt'); print(d.keys())"
 ```
 
+- **Save Latents:** the new config option makes Wan, LongCat, LTX2, MiniMax H3, Magi Human and Ovi
+  save the latent right before the final decode, as a `*_latent.pt` companion file next to each
+  video. Sliding-window videos save one latent per window, and LTX2, MiniMax H3, Magi Human and Ovi
+  also save their audio latent, so the file holds the video the way the model saw it. A
+  *Save Latents* choice in the *Misc.* tab of the generate form overrides the option for a single
+  generation: *On* writes the companion file, *Off* skips it, and the default *Configuration* option
+  follows the *Configuration* tab, which is also what Deepy and API jobs use. The choice is stored
+  with the generation's settings, so it keeps its value across form refreshes.
+
+- **Latent Decode:** the new process in *Media Flow* takes a video, finds its `*_latent.pt`
+  companion file, and turns the file back into video without loading the diffusion model. For LTX2,
+  MiniMax H3, Magi Human and Ovi it also rebuilds the soundtrack and puts it back into the video.
+
+- **From WanGP latent file:** a new option in *Continue Video* and *Continue Last Video* starts the
+  job from the saved latent file instead of re-encoding the part you keep. The two pickers form one
+  pair seen from either end: the latent file is the input — you pick it with the new file picker, or
+  WanGP matches it to a selected video — and WanGP checks it before any model load. Picking a file
+  selects its companion video (the video the file was saved from) into the video control when
+  exactly one matches; selecting a video with no file picked mirrors the matched file into the file
+  picker, so the detection shows up in the UI either way. The pickers' labels follow the value's
+  origin (a *Detected* variant names the picker the app itself filled), the file's label carries the
+  file's own recorded info (resolution, fps, frame count), and the console and the job log report
+  both sides of the pair. If a previously detected file is no longer on disk, the lookup falls back
+  to the selected video's own sidecar instead of failing. The companion video is used for preview
+  only: if several match you pick one, and if none is found the branch goes ahead from the frames
+  recorded in the file, so it works on a machine that no longer has the video. The *keep frames*
+  field becomes the branch point, and the part you keep comes out at the quality of the original
+  generation. You can keep branching from the same file. The frame count keeps the classic
+  continuation's meaning in a branch job: it is the new segment generated after the cut, and the
+  kept part is on top of it, so the final video is kept + this many frames; the job log prints the
+  planned result (kept, new, total) as one line before the first window generates. If the length
+  recorded in the file ever disagrees with the video, the file is saved flagged: *Latent Decode*
+  still works, but a branch asks you to re-run the original job first. When the saved file cannot be
+  used for the job, WanGP falls back to the classic continuation and the job log says so.
+
+- **Not covered:** the older LTX (0.9 / 1.0) builds its video in two stages, and its decode may add
+  noise, so a re-decode would only be an approximation of the original. Hunyuan is not covered,
+  because a branch on its image-driven models would not keep the starting image exactly.
+
 <!-- bullets -->
 <!-- end -->
 
@@ -78,6 +117,13 @@ frames.
 
 - the worker is `scripts/dlssg_worker_linux/`, 1 196 lines of C++ (a Vulkan port, MIT, notice kept), built on
   your machine because the NVIDIA runtime licence forbids redistributing it
+
+- native Linux frame generation is a normal choice again after the v18.21 merge pinned it to x2
+  behind a switch set before starting. WanGP lists the Linux worker as its own entry in the
+  *Temporal Upsampling* dropdown, next to the upstream worker and named with the multipliers it
+  supports on the current card, for instance, `DLSS Frame Generation (x2-x6 supported)`. Both
+  workers can sit in one install, an entry that cannot run says so in the same bracket, and x2 is
+  listed once when the upstream worker already offers it.
 
 <!-- bullets -->
 <!-- end -->

@@ -28,7 +28,7 @@ the repository precisely so that they survive a clone, and none of them is activ
 | file | owns |
 |---|---|
 | `docs/fork-features.md` | every sentence a reader reads about the features, plus the intro and the install text |
-| `docs/fork-unreleased.md` | the Unreleased entries of the front page: the section the changelog used to carry under Unreleased |
+| `docs/fork-new.md` | the What's new entries of the front page: the section the changelog used to carry under Unreleased |
 | `scripts/fork-pr-notes.json` | the features, the short titles, the one-line descriptions of each pull request, the closed reasons |
 | `scripts/fork-pr-table.sh` | the numbers, the states, the tables, the wrapping, the order, the claim of the headline |
 | `README.md` between the markers | the assembled front page; written by the generator, not by hand |
@@ -89,7 +89,7 @@ true of the commit it names, and a hand-typed one drifts on the first sync.
 - `scripts/fork-pr-table.sh --check` says both pages are up to date.
 - `scripts/install-fork-hooks.sh` has run in this clone: the generator says when it has not.
 - The diff of the generated block changes only numbers, dates and states — a changed *sentence* means
-  a word file changed, `docs/fork-features.md` or `docs/fork-unreleased.md`, and that is a change worth
+  a word file changed, `docs/fork-features.md` or `docs/fork-new.md`, and that is a change worth
   naming in the commit message.
 - Nothing outside the markers moved: `git diff --stat` shows `README.md` and `docs/FORK.md` only.
 - After a change to the generator, `scripts/fork-table-fixture-test.sh` passes. It is the only place
