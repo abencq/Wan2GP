@@ -22,7 +22,7 @@ is **not affiliated with, sponsored or endorsed** by the upstream author.
 
 <!-- feature: latents -->
 **What it is.** Keep the latents a generation produced, and reuse them: decode them again, or continue from
-them. Wan 2.1/2.2, LongCat, LTX-2, MiniMax H3 and Magi Human.
+them. Wan 2.1/2.2, LongCat, LTX-2, MiniMax H3, Magi Human and Ovi.
 
 **Why it is worth having.** The diffusion is the expensive part, and upstream discards its latents once the
 video is written. With the latents on disk, changing the decoder, the scale, the colour or the schedule stops

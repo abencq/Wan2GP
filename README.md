@@ -3,7 +3,7 @@
 # Wan2GP — unofficial fork of WanGP
 
 [![fork of WanGP](https://img.shields.io/badge/fork_of-WanGP-blue)](https://github.com/deepbeepmeep/WanGP)
-![synced with upstream](https://img.shields.io/badge/synced_with_upstream-9e25e36e-orange)
+![synced with upstream](https://img.shields.io/badge/synced_with_upstream-bd1ff590-orange)
 ![upstream PRs open](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Fsearch%2Fissues%3Fq%3Drepo%3Adeepbeepmeep%2FWanGP%2Bis%3Apr%2Bauthor%3Aabencq%2Bis%3Aopen&query=%24.total_count&label=upstream%20PRs%20open&color=blue)
 ![upstream PRs merged](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Fsearch%2Fissues%3Fq%3Drepo%3Adeepbeepmeep%2FWanGP%2Bis%3Apr%2Bauthor%3Aabencq%2Bis%3Amerged&query=%24.total_count&label=upstream%20PRs%20merged&color=blue)
 
@@ -12,15 +12,15 @@
 the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai). This repository
 is **not affiliated with, sponsored or endorsed** by the upstream author.
 
-The `main` branch here is an integration branch: current upstream, plus my own work — **104 files,
-+15 161 lines**, 84 authored commits, synced with upstream `9e25e36e` (WanGP v19.13). Everything
+The `main` branch here is an integration branch: current upstream, plus my own work — **105 files,
++15 588 lines**, 86 authored commits, synced with upstream `bd1ff590` (WanGP v19.14). Everything
 general enough is submitted upstream, which means the 3 features below are **not in an official
 WanGP release today**.
 
 ## Latent saving, decoding and branching
 
 **What it is.** Keep the latents a generation produced, and reuse them: decode them again, or continue from
-them. Wan 2.1/2.2, LongCat, LTX-2, MiniMax H3 and Magi Human.
+them. Wan 2.1/2.2, LongCat, LTX-2, MiniMax H3, Magi Human and Ovi.
 
 **Why it is worth having.** The diffusion is the expensive part, and upstream discards its latents once the
 video is written. With the latents on disk, changing the decoder, the scale, the colour or the schedule stops
@@ -36,7 +36,7 @@ my_shot.mp4
 my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent.pt'); print(d.keys())"
 ```
 
-- 23 files, +7 450 lines, `shared/utils/latent_io.py` alone being 2 276 of them (PR #2441)
+- 26 files, +8 433 lines, `shared/utils/latent_io.py` alone being 2 276 of them (PR #2441)
 - the settings are documented in [docs/SETTINGS.md](docs/SETTINGS.md)
 - upstream: **[PR #2441](https://github.com/deepbeepmeep/WanGP/pull/2441)** — open, not accepted, so
   today this needs the fork
@@ -115,7 +115,7 @@ way keeps them.
 > their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
 > [third-party licence texts](docs/third_party_licenses/).
 
-<!-- front page: regenerated 2026-11-04 · 104 files +15161 lines · 84 authored commits · 15 open, 0 merged upstream -->
+<!-- front page: regenerated 2026-11-04 · 105 files +15588 lines · 86 authored commits · 15 open, 0 merged upstream -->
 <!-- END GENERATED -->
 
 -----

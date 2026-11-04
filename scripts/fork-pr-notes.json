@@ -43,7 +43,7 @@
   ],
   "front_claim_sentence": "Everything general enough is submitted upstream, which means",
   "prs": {
-    "2441": { "area": "latents",   "note": "Save, decode and branch latents for Wan, LongCat, LTX-2, MiniMax H3 and Magi Human; pick a latent file straight from a video" },
+    "2441": { "area": "latents",   "note": "Save, decode and branch latents for Wan, LongCat, LTX-2, MiniMax H3, Magi Human and Ovi; pick a latent file straight from a video" },
     "2292": { "area": "filenames", "short": "the default filename", "note": "A default output filename for every model, with a template checked before the generation starts" },
     "2290": { "area": "filenames", "short": "the keywords, the format specs, the precheck", "note": "Effective-output keywords and Python format specs for the Output Filename box" },
     "2535": { "area": "dlss",      "note": "DLSS temporal upscaling at x3-x4, up to x6 on RTX 50, with the native Linux Frame Generation worker and installer" },
