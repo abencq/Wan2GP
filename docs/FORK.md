@@ -39,8 +39,9 @@ header, not a claim of separate ownership.
   against upstream, reads the state of every pull request from the GitHub API, and assembles the tables
   below and the front page of the [README](../README.md). The wording of a row is in
   [scripts/fork-pr-notes.json](../scripts/fork-pr-notes.json), the sentences of the front page in
-  [docs/fork-features.md](fork-features.md). Nothing between the `BEGIN GENERATED` markers of those two
-  files is written by hand, and a pull request with no note shows up as a loud **TODO** row.
+  [docs/fork-features.md](fork-features.md), the Unreleased entries of the front page in
+  [docs/fork-unreleased.md](fork-unreleased.md). Nothing between the `BEGIN GENERATED` markers of the
+  two pages is written by hand, and a pull request with no note shows up as a loud **TODO** row.
 - The sentence above naming the upstream commit this fork sits on is written by that same script,
   between the inline `<!-- SYNCED -->` markers, because a statement of what was modified is only true
   of the commit it names. The commit it names is the newest upstream commit this branch carries, and

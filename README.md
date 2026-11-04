@@ -1,5 +1,6 @@
 <!-- BEGIN GENERATED (front page) by scripts/fork-pr-table.sh -- do not edit between the markers;
-     the words are docs/fork-features.md, the size comes from git, the states from the API -->
+     the words are docs/fork-features.md and docs/fork-unreleased.md, the size comes from git,
+     the states from the API -->
 # Wan2GP — unofficial fork of WanGP
 
 [![fork of WanGP](https://img.shields.io/badge/fork_of-WanGP-blue)](https://github.com/deepbeepmeep/WanGP)
@@ -106,6 +107,28 @@ The table lists what is **open upstream** and what upstream has **accepted**, th
 merging is not a feature of this fork, so it is not listed here; [docs/FORK.md](docs/FORK.md) keeps
 those with their reason, as the licence record asks, and it is regenerated from the GitHub API on
 every publish.
+
+## Unreleased
+
+- **Continue Video (MiniMax H3):** continuing a video no longer stops when its soundtrack ends a little before the last frame: WanGP asks the model for no more of that closing audio than the frames it can regenerate, and keeps the source audio up to where it ends, so the joins between sliding windows keep their timing.
+
+- **Save Latents:** the new config option makes Wan, LongCat, LTX2, MiniMax H3, Magi Human and Ovi save the latent right before the final decode, as a `*_latent.pt` companion file next to each video. Sliding-window videos save one latent per window, and LTX2, MiniMax H3, Magi Human and Ovi also save their audio latent, so the file holds the video the way the model saw it. A *Save Latents* choice in the *Misc.* tab of the generate form overrides the option for a single generation: *On* writes the companion file, *Off* skips it, and the default *Configuration* option follows the *Configuration* tab, which is also what Deepy and API jobs use. The choice is stored with the generation's settings, so it keeps its value across form refreshes.
+
+- **Latent Decode:** the new process in *Media Flow* takes a video, finds its `*_latent.pt` companion file, and turns the file back into video without loading the diffusion model. For LTX2, MiniMax H3, Magi Human and Ovi it also rebuilds the soundtrack and puts it back into the video.
+
+- **From WanGP latent file:** a new option in *Continue Video* and *Continue Last Video* starts the job from the saved latent file instead of re-encoding the part you keep. The two pickers form one pair seen from either end: the latent file is the input — you pick it with the new file picker, or WanGP matches it to a selected video — and WanGP checks it before any model load. Picking a file selects its companion video (the video the file was saved from) into the video control when exactly one matches; selecting a video with no file picked mirrors the matched file into the file picker, so the detection shows up in the UI either way. The pickers' labels follow the value's origin (a *Detected* variant names the picker the app itself filled), the file's label carries the file's own recorded info (resolution, fps, frame count), and the console and the job log report both sides of the pair. If a previously detected file is no longer on disk, the lookup falls back to the selected video's own sidecar instead of failing. The companion video is used for preview only: if several match you pick one, and if none is found the branch goes ahead from the frames recorded in the file, so it works on a machine that no longer has the video. The *keep frames* field becomes the branch point, and the part you keep comes out at the quality of the original generation. You can keep branching from the same file. The frame count keeps the classic continuation's meaning in a branch job: it is the new segment generated after the cut, and the kept part is on top of it, so the final video is kept + this many frames; the job log prints the planned result (kept, new, total) as one line before the first window generates. If the length recorded in the file ever disagrees with the video, the file is saved flagged: *Latent Decode* still works, but a branch asks you to re-run the original job first. When the saved file cannot be used for the job, WanGP falls back to the classic continuation and the job log says so.
+
+- **Not covered:** the older LTX (0.9 / 1.0) builds its video in two stages, and its decode may add noise, so a re-decode would only be an approximation of the original. Hunyuan is not covered, because a branch on its image-driven models would not keep the starting image exactly.
+
+- **LoRA paths:** one optional `--lora-config FILE` JSON replaces the model-specific LoRA directory flags. Keys reuse the subfolder names inside `loras/`; default folders keep working unchanged. See the [sample JSON and setup guide](docs/LORAS.md#custom-lora-directories).
+
+- **Various fixes:** a long LTX2 generation can no longer freeze at the start of the first denoise step while kernels are being compiled. If a kernel build ever stalls, the job fails with a clear message instead of hanging the server. Saving audio that came out empty no longer crashes the save, so a job that ends up with no audio keeps its video.
+
+- **Console Log Stamps:** WanGP puts the time of day at the start of the console lines it prints, for instance, `2026-10-12 15:06:41 | Model loaded: Wan 2.2 14B`. Added a new `--log-timestamp` option to stamp a run (default: off), a new `--log-timestamp-format` option for the format of the stamp (default: the full date and clock), and a new `--log-timestamp-sep` option for the separator between the stamp and the line (default: the pipe). Denoise, download and queue bars keep redrawing on the screen as they always did, with one stamp where each bar line starts. The stamps cover only lines that carry text, and in a terminal the line printed after Ctrl+C starts on its own line. A traceback takes the stamps off for good, so a crash dump and the prompt after it read clean. *Command Line Reference* in `docs/CLI.md` covers the rest.
+
+- **Console Guard:** WanGP gives the terminal back to the shell when a run ends. The ffmpeg and TTS binaries read the keyboard on the terminal they share with the shell and turn echo, line editing and Ctrl+C off, and a run that ends on one of them leaves the shell prompt dead, with `reset` the only way back. WanGP now takes the terminal as it finds it and returns it in that state — at the end of a run, on Ctrl+C, on *Save and Quit* and on *Restart* — on Windows as well, and repairs a terminal that arrives broken. Added a new `--console-guard` option to leave the terminal alone (default: on), for a setup that owns the terminal already.
+
+- **DLSS Frame Generation on Linux (native worker):** native Linux frame generation is a normal choice again after the v18.21 merge pinned it to x2 behind a switch set before starting. WanGP lists the Linux worker as its own entry in the *Temporal Upsampling* dropdown, next to the upstream worker and named with the multipliers it supports on the current card, for instance, `DLSS Frame Generation (x2-x6 supported)`. Both workers can sit in one install, an entry that cannot run says so in the same bracket, and x2 is listed once when the upstream worker already offers it.
 
 **Install:** as upstream — `git clone https://github.com/abencq/Wan2GP.git && cd Wan2GP && python wgp.py`
 (Windows: `run.bat`). Your models, settings and outputs are laid out as upstream puts them, so switching either

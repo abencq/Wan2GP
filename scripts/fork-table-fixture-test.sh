@@ -11,9 +11,10 @@
 # WanGP_version, which is what an official release of this application is named by: upstream puts no
 # release tag on the app, only on its manager.
 #
-# Three scenarios are asserted: an acceptance shipped in a release, an acceptance not yet in one and a
-# closure, everything open as it is today, and every feature shipped. Nothing is fetched, nothing is
-# pushed, and the repository this script lives in is not written to.
+# The scenarios asserted: an acceptance shipped in a release, an acceptance not yet in one and a
+# closure, everything open as it is today, every feature shipped, and the Unreleased entries of the
+# front page, which disappear when their word file is empty. Nothing is fetched, nothing is pushed,
+# and the repository this script lives in is not written to.
 set -uo pipefail
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SCRATCH=${SCRATCH:-/tmp/fork-fixture-$$}
@@ -57,7 +58,7 @@ mkdir -p scripts/git-hooks docs
 cp "$SRC/scripts/fork-pr-table.sh" "$SRC/scripts/fork-pr-notes.json" scripts/
 cp "$SRC/scripts/git-hooks/pre-push" "$SRC/scripts/git-hooks/pre-push.py" scripts/git-hooks/
 cp "$SRC/scripts/publish-main.sh" "$SRC/scripts/page-hunk-check.sh" "$SRC/scripts/install-fork-hooks.sh" scripts/
-cp "$SRC/docs/fork-features.md" "$SRC/docs/FORK.md" docs/
+cp "$SRC/docs/fork-features.md" "$SRC/docs/fork-unreleased.md" "$SRC/docs/FORK.md" docs/
 cp "$SRC/README.md" README.md
 git add -A && git commit -qm 'the fork: the pages and the scripts that write them'
 git checkout -q -B local
@@ -158,6 +159,9 @@ want README.md 'the 3 features below are **not in an official WanGP release toda
 wantnt README.md 'in an official WanGP release** (' 'no version is named when nothing is shipped'
 want docs/FORK.md '*(none yet' 'the merged table keeps its empty note'
 want README.md ', so today this needs the fork' 'an open feature says the fork is needed'
+want README.md '## Unreleased' 'the Unreleased entries sit on the front page'
+want README.md 'Console Guard' 'an Unreleased entry keeps its label'
+want README.md 'docs/LORAS.md#custom-lora-directories' 'the LoRA entry links into docs from the root'
 check && ok 'the pages read back' || { bad 'the read-back'; sed 's/^/  /' "$SCRATCH/check.log"; }
 
 echo '=== 3. every feature accepted and shipped ==='
@@ -172,6 +176,12 @@ scenario '{}' '[2286]' 'a closure'
 want docs/FORK.md 'not picked up; the builder script stays in this fork' 'the closed row keeps the hand-written reason'
 wantnt docs/FORK.md '*(none — nothing of mine has been closed without merge' 'the closed table filled in'
 want README.md 'the 3 features below are **not in an official WanGP release today**' 'a closure moves no release claim'
+check && ok 'the pages read back' || { bad 'the read-back'; sed 's/^/  /' "$SCRATCH/check.log"; }
+
+echo '=== 5. the Unreleased entries are empty ==='
+: > docs/fork-unreleased.md
+scenario '{}' '[]' 'no Unreleased entries'
+wantnt README.md '## Unreleased' 'an empty Unreleased file draws no section'
 check && ok 'the pages read back' || { bad 'the read-back'; sed 's/^/  /' "$SCRATCH/check.log"; }
 
 cd / && rm -rf "$SCRATCH"

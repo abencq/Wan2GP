@@ -6,8 +6,9 @@
 #
 # docs/FORK.md   the ledger: the state of my pull requests, in tables, between the markers.
 # README.md      the front page: the size of the fork from git, the features of docs/fork-features.md
-#                with the live state of their pull requests, and the table of the pull requests that
-#                are open upstream. Between its own markers; the words live in docs/fork-features.md.
+#                with the live state of their pull requests, the table of the pull requests that are
+#                open upstream, and the Unreleased entries of docs/fork-unreleased.md. Between its own
+#                markers; the words live in those two files.
 #
 # The hand-written wording is scripts/fork-pr-notes.json (the rows, the features, the short titles)
 # and docs/fork-features.md (the sentences of the front page). New pull requests, closures and
@@ -44,6 +45,7 @@ root = subprocess.run(['git', 'rev-parse', '--show-toplevel'],
                       capture_output=True, text=True).stdout.strip()
 notes_file = os.path.join(root, 'scripts', 'fork-pr-notes.json')
 features_file = os.path.join(root, 'docs', 'fork-features.md')
+unreleased_file = os.path.join(root, 'docs', 'fork-unreleased.md')
 ledger = os.path.join(root, 'docs', 'FORK.md')
 front = os.path.join(root, 'README.md')
 mode = os.environ['FORK_TABLE_MODE']
@@ -320,6 +322,11 @@ def feature_bullets(f):
     return out
 
 sec = sections()
+unreleased = ''
+if os.path.exists(unreleased_file):
+    # the entries the changelog used to carry under Unreleased: the generator drops the section
+    # when the word file is empty, so the front page never keeps an empty heading
+    unreleased = open(unreleased_file, encoding='utf-8').read().strip('\n')
 files_n, adds_n, dels_n, commits_n = fork_size()
 claim = notes.get('front_claim_sentence',
                   'Everything general enough is submitted upstream, which means')
@@ -355,7 +362,8 @@ SHIELDS_MERGED = ('![upstream PRs merged](https://img.shields.io/badge/dynamic/j
                   'author%3Aabencq%2Bis%3Amerged&query=%24.total_count&label=upstream%20PRs%20merged&color=blue)')
 
 F = ['<!-- BEGIN GENERATED (front page) by scripts/fork-pr-table.sh -- do not edit between the markers;',
-     '     the words are docs/fork-features.md, the size comes from git, the states from the API -->',
+     '     the words are docs/fork-features.md and docs/fork-unreleased.md, the size comes from git,',
+     '     the states from the API -->',
      '# Wan2GP — unofficial fork of WanGP', '',
      '[![fork of WanGP](https://img.shields.io/badge/fork_of-WanGP-blue)](https://github.com/deepbeepmeep/WanGP)',
      '![synced with upstream](https://img.shields.io/badge/synced_with_upstream-%s-orange)' % tip,
@@ -394,8 +402,10 @@ F += ['', wrap('The table lists what is **open upstream** and what upstream has 
                'as **Merged** ![merged](%s). A pull request closed without merging is not a feature of this '
                'fork, so it is not listed here; [docs/FORK.md](docs/FORK.md) keeps those with their reason, '
                'as the licence record asks, and it is regenerated from the GitHub API on every publish.'
-               % GREEN), '',
-      sec['closing'], '',
+               % GREEN), '']
+if unreleased:
+    F += ['## Unreleased', '', unreleased, '']
+F += [sec['closing'], '',
       '<!-- front page: regenerated %s · %s files +%s lines · %s authored commits · %d open, %d merged upstream -->'
       % (today, files_n, adds_n, commits_n, len(open_nums), len(merged_nums)),
       '<!-- END GENERATED -->']
