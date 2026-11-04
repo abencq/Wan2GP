@@ -69,10 +69,6 @@
   },
   "fork_only": [
     {
-      "area": "ltx2",
-      "note": "Watchdog that turns a silent torch Inductor compile-sidecar stall into a reported error (shared/utils/compile_watchdog.py, started from wgp.py). Not submitted yet: it must become opt-in, its 600 s stall rule needs an activity-aware check so a slow but healthy compile is never killed, and the design note shared/inductor-quiesce-refork-deadlock.md cited by its docstring still has to be written"
-    },
-    {
       "area": "dlss",
       "note": "Local fixes around the DLSS entries: the Frame Generation multipliers offered on a multi-GPU host, and a saved Frame Generation choice that the menus used to reset (part of #2535)"
     }
