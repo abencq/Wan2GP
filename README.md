@@ -96,6 +96,7 @@ frames.
 | Console time stamps | Time stamps at the start of the console lines WanGP prints, on the lines the terminal draws only | [#2568](https://github.com/deepbeepmeep/WanGP/pull/2568) open |
 | Sliding window up to 999 frames | Sliding Window sizes up to 999 frames for every video model | [#2288](https://github.com/deepbeepmeep/WanGP/pull/2288) open |
 | x264 MJPEG codec | x264 MJPEG (intra-frame-only) video codec option | [#2287](https://github.com/deepbeepmeep/WanGP/pull/2287) open |
+| Ovi Audio Guidance | Audio Guidance setting ignored by Ovi generations, which ran at a fixed 4.0 | [#2600](https://github.com/deepbeepmeep/WanGP/pull/2600) open |
 | Empty-audio crash | Crash when saving audio that came out empty | [#2482](https://github.com/deepbeepmeep/WanGP/pull/2482) open |
 | “Continue Video” joins | “Continue Video” audio joins when the soundtrack ends early | [#2478](https://github.com/deepbeepmeep/WanGP/pull/2478) open |
 | Live shell after Ctrl+C | Shell prompt left dead after Ctrl+C in a WanGP run | [#2526](https://github.com/deepbeepmeep/WanGP/pull/2526) open |
@@ -114,7 +115,7 @@ way keeps them.
 > their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
 > [third-party licence texts](docs/third_party_licenses/).
 
-<!-- front page: regenerated 2026-11-04 · 104 files +15161 lines · 84 authored commits · 14 open, 0 merged upstream -->
+<!-- front page: regenerated 2026-11-04 · 104 files +15161 lines · 84 authored commits · 15 open, 0 merged upstream -->
 <!-- END GENERATED -->
 
 -----
