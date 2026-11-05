@@ -31,9 +31,9 @@ continuation can only start from that file. With the latent file on disk, the sa
 be re-decoded with different output choices, without running the diffusion again: the model work
 is spent once and the output can be tuned. And a shot you like stops being a one-off: the
 *Continue Video* and *Continue Last Video* menus already start a new generation from the video,
-and this WanGP fork gives them a second starting point, the exact latent the model ended on. From
+and the latent file is their second starting point, the exact latent the model ended on. From
 the video, the branch re-encodes the part you keep, and the quality steps down a little with every
-continuation built on the last; from the latent file, the kept part comes out at the quality of the
+continuation built on the last. From the latent file, the kept part comes out at the quality of the
 original generation, seed and work preserved. For LTX2, MiniMax H3, Magi Human and Ovi the file
 also holds the audio latent, so the audio is re-decoded with it too.
 
@@ -61,14 +61,14 @@ my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent
   Magi Human and Ovi it also rebuilds the soundtrack and puts it back into the video.
 
 - **From WanGP latent file:** a new option in *Continue Video* and *Continue Last Video* starts the
-  job from the saved latent file instead of re-encoding the part you keep. The two pickers form one
-  pair seen from either end: the latent file is the input, you pick it with the new file picker, or
-  this WanGP fork matches it to a selected video. This WanGP fork checks it before any model load.
+  job from the saved latent file instead of re-encoding the part you keep. The two controls form one
+  pair seen from either end: the latent file is the input, you pick it in the new file control, or
+  it matches the selected video. The check runs before any model load.
   Picking a file
   selects its companion video (the video the file was saved from) into the video control when
   exactly one matches; selecting a video with no file picked mirrors the matched file into the file
-  picker, so the detection shows up in the UI either way. The pickers' labels follow the value's
-  origin (a *Detected* variant names the picker the app itself filled), the file's label shows the
+  control, so the detection shows up in the UI either way. The controls' labels follow the value's
+  origin (a *Detected* variant names the control the app itself filled), the file's label shows the
   file's own recorded info (resolution, fps, frame count), and the console and the job log report
   both sides of the pair. If a previously detected file is no longer on disk, the lookup falls back
   to the selected video's own latent file instead of failing. The companion video is used for
@@ -82,8 +82,7 @@ my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent
   planned result (kept, new, total) as one line before the first window generates. If the length
   recorded in the file ever disagrees with the video, the file is saved flagged: *Latent Decode*
   still works, but a branch asks you to re-run the original job first. When the saved file cannot be
-  used for the job, this WanGP fork falls back to the classic continuation and the job log says
-  so.
+  used for the job, the branch falls back to the classic continuation.
 
 - **Not covered:** the older LTX (0.9 / 1.0) builds its video in two stages, and its decode may add
   noise, so a re-decode would only be an approximation of the original. Hunyuan is not covered,
@@ -108,7 +107,7 @@ through the video.
 
 - 20 keywords — `{model}`, `{date(…)}`, `{width}`, `{height}`, `{fps}`, `{scale}`, `{steps}`, `{seed}`,
   `{prompt(40)}`, `{teacache}`, `{temporal_upsampling}` … — and any of them takes a Python format spec,
-  `{fps:.0f}`, `{scale:.2f}`
+  `{fps:.0f}`, `{scale:.2f}`.
 
 - upstream: **[PR #2292](https://github.com/deepbeepmeep/WanGP/pull/2292)** (the default filename)
   and **[PR #2290](https://github.com/deepbeepmeep/WanGP/pull/2290)** (the keywords, the format
@@ -133,7 +132,7 @@ frames.
 | a two-GPU host | the worker follows noone | prints the card that makes the frames |
 
 - the worker is `scripts/dlssg_worker_linux/`, 1 196 lines of C++ (a Vulkan port, MIT, notice kept), built on
-  your machine because the NVIDIA runtime licence forbids redistributing it
+  your machine because the NVIDIA runtime licence forbids redistributing it.
 
 - native Linux frame generation is a normal choice again after the v18.21 merge pinned it to x2
   behind a switch set before starting. WanGP lists the Linux worker as its own entry in the
