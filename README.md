@@ -61,28 +61,16 @@ my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent
   Magi Human and Ovi it also rebuilds the soundtrack and puts it back into the video.
 
 - **From WanGP latent file:** a new option in *Continue Video* and *Continue Last Video* starts the
-  job from the saved latent file instead of re-encoding the part you keep. The two controls form one
-  pair seen from either end: the latent file is the input, you pick it in the new file control, or
-  it matches the selected video. The check runs before any model load.
-  Picking a file
-  selects its companion video (the video the file was saved from) into the video control when
-  exactly one matches; selecting a video with no file picked mirrors the matched file into the file
-  control, so the detection shows up in the UI either way. The controls' labels follow the value's
-  origin (a *Detected* variant names the control the app itself filled), the file's label shows the
-  file's own recorded info (resolution, fps, frame count), and the console and the job log report
-  both sides of the pair. If a previously detected file is no longer on disk, the lookup falls back
-  to the selected video's own latent file instead of failing. The companion video is used for
-  preview only: if several match you pick one, and if none is found the branch goes ahead from the
-  frames
-  recorded in the file, so it works on a machine that no longer has the video. The *keep frames*
-  field becomes the branch point, and the part you keep comes out at the quality of the original
-  generation. You can keep branching from the same file. The frame count keeps the classic
-  continuation's meaning in a branch job: it is the new segment generated after the cut, and the
-  kept part is on top of it, so the final video is kept + this many frames; the job log prints the
-  planned result (kept, new, total) as one line before the first window generates. If the length
-  recorded in the file ever disagrees with the video, the file is saved flagged: *Latent Decode*
-  still works, but a branch asks you to re-run the original job first. When the saved file cannot be
-  used for the job, the branch falls back to the classic continuation.
+  video generation from the saved latent file instead of re-encoding the part you keep. The file is
+  picked in the new file control, or it is detected from the video. The branch goes ahead from the
+  frames recorded in the file, so it works on a machine that no longer has the video. The *keep
+  frames* field becomes the branch point, and the part you keep comes out at the quality of the
+  original generation. You can keep branching from the same file. The frame count keeps the classic
+  continuation's meaning: it is the new segment generated after the cut, and the job log prints the
+  planned result (kept, new, total) before the first window generates. If the length recorded in
+  the file ever disagrees with the video, *Latent Decode* still works, but a branch asks you to
+  re-run the original generation first. When the saved file cannot be used for the generation, the
+  branch falls back to the classic continuation.
 
 - **Not covered:** the older LTX (0.9 / 1.0) builds its video in two stages, and its decode may add
   noise, so a re-decode would only be an approximation of the original. Hunyuan is not covered,
