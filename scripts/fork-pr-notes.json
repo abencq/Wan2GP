@@ -20,7 +20,7 @@
       "title": "Latent saving, decoding and branching",
       "prs": [2441],
       "image": "docs/images/fork/latent-flow.svg",
-      "alt": "The latent sidecar and the two things it makes possible",
+      "alt": "The latent file and the two things it makes possible",
       "doc": "docs/SETTINGS.md",
       "doc_note": "the settings are documented in [docs/SETTINGS.md](docs/SETTINGS.md)",
       "stat": true,

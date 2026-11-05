@@ -15,23 +15,25 @@ licence are the upstream project's, and upstream is the canonical project: see [
 This repository is **not affiliated with, sponsored or endorsed** by the upstream author.
 
 The `main` branch here is an integration branch: current upstream, plus my own work — **104 files,
-+15 524 lines**, 90 authored commits, synced with upstream `bd1ff590` (WanGP v19.14). Everything
++15 526 lines**, 91 authored commits, synced with upstream `bd1ff590` (WanGP v19.14). Everything
 general enough is submitted upstream, which means the 3 features below are **not in an official
 WanGP release today**.
 
 ## Latent saving, decoding and branching
 
-**What it is.** Keep the latents a generation produced, and reuse them: decode them again, or continue from
-them. Wan 2.1/2.2, LongCat, LTX-2, MiniMax H3, Magi Human and Ovi.
+**What it is.** Keep the latents a generation produced, saved as a companion latent file along the
+traditional video and audio output, and reuse them: decode them again, or continue from them.
+Wan 2.1/2.2, LongCat, LTX-2, MiniMax H3, Magi Human and Ovi.
 
 **Why it is worth having.** The diffusion is the expensive part, and upstream discards its latents once the
 video is written. With the latents on disk, changing the decoder, the scale, the colour or the schedule stops
 costing a full re-generation, and a shot you like stops being a one-off: you branch a new generation from the
 exact latent the model ended on, seed and work preserved.
 
-![The latent sidecar and the two things it makes possible](docs/images/fork/latent-flow.svg)
+![The latent file and the two things it makes possible](docs/images/fork/latent-flow.svg)
 
-The sidecar is a plain `torch.save` payload, so a generation you did not plan for is scriptable too:
+The latent file is a plain `torch.save` payload, so a generation you did not plan for
+is scriptable too:
 
 ```
 my_shot.mp4
@@ -39,30 +41,32 @@ my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent
 ```
 
 - **Save Latents:** the new config option makes Wan, LongCat, LTX2, MiniMax H3, Magi Human and Ovi
-  save the latent right before the final decode, as a `*_latent.pt` companion file next to each
-  video. Sliding-window videos save one latent per window, and LTX2, MiniMax H3, Magi Human and Ovi
+  save the latent right before the final decode, as a `*_latent.pt` file next to each video.
+  Sliding-window videos save one latent per window, and LTX2, MiniMax H3, Magi Human and Ovi
   also save their audio latent, so the file holds the video the way the model saw it. A
   *Save Latents* choice in the *Misc.* tab of the generate form overrides the option for a single
-  generation: *On* writes the companion file, *Off* skips it, and the default *Configuration* option
+  generation: *On* writes the latent file, *Off* skips it, and the default *Configuration* option
   follows the *Configuration* tab, which is also what Deepy and API jobs use. The choice is stored
   with the generation's settings, so it keeps its value across form refreshes.
 
-- **Latent Decode:** the new process in *Media Flow* takes a video, finds its `*_latent.pt`
-  companion file, and turns the file back into video without loading the diffusion model. For LTX2,
-  MiniMax H3, Magi Human and Ovi it also rebuilds the soundtrack and puts it back into the video.
+- **Latent Decode:** the new process in *Media Flow* takes a video, finds its `*_latent.pt` file,
+  and turns the file back into video without loading the diffusion model. For LTX2, MiniMax H3,
+  Magi Human and Ovi it also rebuilds the soundtrack and puts it back into the video.
 
 - **From WanGP latent file:** a new option in *Continue Video* and *Continue Last Video* starts the
   job from the saved latent file instead of re-encoding the part you keep. The two pickers form one
-  pair seen from either end: the latent file is the input — you pick it with the new file picker, or
-  WanGP matches it to a selected video — and WanGP checks it before any model load. Picking a file
+  pair seen from either end: the latent file is the input, you pick it with the new file picker, or
+  this WanGP fork matches it to a selected video. This WanGP fork checks it before any model load.
+  Picking a file
   selects its companion video (the video the file was saved from) into the video control when
   exactly one matches; selecting a video with no file picked mirrors the matched file into the file
   picker, so the detection shows up in the UI either way. The pickers' labels follow the value's
-  origin (a *Detected* variant names the picker the app itself filled), the file's label carries the
+  origin (a *Detected* variant names the picker the app itself filled), the file's label shows the
   file's own recorded info (resolution, fps, frame count), and the console and the job log report
   both sides of the pair. If a previously detected file is no longer on disk, the lookup falls back
-  to the selected video's own sidecar instead of failing. The companion video is used for preview
-  only: if several match you pick one, and if none is found the branch goes ahead from the frames
+  to the selected video's own latent file instead of failing. The companion video is used for
+  preview only: if several match you pick one, and if none is found the branch goes ahead from the
+  frames
   recorded in the file, so it works on a machine that no longer has the video. The *keep frames*
   field becomes the branch point, and the part you keep comes out at the quality of the original
   generation. You can keep branching from the same file. The frame count keeps the classic
@@ -71,7 +75,8 @@ my_shot_latent.pt        python -c "import torch; d = torch.load('my_shot_latent
   planned result (kept, new, total) as one line before the first window generates. If the length
   recorded in the file ever disagrees with the video, the file is saved flagged: *Latent Decode*
   still works, but a branch asks you to re-run the original job first. When the saved file cannot be
-  used for the job, WanGP falls back to the classic continuation and the job log says so.
+  used for the job, this WanGP fork falls back to the classic continuation and the job log says
+  so.
 
 - **Not covered:** the older LTX (0.9 / 1.0) builds its video in two stages, and its decode may add
   noise, so a re-decode would only be an approximation of the original. Hunyuan is not covered,
@@ -180,7 +185,7 @@ way keeps them.
 > their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
 > [third-party licence texts](docs/third_party_licenses/).
 
-<!-- front page: regenerated 2026-11-05 · 104 files +15524 lines · 90 authored commits · 15 open, 0 merged upstream -->
+<!-- front page: regenerated 2026-11-05 · 104 files +15526 lines · 91 authored commits · 15 open, 0 merged upstream -->
 <!-- END GENERATED -->
 
 -----
