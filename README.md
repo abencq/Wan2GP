@@ -9,12 +9,13 @@
 ![upstream PRs merged](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Fsearch%2Fissues%3Fq%3Drepo%3Adeepbeepmeep%2FWanGP%2Bis%3Apr%2Bauthor%3Aabencq%2Bis%3Amerged&query=%24.total_count&label=upstream%20PRs%20merged&color=blue)
 
 **This is a personal fork of [WanGP](https://github.com/deepbeepmeep/WanGP) by
-[DeepBeepMeep](https://github.com/deepbeepmeep)** — the app, its name, its docs, its models and its licence are
-the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai). This repository
-is **not affiliated with, sponsored or endorsed** by the upstream author.
+[DeepBeepMeep](https://github.com/deepbeepmeep)**. It started on 2025-04-16, when the upstream project was
+still named Wan2GP, and this repository keeps that name. The app, its name, its docs, its models and its
+licence are the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai).
+This repository is **not affiliated with, sponsored or endorsed** by the upstream author.
 
 The `main` branch here is an integration branch: current upstream, plus my own work — **104 files,
-+15 484 lines**, 90 authored commits, synced with upstream `bd1ff590` (WanGP v19.14). Everything
++15 524 lines**, 90 authored commits, synced with upstream `bd1ff590` (WanGP v19.14). Everything
 general enough is submitted upstream, which means the 3 features below are **not in an official
 WanGP release today**.
 
@@ -179,7 +180,7 @@ way keeps them.
 > their dates in **[docs/FORK.md](docs/FORK.md)**, and keeps the upstream licence, the in-tree notices and the
 > [third-party licence texts](docs/third_party_licenses/).
 
-<!-- front page: regenerated 2026-11-05 · 104 files +15484 lines · 90 authored commits · 15 open, 0 merged upstream -->
+<!-- front page: regenerated 2026-11-05 · 104 files +15524 lines · 90 authored commits · 15 open, 0 merged upstream -->
 <!-- END GENERATED -->
 
 -----

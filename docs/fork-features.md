@@ -15,9 +15,10 @@ because a typed claim of that kind goes false the day upstream accepts the first
 
 <!-- intro -->
 **This is a personal fork of [WanGP](https://github.com/deepbeepmeep/WanGP) by
-[DeepBeepMeep](https://github.com/deepbeepmeep)** — the app, its name, its docs, its models and its licence are
-the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai). This repository
-is **not affiliated with, sponsored or endorsed** by the upstream author.
+[DeepBeepMeep](https://github.com/deepbeepmeep)**. It started on 2025-04-16, when the upstream project was
+still named Wan2GP, and this repository keeps that name. The app, its name, its docs, its models and its
+licence are the upstream project's, and upstream is the canonical project: see [wangp.ai](https://wangp.ai).
+This repository is **not affiliated with, sponsored or endorsed** by the upstream author.
 <!-- end -->
 
 <!-- feature: latents -->
