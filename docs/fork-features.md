@@ -26,10 +26,17 @@ This repository is **not affiliated with, sponsored or endorsed** by the upstrea
 traditional video and audio output, and reuse them: decode them again, or continue from them.
 Wan 2.1/2.2, LongCat, LTX-2, MiniMax H3, Magi Human and Ovi.
 
-**Why it is worth having.** The diffusion is the expensive part, and upstream discards its latents once the
-video is written. With the latents on disk, changing the decoder, the scale, the colour or the schedule stops
-costing a full re-generation, and a shot you like stops being a one-off: you branch a new generation from the
-exact latent the model ended on, seed and work preserved.
+**Why it is worth having.** The diffusion is the expensive part, and WanGP discards the internal
+latent representation of the video and audio once the compressed output file is written, so a
+continuation can only start from that file. With the latent file on disk, the same generation can
+be re-decoded with different output choices, without running the diffusion again: the model work
+is spent once and the output can be tuned. And a shot you like stops being a one-off: the
+*Continue Video* and *Continue Last Video* menus already start a new generation from the video,
+and this WanGP fork gives them a second starting point, the exact latent the model ended on. From
+the video, the branch re-encodes the part you keep, and the quality steps down a little with every
+continuation built on the last; from the latent file, the kept part comes out at the quality of the
+original generation, seed and work preserved. For LTX2, MiniMax H3, Magi Human and Ovi the file
+also holds the audio latent, so the audio is re-decoded with it too.
 
 <!-- image -->
 
